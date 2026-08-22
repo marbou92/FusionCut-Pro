@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  lint:
+    name: Format check (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true # enforced from v0.2 onward
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
+            | xargs -0 clang-format --dry-run --Werror
+
+  core-tests:
+    name: Core tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DFC_BUILD_APP=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
+
+  qt-app-ubuntu:
+    name: Qt app build (Ubuntu, Qt 5.15)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 5.15 development packages
+        run: sudo apt-get update && sudo apt-get install -y qtbase5-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DFC_BUILD_APP=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
