@@ -1,0 +1,82 @@
+name: Portable Build
+
+# Produces a self-contained Windows x64 portable zip (FusionCutPro.exe +
+# all runtime DLLs in one folder - no installer, no registry writes).
+#   - Manual:  Actions tab -> Portable Build -> Run workflow
+#   - Release: pushing a tag named v* attaches the zip to a GitHub Release
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows-portable:
+    name: Windows x64 portable zip
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write # required to attach artifacts to releases (tags only)
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW64, Qt 5.15)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: true
+          update: false
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-qt5-base
+            mingw-w64-x86_64-qt5-tools
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFC_BUILD_APP=ON
+          -DFC_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run core tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Stage portable tree
+        run: |
+          cmake --install build --prefix "$PWD/dist"
+          /mingw64/bin/windeployqt.exe --release --no-translations \
+            --no-system-d3d-compiler --no-opengl-sw dist/FusionCutPro.exe
+          cp /mingw64/bin/libgcc_s_seh-1.dll \
+             /mingw64/bin/libstdc++-6.dll \
+             /mingw64/bin/libwinpthread-1.dll dist/
+          cp VERSION dist/VERSION.txt
+          echo "FusionCut Pro - portable build" > dist/PORTABLE.txt
+          ls -la dist
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $zip = "FusionCutPro-$version-win64-portable.zip"
+          Compress-Archive -Path dist/* -DestinationPath $zip -Force
+          "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Packaged $zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
