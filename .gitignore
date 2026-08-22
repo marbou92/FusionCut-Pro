@@ -1,0 +1,25 @@
+# Build directories
+build/
+dist/
+out/
+cmake-build-*/
+
+# IDE / tooling
+.vs/
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+*.user
+*.user.*
+CMakeUserPresets.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Portable packages & archives (produced by CI, never committed)
+*.zip
+*.7z
+*.tar.gz
