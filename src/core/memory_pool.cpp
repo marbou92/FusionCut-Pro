@@ -15,8 +15,7 @@ std::size_t alignUp(std::size_t value, std::size_t alignment) {
 } // namespace
 
 MemoryPool::MemoryPool(std::size_t blockSize, std::size_t blockCount)
-    : blockSize_(blockSize), stride_(alignUp(blockSize, kAlignment)),
-      blockCount_(blockCount) {
+    : blockSize_(blockSize), stride_(alignUp(blockSize, kAlignment)), blockCount_(blockCount) {
     if (blockSize_ == 0 || blockCount_ == 0) {
         blockCount_ = 0;
         blockSize_ = blockSize; // keep requested size, but pool stays inert
@@ -38,7 +37,9 @@ MemoryPool::MemoryPool(std::size_t blockSize, std::size_t blockCount)
     head_ = 0;
 }
 
-MemoryPool::~MemoryPool() { ::operator delete(base_); }
+MemoryPool::~MemoryPool() {
+    ::operator delete(base_);
+}
 
 void *MemoryPool::acquire() {
     if (head_ < 0) {

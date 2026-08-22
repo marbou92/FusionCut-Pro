@@ -12,8 +12,7 @@ namespace fc {
 // Purpose: the eviction policy core for the frame cache described in
 // Module 3 ("frame caching with LRU eviction policy"). Stays dependency
 // free so it can be unit tested in seconds on any CI runner.
-template <typename Key, typename Value>
-class LruCache {
+template <typename Key, typename Value> class LruCache {
 public:
     explicit LruCache(std::size_t capacity) : capacity_(capacity) {}
 

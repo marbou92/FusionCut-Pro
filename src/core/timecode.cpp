@@ -26,8 +26,8 @@ int displayFps(const FrameRate &rate) {
     if (rate.num % rate.den == 0) {
         return static_cast<int>(rate.num / rate.den);
     }
-    return static_cast<int>(std::lround(static_cast<double>(rate.num) /
-                                        static_cast<double>(rate.den)));
+    return static_cast<int>(
+        std::lround(static_cast<double>(rate.num) / static_cast<double>(rate.den)));
 }
 
 int toInt(const std::string &digits) {
@@ -46,8 +46,7 @@ Timecode Timecode::fromFrames(int64_t frames, FrameRate rate) {
 }
 
 Timecode Timecode::fromSeconds(double seconds, FrameRate rate) {
-    const double frames =
-        seconds * static_cast<double>(rate.num) / static_cast<double>(rate.den);
+    const double frames = seconds * static_cast<double>(rate.num) / static_cast<double>(rate.den);
     return Timecode(static_cast<int64_t>(std::llround(frames)), rate);
 }
 
@@ -78,8 +77,8 @@ int Timecode::frames() const noexcept {
 
 std::string Timecode::toString() const {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%s%02d:%02d:%02d:%02d", frames_ < 0 ? "-" : "",
-                  hours(), minutes(), seconds(), frames());
+    std::snprintf(buf, sizeof(buf), "%s%02d:%02d:%02d:%02d", frames_ < 0 ? "-" : "", hours(),
+                  minutes(), seconds(), frames());
     return std::string(buf);
 }
 
@@ -161,8 +160,7 @@ Timecode Timecode::operator-(const Timecode &other) const {
 }
 
 bool Timecode::operator==(const Timecode &other) const {
-    return frames_ == other.frames_ && rate_.num == other.rate_.num &&
-           rate_.den == other.rate_.den;
+    return frames_ == other.frames_ && rate_.num == other.rate_.num && rate_.den == other.rate_.den;
 }
 
 } // namespace fc

@@ -1,8 +1,10 @@
 #include "mainwindow.h"
 
+#include <QAction>
 #include <QActionGroup>
 #include <QApplication>
 #include <QFont>
+#include <QKeySequence>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -21,6 +23,18 @@ constexpr unsigned int kPanelBg = 0x252525;  // panel background
 constexpr unsigned int kButtonBg = 0x2E2E2E;
 constexpr unsigned int kText = 0xE8E8E8;
 constexpr unsigned int kAccent = 0x00A8FF; // FusionCut accent
+
+// Adds a menu action with an optional shortcut. Written explicitly because
+// the QWidget::addAction(text, shortcut, receiver, functor) overload only
+// exists from Qt 6.3; Qt 5.15 (our floor) has no such convenience overload.
+QAction *addMenuAction(QMenu *menu, const QString &text,
+                       const QKeySequence &shortcut = QKeySequence()) {
+    QAction *action = menu->addAction(text);
+    if (!shortcut.isEmpty()) {
+        action->setShortcut(shortcut);
+    }
+    return action;
+}
 
 } // namespace
 
@@ -53,58 +67,59 @@ void MainWindow::applyDarkTheme() {
 void MainWindow::buildMenus() {
     // ---- File ----
     QMenu *file = menuBar()->addMenu(tr("&File"));
-    file->addAction(tr("&New Project..."), QKeySequence::New, this, [] {});
-    file->addAction(tr("&Open Project..."), QKeySequence::Open, this, [] {});
-    file->addAction(tr("&Save Project"), QKeySequence::Save, this, [] {});
+    addMenuAction(file, tr("&New Project..."), QKeySequence::New);
+    addMenuAction(file, tr("&Open Project..."), QKeySequence::Open);
+    addMenuAction(file, tr("&Save Project"), QKeySequence::Save);
     file->addSeparator();
-    file->addAction(tr("&Import Media..."), QKeySequence(tr("Ctrl+I")), this, [] {});
-    file->addAction(tr("Import &Image Sequence..."), this, [] {});
+    addMenuAction(file, tr("&Import Media..."), QKeySequence(tr("Ctrl+I")));
+    addMenuAction(file, tr("Import &Image Sequence..."));
     file->addSeparator();
-    file->addAction(tr("&Export Media..."), QKeySequence(tr("Ctrl+M")), this, [] {});
+    addMenuAction(file, tr("&Export Media..."), QKeySequence(tr("Ctrl+M")));
     file->addSeparator();
-    file->addAction(tr("E&xit"), QKeySequence::Quit, qApp, &QApplication::quit);
+    QAction *quitAction = addMenuAction(file, tr("E&xit"), QKeySequence::Quit);
+    connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
 
     // ---- Edit ----
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
-    edit->addAction(tr("&Undo"), QKeySequence::Undo, this, [] {});
-    edit->addAction(tr("&Redo"), QKeySequence::Redo, this, [] {});
+    addMenuAction(edit, tr("&Undo"), QKeySequence::Undo);
+    addMenuAction(edit, tr("&Redo"), QKeySequence::Redo);
     edit->addSeparator();
-    edit->addAction(tr("Cu&t"), QKeySequence::Cut, this, [] {});
-    edit->addAction(tr("&Copy"), QKeySequence::Copy, this, [] {});
-    edit->addAction(tr("&Paste"), QKeySequence::Paste, this, [] {});
+    addMenuAction(edit, tr("Cu&t"), QKeySequence::Cut);
+    addMenuAction(edit, tr("&Copy"), QKeySequence::Copy);
+    addMenuAction(edit, tr("&Paste"), QKeySequence::Paste);
     edit->addSeparator();
-    edit->addAction(tr("&Keyboard Shortcuts..."), this, [] {});
+    addMenuAction(edit, tr("&Keyboard Shortcuts..."));
 
     // ---- Clip ----
     QMenu *clip = menuBar()->addMenu(tr("&Clip"));
-    clip->addAction(tr("Split at Playhead\tC"), this, [] {});
-    clip->addAction(tr("&Speed / Duration..."), this, [] {});
-    clip->addAction(tr("&Reverse Clip"), this, [] {});
-    clip->addAction(tr("&Freeze Frame..."), this, [] {});
+    addMenuAction(clip, tr("Split at Playhead"), QKeySequence(tr("C")));
+    addMenuAction(clip, tr("&Speed / Duration..."), QKeySequence(tr("Ctrl+R")));
+    addMenuAction(clip, tr("&Reverse Clip"));
+    addMenuAction(clip, tr("&Freeze Frame..."));
     clip->addSeparator();
-    clip->addAction(tr("Link / Unlink &Audio-Video"), this, [] {});
-    clip->addAction(tr("&Group Clips"), this, [] {});
-    clip->addAction(tr("U&ngroup Clips"), this, [] {});
+    addMenuAction(clip, tr("Link / Unlink &Audio-Video"), QKeySequence(tr("Ctrl+L")));
+    addMenuAction(clip, tr("&Group Clips"), QKeySequence(tr("Ctrl+G")));
+    addMenuAction(clip, tr("U&ngroup Clips"), QKeySequence(tr("Ctrl+Shift+G")));
 
     // ---- Sequence ----
     QMenu *sequence = menuBar()->addMenu(tr("Se&quence"));
-    sequence->addAction(tr("Add &Video Track"), this, [] {});
-    sequence->addAction(tr("Add &Audio Track"), this, [] {});
+    addMenuAction(sequence, tr("Add &Video Track"));
+    addMenuAction(sequence, tr("Add &Audio Track"));
     sequence->addSeparator();
-    sequence->addAction(tr("&Render In to Out"), this, [] {});
+    addMenuAction(sequence, tr("&Render In to Out"), QKeySequence(tr("Enter")));
 
     // ---- Effects ----
     QMenu *effects = menuBar()->addMenu(tr("&Effects"));
-    effects->addAction(tr("Apply &Default Transition\tCtrl+D"), this, [] {});
-    effects->addAction(tr("&Remove All Effects from Clip"), this, [] {});
+    addMenuAction(effects, tr("Apply &Default Transition"), QKeySequence(tr("Ctrl+D")));
+    addMenuAction(effects, tr("&Remove All Effects from Clip"));
 
     // ---- View ----
     QMenu *view = menuBar()->addMenu(tr("&View"));
-    view->addAction(tr("Zoom &In\t+"), this, [] {});
-    view->addAction(tr("Zoom &Out\t-"), this, [] {});
-    view->addAction(tr("&Fit Timeline"), this, [] {});
+    addMenuAction(view, tr("Zoom &In"), QKeySequence(tr("+")));
+    addMenuAction(view, tr("Zoom &Out"), QKeySequence(tr("-")));
+    addMenuAction(view, tr("&Fit Timeline"));
     view->addSeparator();
-    view->addAction(tr("Toggle &Safe Margins"), this, [] {});
+    addMenuAction(view, tr("Toggle &Safe Margins"));
 
     // ---- Window (dual-mode workspace switcher) ----
     QMenu *window = menuBar()->addMenu(tr("&Window"));
@@ -125,15 +140,15 @@ void MainWindow::buildMenus() {
 
     // ---- Help ----
     QMenu *help = menuBar()->addMenu(tr("&Help"));
-    help->addAction(tr("&About FusionCut Pro"), this, [this] {
-        QMessageBox::about(
-            this, tr("About FusionCut Pro"),
-            tr("<b>FusionCut Pro %1</b><br/>Pre-alpha engineering shell."
-               "<br/><br/>Core engine: timecode, LRU frame cache, memory pool."
-               "<br/>License: GPL-3.0-or-later"
-               "<br/><a href=\"https://github.com/marbou92/FusionCut-Pro\">"
-               "github.com/marbou92/FusionCut-Pro</a>")
-                .arg(FC_VERSION_STRING));
+    QAction *aboutAction = help->addAction(tr("&About FusionCut Pro"));
+    connect(aboutAction, &QAction::triggered, this, [this] {
+        QMessageBox::about(this, tr("About FusionCut Pro"),
+                           tr("<b>FusionCut Pro %1</b><br/>Pre-alpha engineering shell."
+                              "<br/><br/>Core engine: timecode, LRU frame cache, memory pool."
+                              "<br/>License: GPL-3.0-or-later"
+                              "<br/><a href=\"https://github.com/marbou92/FusionCut-Pro\">"
+                              "github.com/marbou92/FusionCut-Pro</a>")
+                               .arg(FC_VERSION_STRING));
     });
 }
 
@@ -143,14 +158,13 @@ void MainWindow::buildCentralPlaceholder() {
     QFont font = placeholder->font();
     font.setPointSize(font.pointSize() + 1);
     placeholder->setFont(font);
-    placeholder->setText(
-        tr("FusionCut Pro v%1 - Pre-Alpha Shell"
-           "\n\n"
-           "Shipped in this build: build system, CI, portable pipeline,\n"
-           "core engine primitives (timecode, LRU frame cache, memory pool)."
-           "\n\n"
-           "The dual-mode workspace (Pro Mode / Quick Mode) docks in Milestone 3.")
-            .arg(FC_VERSION_STRING));
+    placeholder->setText(tr("FusionCut Pro v%1 - Pre-Alpha Shell"
+                            "\n\n"
+                            "Shipped in this build: build system, CI, portable pipeline,\n"
+                            "core engine primitives (timecode, LRU frame cache, memory pool)."
+                            "\n\n"
+                            "The dual-mode workspace (Pro Mode / Quick Mode) docks in Milestone 3.")
+                             .arg(FC_VERSION_STRING));
     setCentralWidget(placeholder);
 }
 

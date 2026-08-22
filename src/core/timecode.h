@@ -17,9 +17,7 @@ struct FrameRate {
     bool dropFrame = false;
 
     bool isValid() const noexcept { return num > 0 && den > 0; }
-    double toDouble() const noexcept {
-        return static_cast<double>(num) / static_cast<double>(den);
-    }
+    double toDouble() const noexcept { return static_cast<double>(num) / static_cast<double>(den); }
 
     static const FrameRate Fps23976;
     static const FrameRate Fps24;

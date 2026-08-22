@@ -53,8 +53,8 @@ private:
     std::size_t stride_ = 0;    // blockSize rounded up to 64B alignment
     std::size_t blockCount_ = 0;
     std::size_t inUse_ = 0;
-    std::size_t allocBytes_ = 0; // raw bytes behind the pool
-    unsigned char *base_ = nullptr; // raw allocation (may be unaligned)
+    std::size_t allocBytes_ = 0;     // raw bytes behind the pool
+    unsigned char *base_ = nullptr;  // raw allocation (may be unaligned)
     unsigned char *first_ = nullptr; // address of the first aligned block
     int64_t head_ = -1;              // index of the first free block
     std::vector<int64_t> nextFree_;  // per-block free-list links

@@ -14,13 +14,13 @@
 static int g_failures = 0;
 static int g_checks = 0;
 
-#define CHECK(cond)                                                                        \
-    do {                                                                                   \
-        ++g_checks;                                                                        \
-        if (!(cond)) {                                                                     \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                    \
-            ++g_failures;                                                                  \
-        }                                                                                  \
+#define CHECK(cond)                                                                                \
+    do {                                                                                           \
+        ++g_checks;                                                                                \
+        if (!(cond)) {                                                                             \
+            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                            \
+            ++g_failures;                                                                          \
+        }                                                                                          \
     } while (0)
 
 static void testFrameRate() {
@@ -103,18 +103,18 @@ static void testLruCache() {
 
     LruCache<int, int> cache(2);
     cache.put(1, 10);
-    cache.put(2, 20);              // order (MRU first): [2, 1]
+    cache.put(2, 20); // order (MRU first): [2, 1]
     CHECK(cache.size() == 2);
 
-    CHECK(*cache.get(1) == 10);    // hit 1, promotes 1: [1, 2]
-    cache.put(3, 30);              // full, evicts LRU (2): [3, 1]
+    CHECK(*cache.get(1) == 10);     // hit 1, promotes 1: [1, 2]
+    cache.put(3, 30);               // full, evicts LRU (2): [3, 1]
     CHECK(cache.get(2) == nullptr); // miss 1
-    CHECK(*cache.get(3) == 30);    // hit 2: [3, 1]
-    CHECK(*cache.get(1) == 10);    // hit 3: [1, 3]
-    cache.put(4, 40);              // full, evicts LRU (3): [4, 1]
+    CHECK(*cache.get(3) == 30);     // hit 2: [3, 1]
+    CHECK(*cache.get(1) == 10);     // hit 3: [1, 3]
+    cache.put(4, 40);               // full, evicts LRU (3): [4, 1]
     CHECK(cache.get(3) == nullptr); // miss 2
-    CHECK(*cache.get(4) == 40);    // hit 4
-    CHECK(*cache.get(1) == 10);    // hit 5
+    CHECK(*cache.get(4) == 40);     // hit 4
+    CHECK(*cache.get(1) == 10);     // hit 5
 
     CHECK(cache.hits() == 5);
     CHECK(cache.misses() == 2);
