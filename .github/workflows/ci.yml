@@ -7,19 +7,22 @@ on:
 
 jobs:
   lint:
-    name: Format check (advisory)
+    name: Format check
     runs-on: ubuntu-latest
-    continue-on-error: true # enforced from v0.2 onward
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format
+      # Pinned to the exact version the project formats with, so local and
+      # CI results are byte-identical. Bump together with .clang-format.
+      - name: Install pinned clang-format
+        run: |
+          python3 -m pip install --user --break-system-packages clang-format==22.1.8
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Check formatting
         run: |
           find src tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
-            | xargs -0 clang-format --dry-run --Werror
+            | xargs -0 -r clang-format --dry-run --Werror
 
   core-tests:
     name: Core tests (${{ matrix.os }})
