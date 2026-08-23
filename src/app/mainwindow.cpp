@@ -17,6 +17,7 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QThread>

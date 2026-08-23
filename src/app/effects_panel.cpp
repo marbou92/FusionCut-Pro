@@ -2,6 +2,7 @@
 
 #include <QMap>
 #include <QTreeWidget>
+#include <QVBoxLayout>
 
 namespace {
 
