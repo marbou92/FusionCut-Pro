@@ -53,12 +53,18 @@ jobs:
       - name: Stage portable tree
         run: |
           cmake --install build --prefix "$PWD/dist"
-          # Manual Qt deployment (deterministic; MSYS2's qt5-tools does not
-          # ship windeployqt.exe): copy the plugin categories the app can
-          # load. Qt finds them because the executable directory is one of
-          # its library paths, so <appdir>/platforms/qwindows.dll resolves.
-          PLUGIN_DIR="$(qmake -query QT_INSTALL_PLUGINS)"
-          echo "Qt plugins: $PLUGIN_DIR"
+          # Manual Qt deployment. No qmake / windeployqt assumptions:
+          # locate the platform plugin itself and derive the plugin root
+          # from its physical location (qwindows.dll sits in
+          # <plugins>/platforms/). Qt resolves <appdir>/platforms/... at
+          # runtime because the executable directory is a library path.
+          QWINDOWS="$(find /mingw64 -name 'qwindows.dll' 2>/dev/null | head -n1)"
+          if [ -z "$QWINDOWS" ]; then
+            echo "::error::qwindows.dll not found under /mingw64 (Qt install incomplete?)"
+            exit 1
+          fi
+          PLUGIN_DIR="$(cd "$(dirname "$QWINDOWS")/.." && pwd)"
+          echo "Qt plugin root: $PLUGIN_DIR"
           for p in platforms styles imageformats iconengines; do
             if [ -d "$PLUGIN_DIR/$p" ]; then
               mkdir -p "dist/$p"
