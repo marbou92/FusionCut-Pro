@@ -19,6 +19,7 @@ endif()
 
 option(FC_BUILD_TESTS "Build unit tests" ON)
 option(FC_BUILD_APP "Build the Qt desktop application" OFF)
+option(FC_BUILD_MEDIA "Build the FFmpeg media I/O layer (requires pkg-config + FFmpeg dev)" ON)
 
 # Generated headers (version information).
 configure_file(cmake/version.h.in generated/fc/version.h @ONLY)
@@ -26,6 +27,9 @@ configure_file(cmake/version.h.in generated/fc/version.h @ONLY)
 enable_testing()
 
 add_subdirectory(src/core)
+if(FC_BUILD_MEDIA)
+    add_subdirectory(src/media)
+endif()
 if(FC_BUILD_APP)
     add_subdirectory(src/app)
 endif()

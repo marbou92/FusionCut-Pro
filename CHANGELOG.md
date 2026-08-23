@@ -4,6 +4,39 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-08-22
+
+Milestone 2: the FFmpeg-backed media I/O layer. The engine can now inspect,
+decode, and proxy real video files; the portable/Windows legs of CI build and
+run it on MinGW too.
+
+### Added
+- `fc_media` library (FFmpeg via pkg-config, dual API paths for FFmpeg
+  4.4 and 5.1+/7.x - `AVChannelLayout` guarded on `LIBAVUTIL_VERSION_INT`):
+  - `MediaProbe` - file inspection into a dependency-free `MediaInfo` model
+    (video/audio streams, codec names, pixel/sample formats, duration,
+    frame rate preferring `r_frame_rate` so CFR rates stay exact).
+  - `VideoDecoder` - sequential and seeking decode pump converting every
+    frame to packed RGBA; strips mp4 `AV_PKT_FLAG_DISCARD` so trailing
+    frames are never silently dropped; seek resumes at the first frame with
+    pts >= target (half-frame tolerance).
+  - `ProxyGenerator` - 360p edit-proxy transcode (H.264/x264 with CRF +
+    preset, MPEG-4 Part 2 fallback when no H.264 encoder exists; audio
+    re-encoded to 48 kHz stereo AAC via swresample + audio FIFO); never
+    upscales, keeps aspect with even dimensions; monotonic progress
+    callback with cancellation; removes partial output on failure.
+  - RAII ownership wrappers for every FFmpeg object used plus a C++-safe
+    `fcError()` (no compound literals - MSVC friendly).
+- Test layer: shared header-only harness, runtime synthetic media generator
+  (no binary test assets in the repo), and a 317-check integration suite
+  covering probe, sequential decode (color-order assertions), seek,
+  proxy geometry/audio/cancellation, and no-upscale behavior.
+- CI: new `media-tests` job (Ubuntu, FFmpeg 7.x) and
+  `media-tests-ffmpeg44` job (Ubuntu 22.04 container, FFmpeg 4.4 - the
+  legacy API generation the Windows 7 build targets); Qt job now builds
+  with the media layer enabled; portable workflow installs
+  `mingw-w64-x86_64-ffmpeg` + `pkgconf` and runs media tests on MinGW.
+
 ## [0.1.0] - 2026-08-22
 
 First public baseline: engineering foundation only (no editing features yet).
@@ -40,4 +73,5 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.2.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.2.0
 [0.1.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.1.0

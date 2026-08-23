@@ -30,8 +30,8 @@ arrive milestone by milestone.
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | M1 - Engineering foundation | Build system, CI, portable pipeline, core primitives | Shipped (v0.1.0) |
-| M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Next |
-| M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Planned |
+| M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
+| M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Next |
 | M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Planned |
 | M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Planned |
 | M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
@@ -60,10 +60,12 @@ subsequent runs reuse the MSYS2 cache.
 
 ## Building from source
 
-**Ubuntu (Qt 5.15 from apt):**
+**Ubuntu (Qt 5.15 + FFmpeg from apt):**
 
 ```bash
-sudo apt-get install -y cmake g++ qtbase5-dev
+sudo apt-get install -y cmake g++ pkg-config qtbase5-dev \
+  libavformat-dev libavcodec-dev libavutil-dev \
+  libswscale-dev libswresample-dev
 cmake -S . -B build -DFC_BUILD_APP=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
@@ -73,14 +75,21 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 pacman -S --needed mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
-  mingw-w64-x86_64-qt5-base mingw-w64-x86_64-qt5-tools
+  mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt5-base \
+  mingw-w64-x86_64-qt5-tools mingw-w64-x86_64-ffmpeg
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFC_BUILD_APP=ON
 cmake --build build --parallel
 ./build/src/app/FusionCutPro.exe
 ```
 
 The core library and tests build with no third-party dependencies
-(`-DFC_BUILD_APP=OFF`), which is what the fast CI matrix verifies on every push.
+(`-DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=OFF`), which is what the fast CI
+matrix verifies on every push. The media layer (`-DFC_BUILD_MEDIA=ON`,
+default ON) needs FFmpeg development libraries via pkg-config and compiles
+against both the FFmpeg 4.4 and 5.1+/7.x API generations - CI runs its
+integration suite on Ubuntu (FFmpeg 7.x), an Ubuntu 22.04 container
+(FFmpeg 4.4, the Windows 7 target generation), and MinGW/Windows (portable
+workflow).
 
 ## Tests
 
@@ -88,20 +97,25 @@ The core library and tests build with no third-party dependencies
 ctest --test-dir build --output-on-failure
 ```
 
-88 checks cover the shipped core: rational frame rates, timecode parse/format/math,
-LRU eviction order and statistics, and memory-pool ownership/alignment/double-free behavior.
+Two suites run: **core** (88 checks: rational frame rates, timecode
+parse/format/math, LRU eviction, memory-pool ownership/alignment) and
+**media** (317 checks: synthetic media is generated at runtime - no binary
+assets in the repo - then probed, decoded frame-accurately with color-order
+assertions, seeked, and transcoded to 360p proxies with geometry, audio,
+progress, cancellation, and no-upscale verification).
 
 ## Project layout
 
 ```
 .
-├── .github/workflows/     # ci.yml (tests) + portable-build.yml (portable zip)
+├── .github/workflows/     # ci.yml (lint + core/media/Qt matrix) + portable-build.yml
 ├── cmake/                 # CMake templates (version.h.in)
 ├── docs/                  # repository metadata; specs and wireframes land here
 ├── src/
 │   ├── app/               # Qt 5.15 desktop shell (Pro/Quick workspace host)
-│   └── core/              # dependency-free engine primitives (fc_core)
-├── tests/                 # unit tests (ctest)
+│   ├── core/              # dependency-free engine primitives (fc_core)
+│   └── media/             # FFmpeg I/O layer (fc_media): probe, decode, proxy
+├── tests/                 # core + media suites, shared harness, synthetic media generator
 ├── CMakeLists.txt
 ├── LICENSE                # GPL-3.0
 └── VERSION                # single source of truth for the version number

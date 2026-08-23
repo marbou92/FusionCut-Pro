@@ -7,21 +7,11 @@
 #include <cstdio>
 #include <string>
 
+#include "test_harness.h"
+
 #include "lru_cache.h"
 #include "memory_pool.h"
 #include "timecode.h"
-
-static int g_failures = 0;
-static int g_checks = 0;
-
-#define CHECK(cond)                                                                                \
-    do {                                                                                           \
-        ++g_checks;                                                                                \
-        if (!(cond)) {                                                                             \
-            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                            \
-            ++g_failures;                                                                          \
-        }                                                                                          \
-    } while (0)
 
 static void testFrameRate() {
     using namespace fc;
@@ -196,10 +186,5 @@ int main() {
     testLruCache();
     testMemoryPool();
 
-    if (g_failures == 0) {
-        std::printf("ALL PASSED: %d checks\n", g_checks);
-        return 0;
-    }
-    std::printf("FAILED: %d of %d checks\n", g_failures, g_checks);
-    return 1;
+    return testExitCode("core");
 }

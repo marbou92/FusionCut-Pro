@@ -26,7 +26,7 @@ video-editor video-editing cpp cpp17 qt qt5 ffmpeg windows cross-platform lightw
 | --- | --- | --- |
 | Actions -> General | Allow all actions | Required for `msys2/setup-msys2` and `softprops/action-gh-release` |
 | Actions -> Artifact retention | 14 days (or default) | Portable zips also live forever in Releases once tagged |
-| Branches -> Add branch protection rule for `main` | Require status checks: `Core tests (ubuntu-latest)`, `Core tests (windows-latest)` | Keeps the engine green on both compilers before merge |
+| Branches -> Add branch protection rule for `main` | Require status checks: `Format check`, `Core tests (ubuntu-latest)`, `Core tests (windows-latest)`, `Media tests (ubuntu, FFmpeg 7.x)`, `Media tests (jammy container, FFmpeg 4.4)` | Keeps engine + media layer green on all compilers/API generations before merge |
 | Tags -> v* protection rule (optional) | Restrict to maintainers | Release tags drive the portable Release pipeline |
 | Default branch | `main` | Already set |
 
