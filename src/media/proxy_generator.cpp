@@ -392,8 +392,13 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                                                0) < 0) {
             return true; // skip on allocation failure
         }
+        // The const_cast is required for FFmpeg <= 6.1, where swr_convert
+        // takes `const uint8_t **` (C++ forbids the implicit T** conversion).
+        // FFmpeg 7.x takes `const uint8_t *const *`, which also accepts the
+        // result - so this compiles against every supported API generation.
         const int converted = swr_convert(resampler.get(), buffer, outCapacity,
-                                          srcFrame->extended_data, srcFrame->nb_samples);
+                                          const_cast<const uint8_t **>(srcFrame->extended_data),
+                                          srcFrame->nb_samples);
         if (converted > 0) {
             if (av_audio_fifo_space(audioFifo.get()) < converted) {
                 if (av_audio_fifo_realloc(audioFifo.get(),
