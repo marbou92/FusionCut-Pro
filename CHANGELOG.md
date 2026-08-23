@@ -4,6 +4,45 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-23
+
+Milestone 3: the dual-mode UI shell. The app now shows **real decoded
+frames** - import media, scrub, play, and generate 360p proxies, all
+through the M2 engine on a background thread.
+
+### Added
+- **Pro Mode workspace** (Module 2.1): dockable panels with saveable
+  layout (QSettings) - Project panel (import/remove/metadata/context menu,
+  thumbnails captured from the first decoded frame), tabbed Effects
+  browser (Module 7 seed catalog, drag-enabled for M4), bottom Timeline |
+  Audio Mixer tabs, right Effect Controls parameter tree (Motion +
+  Lumetri seeds), and a Source | Program monitor splitter.
+- **Quick Mode page** (Module 2.2): CapCut-style simplified layout with
+  large preview, prominent Import, aspect selector (16:9 / 9:16 / 1:1 /
+  4:3), and the main + quick-actions toolbars (placeholders wired to M4-M7).
+  One menu toggle switches modes; both share the same playback engine.
+- **Playback engine**: `DecodeWorker` on a background QThread owning one
+  `VideoDecoder` (sequential reads while playing, keyframe seek when
+  scrubbing), `PreviewCanvas` custom-painted monitor with letterboxing
+  and adaptive aspect, `TransportBar` with `fc::Timecode` readout, frame
+  stepping, scrub slider, and Space/Left/Right shortcuts; timeline
+  playhead is click/drag-scrubbable with Ctrl+wheel zoom.
+- **Proxy workflow in-app**: right-click a clip (or Clip menu) generates
+  a 360p proxy with live progress in the status bar; playback
+  automatically prefers the proxy once generated.
+- **Timeline shell**: fully custom-painted - `fc::Timecode` ruler, three
+  placeholder tracks (V2/V1/A1) with functional lock/mute/solo header
+  cells and colorblind-friendly accents (Module 10.4).
+- Portable packaging: iterative `ldd` DLL sweep replaces the manual
+  three-DLL copy, so the zip now includes Qt + FFmpeg + MinGW runtime
+  dependency chains automatically.
+- High-DPI attributes enabled in `main.cpp` (Module 10.4 UI scaling).
+
+### Changed
+- App now links `fc_core` + `fc_media`; building the app requires
+  `FC_BUILD_MEDIA=ON` (guarded with a clear CMake error).
+- About dialog reports the linked FFmpeg runtime version.
+
 ## [0.2.0] - 2026-08-22
 
 Milestone 2: the FFmpeg-backed media I/O layer. The engine can now inspect,
@@ -73,5 +112,6 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.3.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.3.0
 [0.2.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.2.0
 [0.1.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.1.0

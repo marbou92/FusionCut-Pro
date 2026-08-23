@@ -21,6 +21,11 @@ option(FC_BUILD_TESTS "Build unit tests" ON)
 option(FC_BUILD_APP "Build the Qt desktop application" OFF)
 option(FC_BUILD_MEDIA "Build the FFmpeg media I/O layer (requires pkg-config + FFmpeg dev)" ON)
 
+if(FC_BUILD_APP AND NOT FC_BUILD_MEDIA)
+    message(FATAL_ERROR "FC_BUILD_APP=ON requires FC_BUILD_MEDIA=ON (the shell "
+                        "links fc_media for decode/proxy playback).")
+endif()
+
 if(FC_BUILD_MEDIA)
     # Discovered at the top level so the PkgConfig::FFMPEG IMPORTED target is
     # visible in every subdirectory (imported targets are directory-scoped:
