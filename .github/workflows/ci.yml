@@ -34,8 +34,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure (core only, no FFmpeg needed)
+        run: cmake -S . -B build -DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
+
+  media-tests:
+    name: Media tests (ubuntu, FFmpeg 7.x)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libavformat-dev libavcodec-dev libavutil-dev \
+            libswscale-dev libswresample-dev
+
       - name: Configure
-        run: cmake -S . -B build -DFC_BUILD_APP=OFF
+        run: cmake -S . -B build -DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
+
+  media-tests-ffmpeg44:
+    # Validates the FFmpeg 4.4 code path - the API generation the Windows 7
+    # build will ship with (avutil 56: pre-AVChannelLayout API).
+    name: Media tests (jammy container, FFmpeg 4.4)
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Install toolchain + FFmpeg 4.4 dev
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            g++ cmake make pkg-config git ca-certificates \
+            libavformat-dev libavcodec-dev libavutil-dev \
+            libswscale-dev libswresample-dev
+
+      - name: Checkout (git >= 2.18 for actions/checkout)
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -49,11 +98,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Qt 5.15 development packages
-        run: sudo apt-get update && sudo apt-get install -y qtbase5-dev
+      - name: Install Qt 5.15 + FFmpeg development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qtbase5-dev pkg-config libavformat-dev libavcodec-dev \
+            libavutil-dev libswscale-dev libswresample-dev
 
       - name: Configure
-        run: cmake -S . -B build -DFC_BUILD_APP=ON
+        run: cmake -S . -B build -DFC_BUILD_APP=ON -DFC_BUILD_MEDIA=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
