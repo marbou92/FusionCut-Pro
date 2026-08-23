@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MSYS2 (MinGW64, Qt 5.15)
+      - name: Set up MSYS2 (MinGW64, Qt 5.15, FFmpeg)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -31,8 +31,10 @@ jobs:
           install: >-
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-qt5-base
             mingw-w64-x86_64-qt5-tools
+            mingw-w64-x86_64-ffmpeg
 
       - name: Configure
         run: >-
