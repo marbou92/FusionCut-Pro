@@ -44,7 +44,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure -C Release
 
   media-tests:
-    name: Media tests (ubuntu, FFmpeg 7.x)
+    name: Media tests (ubuntu, FFmpeg 6.1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
