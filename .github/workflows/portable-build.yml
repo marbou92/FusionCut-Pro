@@ -53,12 +53,23 @@ jobs:
       - name: Stage portable tree
         run: |
           cmake --install build --prefix "$PWD/dist"
-          /mingw64/bin/windeployqt.exe --release --no-translations \
-            --no-system-d3d-compiler --no-opengl-sw dist/FusionCutPro.exe
-          # Iterative ldd sweep: copies every MinGW64 DLL the app and its
-          # dependencies need (Qt, FFmpeg, MinGW runtime, and their deps).
+          # Manual Qt deployment (deterministic; MSYS2's qt5-tools does not
+          # ship windeployqt.exe): copy the plugin categories the app can
+          # load. Qt finds them because the executable directory is one of
+          # its library paths, so <appdir>/platforms/qwindows.dll resolves.
+          PLUGIN_DIR="$(qmake -query QT_INSTALL_PLUGINS)"
+          echo "Qt plugins: $PLUGIN_DIR"
+          for p in platforms styles imageformats iconengines; do
+            if [ -d "$PLUGIN_DIR/$p" ]; then
+              mkdir -p "dist/$p"
+              cp -f "$PLUGIN_DIR/$p"/*.dll "dist/$p/" || true
+            fi
+          done
+          # Iterative ldd sweep: copy every MinGW64 DLL needed by the app,
+          # its plugins, and each other (Qt, FFmpeg, MinGW runtimes).
           for pass in 1 2 3; do
-            for bin in dist/*.exe dist/*.dll; do
+            for bin in dist/*.exe dist/*.dll dist/*/*.dll; do
+              [ -f "$bin" ] || continue
               ldd "$bin" 2>/dev/null | grep '/mingw64/' | awk '{print $3}' | \
                 while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done
             done
