@@ -54,12 +54,18 @@ jobs:
           cmake --install build --prefix "$PWD/dist"
           /mingw64/bin/windeployqt.exe --release --no-translations \
             --no-system-d3d-compiler --no-opengl-sw dist/FusionCutPro.exe
-          cp /mingw64/bin/libgcc_s_seh-1.dll \
-             /mingw64/bin/libstdc++-6.dll \
-             /mingw64/bin/libwinpthread-1.dll dist/
+          # Iterative ldd sweep: copies every MinGW64 DLL the app and its
+          # dependencies need (Qt, FFmpeg, MinGW runtime, and their deps).
+          for pass in 1 2 3; do
+            for bin in dist/*.exe dist/*.dll; do
+              ldd "$bin" 2>/dev/null | grep '/mingw64/' | awk '{print $3}' | \
+                while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done
+            done
+          done
           cp VERSION dist/VERSION.txt
           echo "FusionCut Pro - portable build" > dist/PORTABLE.txt
-          ls -la dist
+          ls dist | wc -l
+          ls dist
 
       - name: Package portable zip
         shell: pwsh
