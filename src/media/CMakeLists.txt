@@ -1,11 +1,6 @@
 # fc_media: FFmpeg-backed media I/O layer (probe / decode / proxy).
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat
-    libavcodec
-    libavutil
-    libswscale
-    libswresample)
+# PkgConfig::FFMPEG is discovered once in the top-level CMakeLists (see the
+# directory-scoping note there) and is visible here.
 
 add_library(fc_media STATIC
     ffmpeg_wrappers.cpp

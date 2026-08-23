@@ -21,6 +21,19 @@ option(FC_BUILD_TESTS "Build unit tests" ON)
 option(FC_BUILD_APP "Build the Qt desktop application" OFF)
 option(FC_BUILD_MEDIA "Build the FFmpeg media I/O layer (requires pkg-config + FFmpeg dev)" ON)
 
+if(FC_BUILD_MEDIA)
+    # Discovered at the top level so the PkgConfig::FFMPEG IMPORTED target is
+    # visible in every subdirectory (imported targets are directory-scoped:
+    # creating it inside src/media would hide it from tests/).
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+        libavformat
+        libavcodec
+        libavutil
+        libswscale
+        libswresample)
+endif()
+
 # Generated headers (version information).
 configure_file(cmake/version.h.in generated/fc/version.h @ONLY)
 
