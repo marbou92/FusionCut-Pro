@@ -58,7 +58,11 @@ jobs:
           # from its physical location (qwindows.dll sits in
           # <plugins>/platforms/). Qt resolves <appdir>/platforms/... at
           # runtime because the executable directory is a library path.
-          QWINDOWS="$(find /mingw64 -name 'qwindows.dll' 2>/dev/null | head -n1)"
+          # NOTE: this shell runs under bash -leo pipefail (msys2.CMD), so
+          # every pipeline whose grep/find can "legitimately" find nothing
+          # is guarded with || true, and find uses -print -quit instead of
+          # a head pipe.
+          QWINDOWS="$(find /mingw64 -name 'qwindows.dll' -print -quit 2>/dev/null)"
           if [ -z "$QWINDOWS" ]; then
             echo "::error::qwindows.dll not found under /mingw64 (Qt install incomplete?)"
             exit 1
@@ -73,11 +77,15 @@ jobs:
           done
           # Iterative ldd sweep: copy every MinGW64 DLL needed by the app,
           # its plugins, and each other (Qt, FFmpeg, MinGW runtimes).
+          # The trailing || true is required: plugins that link only
+          # Windows system DLLs make grep exit 1, which under pipefail
+          # would otherwise abort the whole job.
           for pass in 1 2 3; do
             for bin in dist/*.exe dist/*.dll dist/*/*.dll; do
               [ -f "$bin" ] || continue
               ldd "$bin" 2>/dev/null | grep '/mingw64/' | awk '{print $3}' | \
-                while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done
+                while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done \
+                || true
             done
           done
           cp VERSION dist/VERSION.txt
