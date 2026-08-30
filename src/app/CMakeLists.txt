@@ -6,6 +6,8 @@ add_executable(FusionCutPro WIN32
     main.cpp
     mainwindow.cpp
     mainwindow.h
+    crash_handler.cpp
+    crash_handler.h
     decode_worker.cpp
     decode_worker.h
     preview_canvas.cpp
@@ -33,6 +35,14 @@ target_link_libraries(FusionCutPro PRIVATE
     fc_core
     fc_media
     Qt5::Widgets)
+
+# Crash handler: MessageBoxA + Toolhelp32 (module snapshot) live in
+# user32 / kernel32 respectively. kernel32 is auto-linked on Windows;
+# user32 is NOT for a WIN32 exe under MinGW/MSVC unless we ask. Guarded
+# so the Linux Qt compile path (the qt-app-ubuntu CI leg) is unaffected.
+if(WIN32)
+    target_link_libraries(FusionCutPro PRIVATE user32)
+endif()
 
 # Portable layout: the executable and its dependencies all land in one
 # flat directory; CI runs windeployqt plus an ldd sweep for FFmpeg/MinGW

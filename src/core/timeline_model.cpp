@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef> // ptrdiff_t (std::vector::insert iterator offset; jammy's older libstdc++ does not pull this in transitively)
 
 namespace fc {
 
@@ -28,10 +29,18 @@ int TimelineModel::addTrack(const std::string &name, bool isAudio) {
     return track.index;
 }
 
-Track *TimelineModel::trackAt(int index) {
+const Track *TimelineModel::trackAt(int index) const {
     return (index >= 0 && index < static_cast<int>(tracks_.size()))
                ? &tracks_[static_cast<size_t>(index)]
                : nullptr;
+}
+
+Track *TimelineModel::trackAt(int index) {
+    // Delegate to the const overload (Scott-Meyers avoid-duplication):
+    // call the const version, then cast away const on the result. Safe
+    // because the non-const overload is only callable on a non-const
+    // `this`, so the underlying object is genuinely mutable here.
+    return const_cast<Track *>(static_cast<const TimelineModel &>(*this).trackAt(index));
 }
 
 bool TimelineModel::setTrackState(int index, bool locked, bool muted, bool solo) {

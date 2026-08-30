@@ -46,7 +46,12 @@ public:
     int addTrack(const std::string &name, bool isAudio);
     int trackCount() const { return static_cast<int>(tracks_.size()); }
     const std::vector<Track> &tracks() const { return tracks_; }
+    // Mutable lookup (model is non-const; e.g. setTrackState path).
     Track *trackAt(int index);
+    // Const lookup - used by const views (TimelinePanel renders against a
+    // const TimelineModel*). Required for const-correctness: callers on a
+    // const model cannot bind to the non-const overload above.
+    const Track *trackAt(int index) const;
     bool setTrackState(int index, bool locked, bool muted, bool solo);
 
     const std::vector<Clip> &clips() const { return clips_; }

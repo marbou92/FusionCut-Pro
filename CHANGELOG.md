@@ -4,6 +4,60 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-08-24
+
+Hotfix: two CI compile regressions introduced by the v0.4.0 editing-core
+delta, plus a real feature - in-process crash diagnostics that replaces
+the `run-console.bat` console launcher with structured crash-log output.
+
+### Added
+- **In-process crash handler** (`src/app/crash_handler.{h,cpp}`): on any
+  unhandled Windows VEH exception (access violation, in-page error,
+  stack overflow, illegal instruction, heap corruption, ...), C++
+  uncaught exception (`std::set_terminate`), CRT invalid-parameter call,
+  pure-virtual call, OOM (`std::set_new_handler`), or POSIX signal
+  (SIGSEGV/SIGABRT/SIGFPE/SIGILL/SIGTERM), writes
+  `crash-logs/FusionCutPro-crash-<timestamp>.log` next to the executable
+  with version, timestamp, exception kind/code/address, a best-effort
+  stack backtrace (raw addresses for offline symbolication), and on
+  Windows a Toolhelp32 snapshot of every loaded module with its base
+  address, size, and on-disk path. The handler then re-raises the
+  original exception so the OS default disposition still runs - it is a
+  reporter, not an exception swallower. On Windows a modal MessageBox
+  names the log file path so a double-click launch sees something
+  actionable instead of the bare `0xc0000005` dialog.
+- `--crash-test` CLI hook in `main.cpp` writes a synthetic report and
+  exits without starting the UI, for end-to-end verification on a clean
+  Windows machine.
+- Pre-created `crash-logs/` directory in the portable zip (the handler
+  never creates directories itself - it runs in exception context and
+  must not touch filesystem structure beyond opening a single file).
+- `MessageBoxA` link dependency on Windows via `target_link_libraries(
+  FusionCutPro PRIVATE user32)` (guarded by `if(WIN32)` so the Linux Qt
+  compile path is unaffected).
+
+### Fixed (CI regressions introduced by v0.4.0)
+- `src/core/timeline_model.cpp` now `#include <cstddef>` for `ptrdiff_t`
+  used as `std::vector::insert` iterator offset. Ubuntu 24.04's libstdc++
+  pulled this in transitively through `<algorithm>`/`<cmath>`, but
+  Ubuntu 22.04 (jammy container, FFmpeg 4.4 CI leg) did not, breaking
+  the media-tests-ffmpeg44 compile at line 104.
+- `fc::TimelineModel::trackAt(int)` gains a `const` overload
+  (`const Track* trackAt(int) const;`). `TimelinePanel` renders against
+  a `const fc::TimelineModel*` (a non-mutating view); the previously
+  lone overload `Track* trackAt(int)` was non-const, so the Qt 5.15 CI
+  leg rejected it as a `const` qualifier discard at
+  `drawHeaderColumn`/`drawClips`. The non-const overload now delegates
+  to the const one via `const_cast` (Scott-Meyers avoid-duplication),
+  so the path is provably identical.
+
+### Changed (packaging)
+- `dist/run-console.bat` removed - the in-process crash handler writes
+  a structured log AND shows a MessageBox naming the log path, which is
+  strictly more diagnostic than the previous console wrapper. The
+  `PORTABLE.txt` install note now documents the `crash-logs/` directory
+  and the `--crash-test` smoke hook.
+
 ## [0.4.0] - 2026-08-23
 
 Milestone 4, phase 1: the editing core. The timeline is no longer a static
@@ -147,6 +201,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.1]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.1
 [0.4.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.0
 [0.3.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.3.0
 [0.2.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.2.0
