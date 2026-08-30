@@ -110,7 +110,7 @@ jobs:
           done
           cp VERSION dist/VERSION.txt
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.1)' '' \
+            'FusionCut Pro - portable build (v0.4.2)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'If the application crashes at startup or at any point, a' \
             'detailed crash log is written to crash-logs/ next to the' \
