@@ -69,19 +69,39 @@ jobs:
           fi
           PLUGIN_DIR="$(cd "$(dirname "$QWINDOWS")/.." && pwd)"
           echo "Qt plugin root: $PLUGIN_DIR"
+          # Copy each plugin category both into dist/<cat>/ (the layout Qt
+          # searches via the app directory) AND into dist/plugins/<cat>/
+          # (the canonical layout qt.conf below points at). Redundant on
+          # purpose - resolves the "platform plugin failed to initialize"
+          # crash on machines without MSYS2's absolute plugin path.
+          mkdir -p dist/plugins
           for p in platforms styles imageformats iconengines; do
             if [ -d "$PLUGIN_DIR/$p" ]; then
-              mkdir -p "dist/$p"
+              mkdir -p "dist/$p" "dist/plugins/$p"
               cp -f "$PLUGIN_DIR/$p"/*.dll "dist/$p/" || true
+              cp -f "$PLUGIN_DIR/$p"/*.dll "dist/plugins/$p/" || true
             fi
           done
+          # Defensive: plugins sometimes fail to resolve their own Qt DLL
+          # deps when the loader searches the plugin dir first; mirror the
+          # core Qt DLLs next to each plugin category.
+          for q in Qt5Core Qt5Gui Qt5Widgets Qt5OpenGL; do
+            [ -f "/mingw64/bin/$q.dll" ] || continue
+            for d in dist/platforms dist/plugins/platforms dist/imageformats \
+                     dist/plugins/imageformats dist/styles dist/plugins/styles; do
+              [ -d "$d" ] && cp -n "/mingw64/bin/$q.dll" "$d/" 2>/dev/null || true
+            done
+          done
+          # qt.conf pins the install root so Qt does not chase the MSYS2
+          # absolute plugin path baked into the runtime libraries.
+          printf '%s\n' '[Paths]' 'Prefix = .' 'Plugins = plugins' 'Binaries = .' > dist/qt.conf
           # Iterative ldd sweep: copy every MinGW64 DLL needed by the app,
           # its plugins, and each other (Qt, FFmpeg, MinGW runtimes).
           # The trailing || true is required: plugins that link only
           # Windows system DLLs make grep exit 1, which under pipefail
           # would otherwise abort the whole job.
           for pass in 1 2 3; do
-            for bin in dist/*.exe dist/*.dll dist/*/*.dll; do
+            for bin in dist/*.exe dist/*.dll dist/*/*.dll dist/plugins/*/*.dll; do
               [ -f "$bin" ] || continue
               ldd "$bin" 2>/dev/null | grep '/mingw64/' | awk '{print $3}' | \
                 while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done \
@@ -89,7 +109,19 @@ jobs:
             done
           done
           cp VERSION dist/VERSION.txt
-          echo "FusionCut Pro - portable build" > dist/PORTABLE.txt
+          printf '%s\n' \
+            'FusionCut Pro - portable build (v0.3.0)' '' \
+            'If the application shows an error dialog at startup, do NOT run' \
+            'FusionCutPro.exe directly - double-click run-console.bat instead.' \
+            'It opens a Command Prompt that captures Qt diagnostic output, which' \
+            'names the missing DLL or plugin that Windows could not load.' \
+            > dist/PORTABLE.txt
+          # Console launcher: captures Qt stderr on a startup crash so users
+          # see the real cause (missing DLL / plugin) instead of the bare
+          # 0xc0000005 dialog.
+          printf '%s\r\n' '@echo off' 'cd /d "%~dp0"' 'FusionCutPro.exe' '' \
+            'echo --- FusionCut Pro exited with code %ERRORLEVEL% ---' 'pause' \
+            > dist/run-console.bat
           ls dist | wc -l
           ls dist
 
