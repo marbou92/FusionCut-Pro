@@ -38,15 +38,20 @@ arrive milestone by milestone.
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+):** a built-in crash handler captures
-> access violations, uncaught C++ exceptions, CRT misuses, pure-virtual
-> calls, and POSIX signals, then writes a structured report
+> **Runtime crash reporting (v0.4.1+, hardened v0.4.3):** a built-in crash
+> handler captures access violations, uncaught C++ exceptions, CRT misuses,
+> pure-virtual calls, and POSIX signals, then writes a structured report
 > (`crash-logs/FusionCutPro-crash-<timestamp>.log` next to the executable)
 > with the exception code, address, stack backtrace, and (Windows) the
 > loaded-module snapshot - the diagnostic that previously required the
 > `run-console.bat` console launcher is now automatic and reaches far
-> more failure modes than stderr alone. `FusionCutPro.exe --crash-test`
-> writes a synthetic report to verify the pipeline on a clean machine.
+> more failure modes than stderr alone. As of v0.4.3 the Windows VEH is
+> registered at static-init time (before `main()`), so it also catches
+> loader-phase startup crashes that previously showed the bare Windows
+> 0xc0000005 dialog with no log; a `FusionCutPro-boot-<timestamp>.log`
+> milestone file is also written during startup and embedded into the
+> crash report. `FusionCutPro.exe --crash-test` writes a synthetic
+> report to verify the pipeline on a clean machine.
 
 ## System requirements (target)
 

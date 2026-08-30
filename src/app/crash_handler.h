@@ -10,10 +10,16 @@
 // The Qt layer links this; fc_core tests do not, so the MSVC core-only
 // CI leg is unaffected.
 //
-// Lifecycle: call fc::installCrashHandler(version, reportDir) ONCE, before
-// QApplication construction in main(). Installing earlier than that catches
-// the qwindows.dll platform-plugin init path (the historic 0xc0000005
-// startup crash mode on machines without MSYS2's plugin path).
+// Lifecycle: a static-storage initializer in crash_handler.cpp calls
+// installCrashHandler("", "") at .CRT$XCU static-init time, BEFORE
+// main() runs. This is intentional - it makes the Windows VEH active
+// before QApplication pulls in Qt5Core / qwindows.dll, which is the
+// exact class of 0xc0000005 startup crash the v0.4.1 in-main() install
+// could not catch. main() then calls installCrashHandler again with
+// the real FC_VERSION_STRING; the idempotent guard keeps the handlers
+// installed but updates the version + report dir fields. Callers
+// should still call installCrashHandler(VERSION) from main() so the
+// version string in any crash report is the real one, not "unknown".
 
 #pragma once
 
@@ -44,7 +50,43 @@ namespace fc {
 //
 // The handler is reentrancy-guarded; a crash inside the handler itself
 // falls through to the default OS disposition without recursing.
+//
+// Idempotency: the version + report dir fields are updated on EVERY
+// call, but the handlers themselves are installed exactly once (the
+// static initializer's call installs them; main()'s call only updates
+// version + dir). This split is what lets the VEH be active before
+// main() while still letting main() supply the real version string.
 void installCrashHandler(const std::string &appVersion = {}, const std::string &reportDir = {});
+
+// Append a milestone line to the boot-trace log file
+// (FusionCutPro-boot-<timestamp>.log, next to the executable). Called
+// by main() at every major startup checkpoint (entered main, about to
+// construct QApplication, QApplication constructed, MainWindow
+// constructed, app.exec entered). The boot trace is the only
+// diagnostic that survives a loader-phase crash (one that happens
+// before the VEH is wired up); it is embedded into the crash report
+// so the developer sees how far startup got. No-op if the trace file
+// could not be opened.
+//
+//   stage   - small integer milestone id (caller-chosen; 0 and 1 are
+//             reserved for the static initializer and the late
+//             installCrashHandler call respectively)
+//   message - human-readable description, e.g. "QApplication constructed"
+void recordBootStage(int stage, const char *message);
+
+// Mark the process as exiting cleanly and close + delete the boot
+// trace file. Called from main() immediately before returning 0 from
+// a successful app.exec(). If this is NOT called, the boot trace file
+// is left on disk for the developer to inspect (intentional - on a
+// crash we never call this, so the trace survives and is embedded
+// into the crash report).
+void shutdownCrashHandler();
+
+// Read the current contents of the boot-trace log file into a string.
+// Used by tests + by the crash handler itself when embedding the
+// trace into a crash report. Returns "(boot trace not open)" if the
+// file could not be opened at static-init time.
+std::string bootTraceContent();
 
 // Test hook: writes a synthetic report (kind="Manual") and returns the
 // absolute path written. Used by the --crash-test CLI hook in main.cpp

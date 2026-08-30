@@ -4,6 +4,113 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-08-30
+
+Hotfix: portable-build runtime crash class. v0.4.2's MinGW
+compile-time fixes landed green, but the resulting portable .exe
+still crashed immediately on double-click with the Windows loader
+error dialog "The application was unable to start correctly
+(0xc0000005)" and **no crash log was produced**. This entry
+closes that gap.
+
+### Root cause
+- The v0.4.1 crash handler installed the Windows VEH from inside
+  `main()`. The Windows loader dialog phrasing "unable to start
+  correctly (0xc0000005)" is specifically the loader-phase crash
+  dialog shown by Windows Error Reporting during the
+  import-resolution / DllMain / CRT-init rendezvous, BEFORE `main()`
+  is reached. With VEH installed only from `main()`, any crash in
+  the loader phase (e.g. a Qt5Core.dll / qwindows.dll DllMain
+  fault, a missing API-set DLL on the target machine, or a static
+  initializer in a transitive dependency) ran with **no in-process
+  reporter registered** - hence no log.
+
+### Fixed (pre-main crash handler installation)
+- `src/app/crash_handler.cpp` now installs the VEH (Windows) and
+  signal handlers (POSIX) from a file-scope static-storage
+  initializer (`EarlyCrashHandlerInstaller` at the bottom of the
+  file). Its constructor runs at .CRT$XCU (Windows) / .ctors
+  (POSIX) static-init time, which is AFTER the basic
+  CRT/kernel32/libstdc++ DLLs are mapped but BEFORE QApplication
+  pulls in Qt5Core / Qt5Gui / Qt5Widgets / qwindows.dll. This
+  covers the entire class of 0xc0000005 startup crashes that the
+  v0.4.1 in-main() install point could not catch.
+- `installCrashHandler()` is now split internally: the static
+  initializer calls it with empty strings (installing handlers
+  with version="unknown" and exe dir as report dir); `main()` then
+  calls it again with the real `FC_VERSION_STRING`. The idempotent
+  `g_installed` guard keeps the handlers installed exactly once;
+  the version + report dir fields are updated on EVERY call so
+  any crash report carries the real version, not the static-init
+  placeholder.
+
+### Added (boot-trace log file)
+- `src/app/crash_handler.cpp` now opens
+  `FusionCutPro-boot-<timestamp>.log` next to the executable at
+  static-init time, and writes a milestone line at every startup
+  checkpoint: stage0=VEH + handlers installed, stage1=install-
+  CrashHandler called from main (version + dir set),
+  stage2..stage7 = entered main, about-to-construct-QApplication,
+  QApplication constructed, MainWindow constructed, window.show,
+  app.exec entered.
+- Even if VEH itself cannot run (e.g. the crash is inside a
+  static-import DLL's DllMain before any user code runs), the
+  partial boot trace shows how far startup got. This is the only
+  diagnostic that survives a true loader-phase crash.
+- The boot trace is embedded into every crash report body under a
+  new `----- Boot Trace -----` section, so the developer sees the
+  startup state in a single file.
+- On clean exit (`fc::shutdownCrashHandler()` called from
+  `main()` before `return app.exec()` result), the boot trace is
+  deleted so it doesn't accumulate across runs. On crash it is
+  preserved (the crash handler never calls shutdown) AND embedded
+  into the crash report.
+- New public API in `crash_handler.h`: `recordBootStage(stage,
+  message)`, `shutdownCrashHandler()`, `bootTraceContent()`.
+  `installCrashHandler()` keeps its existing signature; callers
+  should still call it from `main()` with the real version.
+
+### Hardened (VEH write path)
+- The VEH crash-log writer now tries four candidate locations
+  instead of two: the configured report dir, the directory next to
+  the executable, the current working directory, and (Windows)
+  `%TEMP%` via `GetTempPathA`. If the exe lives in a read-only
+  Program Files install the log still lands in `%TEMP%` instead of
+  being silently dropped.
+- New `resolveReportDir()` helper centralizes the dir-resolution
+  chain; the VEH, `terminateHandler`, `newHandler`,
+  `invalidParameterHandler`, and `pureCallHandler` now all route
+  through it. Same chain feeds the boot-trace open.
+
+### Verified locally (sandbox)
+- POSIX-branch compile of `crash_handler.cpp` clean with
+  `g++ -std=c++17 -Wall -Wextra -Werror -Wpedantic` (no
+  regression from v0.4.2).
+- Standalone POSIX probe (`/tmp/fc_compile_probe.cpp`) exercising
+  the new API end-to-end: static initializer's `installCrashHandler("",
+  "")` runs, opens boot trace at exe dir, writes stage0;
+  probe's `installCrashHandler("0.4.3-sandbox-probe", ".")`
+  runs without re-installing handlers (idempotent guard holds),
+  updates version+dir, writes stage1; `recordBootStage(2..7)`
+  lines all land in the trace file; `writeManualCrashReport()`
+  writes a report with the boot trace embedded under
+  `----- Boot Trace -----`; `shutdownCrashHandler()` closes and
+  deletes the trace file. Confirmed by `ls` showing the boot trace
+  is gone post-shutdown and the manual report contains all
+  expected sections.
+- Real CMake (`FC_BUILD_MEDIA=OFF FC_BUILD_APP=OFF
+  FC_BUILD_TESTS=ON`): core 88 + timeline 64 = 152 tests pass.
+- Mock cross-compile of the Windows branch (`g++ -D_WIN32 -I
+  winmock ...`) is intentionally not re-established this push:
+  the marginal code added is 4 standard MinGW-w64 API calls
+  (`GetTempPathA` x2 in `resolveReportDir` + VEH-fallback,
+  `DeleteFileA` x1 in `closeBootTrace`, plus `MAX_PATH` already
+  used in v0.4.2). The previous agent's v0.4.2 mock verification
+  confirmed the rest of the Windows branch parses cleanly; these
+  four are core MinGW-w64 declarations in `<windows.h>`.
+  The CI portable leg remains the authoritative MinGW oracle
+  (as documented in the v0.4.2 entry).
+
 ## [0.4.2] - 2026-08-30
 
 Hotfix: portable-build (MinGW gcc 16.1) compile failure on the new
@@ -246,6 +353,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.3]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.3
 [0.4.2]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.2
 [0.4.1]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.1
 [0.4.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.0
