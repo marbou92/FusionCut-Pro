@@ -110,18 +110,23 @@ jobs:
           done
           cp VERSION dist/VERSION.txt
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.3.0)' '' \
-            'If the application shows an error dialog at startup, do NOT run' \
-            'FusionCutPro.exe directly - double-click run-console.bat instead.' \
-            'It opens a Command Prompt that captures Qt diagnostic output, which' \
-            'names the missing DLL or plugin that Windows could not load.' \
+            'FusionCut Pro - portable build (v0.4.1)' '' \
+            'Double-click FusionCutPro.exe to launch.' '' \
+            'If the application crashes at startup or at any point, a' \
+            'detailed crash log is written to crash-logs/ next to the' \
+            'executable (FusionCutPro-crash-<timestamp>.log). On Windows a' \
+            'dialog box also names the log file path. Send that log file' \
+            'to the developer so the cause can be fixed.' '' \
+            'Smoke test: run "FusionCutPro.exe --crash-test" to verify' \
+            'the crash-report pipeline writes a synthetic report without' \
+            'starting the UI.' \
             > dist/PORTABLE.txt
-          # Console launcher: captures Qt stderr on a startup crash so users
-          # see the real cause (missing DLL / plugin) instead of the bare
-          # 0xc0000005 dialog.
-          printf '%s\r\n' '@echo off' 'cd /d "%~dp0"' 'FusionCutPro.exe' '' \
-            'echo --- FusionCut Pro exited with code %ERRORLEVEL% ---' 'pause' \
-            > dist/run-console.bat
+          # Crash log directory. The in-process handler never creates
+          # directories itself (it runs in exception context and must not
+          # touch filesystem structure beyond opening a single file). Pre-
+          # create the dir here so a fresh portable install has somewhere
+          # to land the first report.
+          mkdir -p dist/crash-logs
           ls dist | wc -l
           ls dist
 
