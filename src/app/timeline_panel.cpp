@@ -23,26 +23,15 @@ const QColor kPanelBg(0x1B, 0x1B, 0x1B);
 const QColor kVideoTrack(0x2B, 0x30, 0x3A);
 const QColor kAudioTrack(0x1F, 0x36, 0x2E);
 const QColor kRulerBg(0x21, 0x21, 0x21);
-
-// Colorblind-friendly track accents (Module 10.4).
-QColor trackColor(int index) {
-    static const QColor palette[] = {
-        QColor(0x00, 0xA8, 0xFF), QColor(0xFF, 0xB0, 0x20), QColor(0x9B, 0x59, 0xD0),
-        QColor(0x2E, 0xCC, 0x71), QColor(0xE7, 0x4C, 0x3C), QColor(0x1A, 0xBC, 0x9C),
-    };
-    return palette[index % 6];
-}
+const QColor kClipFill(0x37, 0x4B, 0x5A);
+const QColor kClipSelected(0x00, 0xA8, 0xFF);
 } // namespace
 
 TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
-    rows_ = {{QStringLiteral("V2"), false, false, false, false},
-             {QStringLiteral("V1"), false, false, false, false},
-             {QStringLiteral("A1"), true, false, false, false}};
-
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addStretch(1); // painted area occupies everything above the bar
+    layout->addStretch(1);
 
     zoom_ = new QSlider(Qt::Horizontal, this);
     zoom_->setRange(5, 400);
@@ -72,12 +61,32 @@ QRect TimelinePanel::laneRect(int row) const {
                  std::max(0, width() - kHeaderWidth), kTrackHeight);
 }
 
-double TimelinePanel::xToSeconds(int x) const {
-    return std::max(0.0, (x - kHeaderWidth) / pps_);
+int64_t TimelinePanel::xToFrame(int x) const {
+    return static_cast<int64_t>(std::max(0.0, (x - kHeaderWidth) / pps_));
 }
 
-int TimelinePanel::secondsToX(double seconds) const {
-    return kHeaderWidth + static_cast<int>(seconds * pps_);
+int TimelinePanel::frameToX(int64_t frame) const {
+    return kHeaderWidth + static_cast<int>(frame * pps_);
+}
+
+int TimelinePanel::trackRowAt(int y) const {
+    if (y < kRulerHeight || y >= areaHeight()) {
+        return -1;
+    }
+    return (y - kRulerHeight) / kTrackHeight;
+}
+
+QColor TimelinePanel::trackColor(int index) const {
+    static const QColor palette[] = {
+        QColor(0x00, 0xA8, 0xFF), QColor(0xFF, 0xB0, 0x20), QColor(0x9B, 0x59, 0xD0),
+        QColor(0x2E, 0xCC, 0x71), QColor(0xE7, 0x4C, 0x3C), QColor(0x1A, 0xBC, 0x9C),
+    };
+    return palette[index % 6];
+}
+
+void TimelinePanel::setModel(const fc::TimelineModel *model) {
+    model_ = model;
+    update();
 }
 
 void TimelinePanel::setSequenceDuration(double seconds) {
@@ -95,26 +104,26 @@ void TimelinePanel::setFps(double fps) {
     update();
 }
 
+void TimelinePanel::setRazorMode(bool on) {
+    razorMode_ = on;
+    setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+    update();
+}
+
+void TimelinePanel::clearSelection() {
+    selectedClipId_ = -1;
+    update();
+}
+
 void TimelinePanel::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     painter.fillRect(rect(), kPanelBg);
 
     drawHeaderColumn(painter);
     drawRuler(painter);
+    drawClips(painter);
 
-    for (int r = 0; r < rows_.size(); ++r) {
-        const QRect lane = laneRect(r);
-        if (lane.top() >= areaHeight()) {
-            break;
-        }
-        painter.fillRect(lane, rows_[r].isAudio ? kAudioTrack : kVideoTrack);
-        painter.setPen(QColor(0x3A, 0x3A, 0x3A));
-        painter.drawLine(lane.left(), lane.top(), lane.right(), lane.top());
-        painter.fillRect(kHeaderWidth, lane.top(), 3, kTrackHeight, trackColor(r));
-    }
-
-    // Playhead.
-    const int x = secondsToX(playhead_);
+    const int x = frameToX(static_cast<int64_t>(playhead_ * fps_));
     if (x >= kHeaderWidth && x <= width()) {
         painter.setPen(QPen(QColor(0xE8, 0xE8, 0xE8), 1));
         painter.drawLine(x, 0, x, areaHeight());
@@ -130,10 +139,15 @@ void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
     painter.setPen(QColor(0x3A, 0x3A, 0x3A));
     painter.drawLine(headerArea.right(), headerArea.top(), headerArea.right(), headerArea.bottom());
 
-    for (int r = 0; r < rows_.size(); ++r) {
+    const int trackCount = model_ ? model_->trackCount() : 0;
+    for (int r = 0; r < trackCount; ++r) {
         const QRect cell(0, kRulerHeight + r * kTrackHeight, kHeaderWidth, kTrackHeight);
         if (cell.top() >= areaHeight()) {
             break;
+        }
+        const fc::Track *track = model_->trackAt(r);
+        if (!track) {
+            continue;
         }
         const QColor accent = trackColor(r);
         painter.fillRect(0, cell.top(), 3, kTrackHeight, accent);
@@ -142,12 +156,12 @@ void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
         bold.setBold(true);
         painter.setFont(bold);
         painter.setPen(accent);
-        painter.drawText(QRect(10, cell.top() + 4, 40, 18), Qt::AlignLeft, rows_[r].name);
-        painter.setFont(QFont()); // reset
+        painter.drawText(QRect(10, cell.top() + 4, 40, 18), Qt::AlignLeft,
+                         QString::fromStdString(track->name));
+        painter.setFont(QFont());
 
-        // L / M / S state cells.
         const char *labels[3] = {"L", "M", "S"};
-        const bool states[3] = {rows_[r].locked, rows_[r].muted, rows_[r].solo};
+        const bool states[3] = {track->locked, track->muted, track->solo};
         for (int c = 0; c < 3; ++c) {
             const QRect box(10 + c * 26, cell.top() + 22, 22, 16);
             painter.setPen(QColor(0x55, 0x55, 0x55));
@@ -164,13 +178,13 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     painter.fillRect(rulerRect, kRulerBg);
     painter.setPen(QColor(0x9A, 0x9A, 0x9A));
 
-    double step = 1.0; // major tick: 1s / 5s / 30s by zoom
+    double step = 1.0;
     while (step * pps_ < 70.0) {
         step *= 5.0;
     }
     const fc::FrameRate rate{static_cast<uint32_t>(std::lround(fps_ * 1000.0)), 1000, false};
     for (double t = 0.0; t <= duration_; t += step) {
-        const int x = secondsToX(t);
+        const int x = frameToX(static_cast<int64_t>(std::llround(t * fps_)));
         if (x < rulerRect.left() || x > rulerRect.right()) {
             continue;
         }
@@ -182,38 +196,65 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     }
 }
 
+void TimelinePanel::drawClips(QPainter &painter) const {
+    if (!model_) {
+        return;
+    }
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    for (const fc::Clip &clip : model_->clips()) {
+        const fc::Track *track = model_->trackAt(clip.trackIndex);
+        if (!track) {
+            continue;
+        }
+        const QRect lane = laneRect(clip.trackIndex);
+        const int x0 = frameToX(clip.timelineStart);
+        const int x1 = frameToX(clip.timelineEnd());
+        const QRect rect(x0, lane.top() + 4, std::max(8, x1 - x0), lane.height() - 8);
+        const bool selected = clip.id == selectedClipId_;
+        painter.setBrush(selected ? kClipSelected : kClipFill);
+        painter.setPen(selected ? QColor(0xFF, 0xFF, 0xFF) : QColor(0x55, 0x66, 0x77));
+        painter.drawRoundedRect(rect, 4, 4);
+        painter.setPen(selected ? QColor(0x10, 0x10, 0x10) : QColor(0xE8, 0xE8, 0xE8));
+        painter.drawText(rect.adjusted(6, 0, -6, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                         QString::fromStdString(clip.label));
+    }
+}
+
 void TimelinePanel::mousePressEvent(QMouseEvent *event) {
     const int x = event->pos().x();
     const int y = event->pos().y();
+    const int row = trackRowAt(y);
 
-    // Header cells toggle lock/mute/solo.
-    if (x >= 0 && x < kHeaderWidth && y > kRulerHeight) {
-        const int row = (y - kRulerHeight) / kTrackHeight;
-        if (row >= 0 && row < rows_.size()) {
-            const int cellX = (x - 10) / 26;
-            if (cellX >= 0 && cellX < 3) {
-                bool *state = cellX == 0   ? &rows_[row].locked
-                              : cellX == 1 ? &rows_[row].muted
-                                           : &rows_[row].solo;
-                *state = !*state;
-                update();
-                return;
-            }
-        }
+    if (row >= 0 && x >= 0 && x < kHeaderWidth) {
+        return; // header cell toggling ships in M4b
+    }
+
+    if (x < kHeaderWidth || row < 0 || y > areaHeight()) {
         return;
     }
 
-    if (x > kHeaderWidth && y <= areaHeight()) {
-        playhead_ = xToSeconds(x);
-        update();
-        emit playheadMoved(playhead_);
+    const int64_t frame = xToFrame(x);
+    if (razorMode_) {
+        emit splitRequested(row, frame);
+        return;
     }
+
+    if (model_) {
+        const fc::Clip *clip = model_->clipAt(frame, row);
+        selectedClipId_ = clip ? clip->id : -1;
+        emit clipSelected(selectedClipId_);
+        update();
+    }
+
+    playhead_ = static_cast<double>(frame) / fps_;
+    update();
+    emit playheadMoved(playhead_);
 }
 
 void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
     if ((event->buttons() & Qt::LeftButton) && event->pos().x() > kHeaderWidth &&
-        event->pos().y() <= areaHeight()) {
-        playhead_ = xToSeconds(event->pos().x());
+        event->pos().y() <= areaHeight() && !razorMode_) {
+        playhead_ = static_cast<double>(xToFrame(event->pos().x())) / fps_;
         update();
         emit playheadMoved(playhead_);
     }

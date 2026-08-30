@@ -4,6 +4,41 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-23
+
+Milestone 4, phase 1: the editing core. The timeline is no longer a static
+placeholder - it owns a real, frame-accurate model with clips, split, trim,
+move, and delete; the UI renders and edits against it.
+
+### Added
+- `fc::TimelineModel` (pure C++, in fc_core): tracks, clips with source
+  in/out points, timeline position, playback rate; operations addClip /
+  removeClip / splitAt / moveClip / trimClipStart / trimClipEnd / clipAt /
+  durationFrames. 64-check unit suite (`fc_timeline_tests`) covering
+  tracks, add validation, split semantics, move + trim invariants, clipAt
+  gaps, and duration aggregation.
+- TimelinePanel now renders real clips from the model as colored blocks
+  with labels and selection highlight; click-to-select, scrub, Ctrl+wheel
+  zoom; razor-mode split signal (mouse-based razor UI lands in M4b).
+- Editing actions wired through MainWindow: double-clicking a project
+  item places a 5-second clip on V1 at the playhead; **Clip → Split at
+  Playhead (C)** splits the selected clip (or the V1 clip under the
+  playhead); **Delete / Backspace** removes the selected clip; sequence
+  duration tracks the model after every edit.
+- Track header L/M/S cells now reflect model state (read-only this phase;
+  toggling arrives in M4b).
+
+### Fixed (packaging, post-v0.3.0 portable)
+- Portable build no longer needs `windeployqt` or `qmake`: plugins are
+  located via `find -name qwindows.dll`, mirrored into both `dist/<cat>/`
+  and the canonical `dist/plugins/<cat>/` layout, with core Qt DLLs also
+  copied next to the platform plugin (defensive against plugin-dep DLL
+  search quirks); `dist/qt.conf` pins the install root so Qt does not
+  chase the MSYS2 absolute path baked into the runtime.
+- `dist/run-console.bat` launches the app in a console so a startup crash
+  prints Qt's diagnostic (missing DLL / plugin) instead of the bare
+  0xc0000005 dialog.
+
 ## [0.3.0] - 2026-08-23
 
 Milestone 3: the dual-mode UI shell. The app now shows **real decoded
@@ -112,6 +147,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.0
 [0.3.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.3.0
 [0.2.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.2.0
 [0.1.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.1.0

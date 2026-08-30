@@ -5,6 +5,7 @@
 #include <QTimer>
 
 #include "media_item.h"
+#include "timeline_model.h"
 
 class QLabel;
 class QThread;
@@ -48,6 +49,9 @@ private:
     // Media + playback flow.
     void importMedia();
     void loadClip(const QString &sourcePath);
+    void addPendingClip(const QString &sourcePath, int64_t sourceOutFrames);
+    void splitAtPlayhead();
+    void deleteSelectedClip();
     void generateProxy(const QString &sourcePath);
     void startPlayback(bool playing);
     void stepFrames(int frames);
@@ -75,9 +79,14 @@ private:
     // Quick Mode widgets.
     QuickModeView *quickView_ = nullptr;
 
+    // Editing model (Module 4).
+    fc::TimelineModel model_;
+
     // Playback state.
     QString loadedPath_;
     QString proxySourcePath_;
+    QString pendingAddClipPath_;
+    int64_t selectedClipId_ = -1;
     double playhead_ = 0.0;
     double duration_ = 0.0;
     double fps_ = 24.0;

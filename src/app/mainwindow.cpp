@@ -1,5 +1,8 @@
 #include "mainwindow.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -84,6 +87,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildMenus();
     buildStatusBar();
 
+    // Timeline model: three tracks matching the M3 placeholder lanes.
+    model_.setFps(fps_);
+    model_.addTrack("V2", false);
+    model_.addTrack("V1", false);
+    model_.addTrack("A1", true);
+    timeline_->setModel(&model_);
+
     playClock_ = new QTimer(this);
     playClock_->setTimerType(Qt::CoarseTimer);
     connect(playClock_, &QTimer::timeout, this, [this] {
@@ -104,6 +114,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(left, &QShortcut::activated, this, [this] { stepFrames(-1); });
     auto *right = new QShortcut(QKeySequence(Qt::Key_Right), this);
     connect(right, &QShortcut::activated, this, [this] { stepFrames(1); });
+    auto *delKey = new QShortcut(QKeySequence(Qt::Key_Delete), this);
+    connect(delKey, &QShortcut::activated, this, [this] { deleteSelectedClip(); });
+    auto *backspace = new QShortcut(QKeySequence(Qt::Key_Backspace), this);
+    connect(backspace, &QShortcut::activated, this, [this] { deleteSelectedClip(); });
 
     restoreLayout();
 }
@@ -144,13 +158,22 @@ void MainWindow::buildDecodeThread() {
 
     connect(decodeThread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(worker_, &DecodeWorker::mediaInfo, this,
-            [this](const QString &summary, double duration, double fps, int64_t) {
+            [this](const QString &summary, double duration, double fps, int64_t frameCount) {
                 duration_ = duration;
                 fps_ = fps > 1.0 ? fps : 24.0;
+                model_.setFps(fps_);
                 transport_->setMedia(duration_, fps_);
                 timeline_->setSequenceDuration(duration_);
                 timeline_->setFps(fps_);
                 statusBar()->showMessage(summary, 8000);
+                if (!pendingAddClipPath_.isEmpty()) {
+                    const int64_t sourceOut = std::min<int64_t>(
+                        frameCount > 0 ? frameCount
+                                       : static_cast<int64_t>(std::llround(duration_ * fps_)),
+                        static_cast<int64_t>(std::llround(5.0 * fps_)));
+                    addPendingClip(pendingAddClipPath_, sourceOut);
+                    pendingAddClipPath_.clear();
+                }
             });
     connect(worker_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double pts) {
         programCanvas_->setFrame(frame, pts);
@@ -248,8 +271,10 @@ void MainWindow::buildProWorkspace() {
 
     // Panel-to-engine wiring.
     connect(projectPanel_, &ProjectPanel::importRequested, this, [this] { importMedia(); });
-    connect(projectPanel_, &ProjectPanel::loadRequested, this,
-            [this](const QString &path) { loadClip(path); });
+    connect(projectPanel_, &ProjectPanel::loadRequested, this, [this](const QString &path) {
+        pendingAddClipPath_ = path;
+        loadClip(path);
+    });
     connect(projectPanel_, &ProjectPanel::proxyRequested, this,
             [this](const QString &path) { generateProxy(path); });
     connect(transport_, &TransportBar::playToggled, this,
@@ -261,6 +286,14 @@ void MainWindow::buildProWorkspace() {
     connect(timeline_, &TimelinePanel::playheadMoved, this, [this](double seconds) {
         startPlayback(false);
         requestFrameAt(seconds);
+    });
+    connect(timeline_, &TimelinePanel::clipSelected, this,
+            [this](int64_t id) { selectedClipId_ = id; });
+    connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
+        if (model_.splitAt(frame, trackIndex)) {
+            timeline_->setSequenceDuration(model_.durationSeconds());
+            timeline_->update();
+        }
     });
 }
 
@@ -293,8 +326,11 @@ void MainWindow::buildMenus() {
 
     // ---- Clip ----
     QMenu *clip = menuBar()->addMenu(tr("&Clip"));
-    addMenuAction(clip, tr("Split at Playhead"), QKeySequence(tr("C")))
-        ->setToolTip(tr("Timeline editing ships in M4"));
+    QAction *splitMenuAction = addMenuAction(clip, tr("Split at Playhead"), QKeySequence(tr("C")));
+    splitMenuAction->setToolTip(
+        tr("Splits the selected clip (or the clip under the playhead on V1) at "
+           "the current playhead position"));
+    connect(splitMenuAction, &QAction::triggered, this, [this] { splitAtPlayhead(); });
     addMenuAction(clip, tr("&Speed / Duration..."), QKeySequence(tr("Ctrl+R")))->setEnabled(false);
     addMenuAction(clip, tr("&Reverse Clip"))->setEnabled(false);
     clip->addSeparator();
@@ -398,6 +434,42 @@ void MainWindow::loadClip(const QString &sourcePath) {
                              ? projectPanel_->library().at(index)->proxyPath
                              : sourcePath;
     QMetaObject::invokeMethod(worker_, "open", Q_ARG(QString, path));
+}
+
+void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFrames) {
+    // M4a: place on V1 (track index 1) at the playhead; first 5s or full.
+    const int64_t start = static_cast<int64_t>(std::llround(playhead_ * fps_));
+    const int64_t out = std::max<int64_t>(1, sourceOutFrames);
+    const QString label = QFileInfo(sourcePath).completeBaseName();
+    model_.addClip(1, sourcePath.toStdString(), label.toStdString(), 0, out, start);
+    timeline_->setSequenceDuration(model_.durationSeconds());
+    timeline_->update();
+}
+
+void MainWindow::splitAtPlayhead() {
+    const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
+    int trackIndex = 1; // default to V1
+    // Prefer the track of the currently selected clip.
+    if (selectedClipId_ > 0) {
+        if (const fc::Clip *clip = model_.clipById(selectedClipId_)) {
+            trackIndex = clip->trackIndex;
+        }
+    }
+    if (model_.splitAt(frame, trackIndex)) {
+        timeline_->setSequenceDuration(model_.durationSeconds());
+        timeline_->update();
+    }
+}
+
+void MainWindow::deleteSelectedClip() {
+    if (selectedClipId_ <= 0) {
+        return;
+    }
+    model_.removeClip(selectedClipId_);
+    selectedClipId_ = -1;
+    timeline_->clearSelection();
+    timeline_->setSequenceDuration(model_.durationSeconds());
+    timeline_->update();
 }
 
 void MainWindow::generateProxy(const QString &sourcePath) {
