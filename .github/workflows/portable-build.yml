@@ -110,13 +110,17 @@ jobs:
           done
           cp VERSION dist/VERSION.txt
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.2)' '' \
+            'FusionCut Pro - portable build (v0.4.3)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'If the application crashes at startup or at any point, a' \
             'detailed crash log is written to crash-logs/ next to the' \
             'executable (FusionCutPro-crash-<timestamp>.log). On Windows a' \
-            'dialog box also names the log file path. Send that log file' \
-            'to the developer so the cause can be fixed.' '' \
+            'dialog box also names the log file path. As of v0.4.3 a' \
+            'FusionCutPro-boot-<timestamp>.log milestone file is also' \
+            'written during startup; if a crash happens this file is' \
+            'embedded into the crash log so the developer can see exactly' \
+            'how far startup got. Send the crash log file to the developer' \
+            'so the cause can be fixed.' '' \
             'Smoke test: run "FusionCutPro.exe --crash-test" to verify' \
             'the crash-report pipeline writes a synthetic report without' \
             'starting the UI.' \
