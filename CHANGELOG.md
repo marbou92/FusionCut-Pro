@@ -4,6 +4,51 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-08-30
+
+Hotfix: portable-build (MinGW gcc 16.1) compile failure on the new
+crash handler. The 5 main CI jobs (format, core x2, media x2, Qt)
+were green for v0.4.1, but the MinGW portable leg failed compiling
+`crash_handler.cpp` at two issues:
+
+### Fixed (MinGW-w64 gcc 16.1 portable build)
+- `crash_handler.cpp` now uses `std::_Exit` (C++11 standard in
+  `<cstdlib>`) at every Windows-branch exit, not `std::_exit`. The
+  POSIX `_exit` (lowercase, in `<unistd.h>`) is NOT in `std::` - it
+  is a global function, and `std::_exit` does not exist on MinGW-w64
+  libstdc++. glibc's libstdc++ surfaces `_exit` as a non-standard
+  extension inside `std::` so the Linux sandbox compile passed; the
+  MinGW compile aborts at `std::_exit(128 + sig)` in
+  `posixSignalHandler`. Same class of cross-toolchain gap as the
+  FFmpeg 4.4 swr_convert / `<cstddef>` regressions recorded in
+  deliveries #7 and #14: glibc/Ubuntu-24.04 libstdc++ is permissive
+  in ways MinGW-w64 is not - CI is the only oracle for the MinGW path.
+  The POSIX branch (Linux) keeps using `_exit` (lowercase) for true
+  async-signal-safety per POSIX; only the Windows branch was wrong.
+- `NOMINMAX` / `WIN32_LEAN_AND_MEAN` now `#ifndef`-guarded. libstdc++
+  `<bits/os_defines.h>` (pulled in transitively via `<string>` from
+  `crash_handler.h`) already defines `NOMINMAX 1` before our explicit
+  `#define NOMINMAX` (no value); MinGW-w64 gcc 16 warned "NOMINMAX
+  redefined". The guard preserves the existing definition instead of
+  replacing it.
+
+### Verified locally (sandbox)
+- Standalone Linux compile (`g++ -std=c++17 -Wall -Wextra -Werror`)
+  of `crash_handler.cpp` still passes - no POSIX-branch regression.
+- Synthetic `_WIN32` mock-header cross-compile of the Windows branch
+  (full mock of `<windows.h>`, `<tlhelp32.h>`, `<stdlib.h>` typedefs
+  against documented MinGW-w64 signatures) compiles clean past the
+  previous CI abort point at line 468. All remaining `MessageBoxA`,
+  `CaptureStackBackTrace`, `CreateToolhelp32Snapshot` /
+  `Module32First` / `Module32Next`, `_set_invalid_parameter_handler`,
+  `_set_purecall_handler`, `AddVectoredExceptionHandler` calls match
+  the documented MinGW-w64 typedefs. The CI portable leg is the
+  authoritative MinGW oracle; the mock cross-compile is a
+  syntax-level catch only.
+- clang-format 22.1.8 clean across all `src/` + `tests/`.
+- core 88 + timeline 64 = 152 tests pass via real CMake
+  (`FC_BUILD_MEDIA=OFF FC_BUILD_APP=OFF FC_BUILD_TESTS=ON`).
+
 ## [0.4.1] - 2026-08-24
 
 Hotfix: two CI compile regressions introduced by the v0.4.0 editing-core
@@ -201,6 +246,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.2]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.2
 [0.4.1]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.1
 [0.4.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.0
 [0.3.0]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.3.0

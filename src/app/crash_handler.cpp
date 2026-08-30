@@ -49,8 +49,18 @@
 #include <vector>
 
 #if defined(_WIN32)
+// Guard with #ifndef: libstdc++ <bits/os_defines.h> pulls NOMINMAX in
+// transitively once <string> is included (via crash_handler.h), so a
+// bare `#define NOMINMAX` (no value) collides with their `#define
+// NOMINMAX 1` and MinGW-w64 gcc 16 warns "NOMINMAX redefined". The
+// same defensive pattern protects WIN32_LEAN_AND_MEAN if a future
+// libstdc++ or Qt header starts defining it too.
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 // Toolhelp32 (module snapshot) lives in <tlhelp32.h>; declared in
 // kernel32, no extra link dependency.
@@ -453,7 +463,12 @@ void posixSignalHandler(int sig) {
     // kernel signal context - the CRT has routed through here.
     const bool firstCrash = g_crashing.exchange(true) == false;
     if (!firstCrash) {
-        _exit(128 + sig);
+        // std::_Exit is the C++11 standard (in <cstdlib>, NOT
+        // async-signal-safe but that's irrelevant on Windows: the CRT
+        // has unwound here, not the kernel). std::_exit (lowercase,
+        // POSIX) does NOT exist on MinGW's libstdc++ - only glibc's
+        // libstdc++ surfaces it as an extension in std::; do NOT use.
+        std::_Exit(128 + sig);
     }
     const char *name = sig == SIGSEGV   ? "SIGSEGV"
                        : sig == SIGABRT ? "SIGABRT"
@@ -465,7 +480,7 @@ void posixSignalHandler(int sig) {
                   name, sig);
     std::fputs(msg, stderr);
     std::fflush(stderr);
-    std::_exit(128 + sig);
+    std::_Exit(128 + sig);
 }
 #endif
 

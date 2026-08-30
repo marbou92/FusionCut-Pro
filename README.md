@@ -38,7 +38,7 @@ arrive milestone by milestone.
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1):** a built-in crash handler captures
+> **Runtime crash reporting (v0.4.1+):** a built-in crash handler captures
 > access violations, uncaught C++ exceptions, CRT misuses, pure-virtual
 > calls, and POSIX signals, then writes a structured report
 > (`crash-logs/FusionCutPro-crash-<timestamp>.log` next to the executable)
