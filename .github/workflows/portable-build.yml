@@ -116,19 +116,30 @@ jobs:
           done
           cp VERSION dist/VERSION.txt
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.4)' '' \
+            'FusionCut Pro - portable build (v0.4.5)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'IF FUSIONCUTPRO.EXE WILL NOT START (the Windows dialog says' \
             '"The application was unable to start correctly' \
             '(0xc0000005)" and no log appears in crash-logs/):' \
-            '  -> Double-click fcp-loader-check.exe FIRST.' \
-            '  -> It walks the PE import tree from OUTSIDE the process' \
-            '     and names any DLL the loader cannot map.' \
-            '  -> A MessageBox summarizes the result; a full log is' \
-            '     written to loader-check-<timestamp>.log next to this' \
-            '     exe (or in %TEMP% if this folder is read-only).' \
-            '  -> Send that log to the developer - the first FAIL line' \
-            '     names the missing/wrong DLL that causes the 0xc0000005.' \
+            '  -> Double-click fcp-loader-check.exe.' \
+            '  -> PHASE 1: it walks the PE import tree from OUTSIDE the' \
+            '     process and names any DLL the loader cannot map.' \
+            '  -> PHASE 2: it then launches FusionCutPro.exe UNDER A' \
+            '     DEBUG WATCH (a built-in mini-debugger) and records' \
+            '     every DLL as it loads and every exception as it is' \
+            '     raised - including faults inside DllMain / static' \
+            '     initializers that Windows Error Reporting NEVER sees' \
+            '     (which is why Event Viewer shows nothing for the app).' \
+            '     The tool names the faulting module and offset.' \
+            '     The app may open a window briefly - that is the' \
+            '     watch confirming startup; it closes it after 25 s.' \
+            '  -> A MessageBox summarizes the result; the full module' \
+            '     load trail + exception list is written to' \
+            '     loader-check-<timestamp>.log next to this exe (or in' \
+            '     %TEMP% if this folder is read-only).' \
+            '  -> Send that log to the developer - the VERDICT section' \
+            '     names the crashing module, or the last DLLs that were' \
+            '     loading when the process died.' \
             '' \
             'That class of crash is the Windows loader-phase failure' \
             '(import-resolution / DllMain / CRT-init), which runs BEFORE' \
@@ -146,9 +157,10 @@ jobs:
             '    Writes a synthetic runtime crash report and exits without' \
             '    starting the UI. Verifies the crash-report pipeline.' \
             '  fcp-loader-check.exe' \
-            '    Maps the FusionCutPro.exe import tree without running any' \
-            '    DLL DllMain and reports any DLL the loader cannot find.' \
-            '    Verifies the install is dependency-complete.' \
+            '    Phase 1 maps the import tree without running any DLL' \
+            '    DllMain; phase 2 launches the app under a debug watch.' \
+            '    Verifies the install is dependency-complete AND startup' \
+            '    is fault-free.' \
             > dist/PORTABLE.txt
           # Crash log directory. The in-process handler never creates
           # directories itself (it runs in exception context and must not
