@@ -1,0 +1,53 @@
+; FusionCut Pro packaging - Windows 8.x api-set forwarder stub.
+;
+; WHY THIS FILE EXISTS
+;   librav1e.dll (the Rust-written AV1 encoder inside MSYS2's FFmpeg 8
+;   dependency tree) hard-imports 'api-ms-win-core-synch-l1-2-0.dll' -
+;   the WaitOnAddress futex API set - by its literal api-set name.
+;
+;   On Windows 10/11 the loader resolves that name via the ApiSetSchema
+;   and redirects it to KernelBase before the file search runs; the
+;   System32 placeholder stub is never touched.
+;
+;   On Windows 8/8.1 the loader does NOT schema-resolve this name. It
+;   maps the System32 placeholder stub file, then reads that stub's
+;   (empty/invalid) export data while snapping librav1e's imports -
+;   dereferencing an unmapped page inside the stub image - and dies
+;   with 0xC0000005 inside ntdll's loader code, BEFORE any user code
+;   in the exe runs. The loader converts the fault into the process
+;   exit status; Windows Error Reporting never engages; the user sees
+;   only "The application was unable to start correctly (0xc0000005)"
+;   with no Event Viewer entry and no log. (Diagnosed with
+;   fcp-loader-check.exe v2's debug-launch watch: fault instruction in
+;   ntdll+0x4b4b4, AV READ of an address inside the just-mapped
+;   api-ms-win-core-synch-l1-2-0.dll image; load trail stopped at
+;   avcodec-62 -> ... -> librav1e -> api-ms-win-core-synch-l1-2-0.)
+;
+; THE FIX
+;   The DLL search order tries the application directory BEFORE
+;   System32, so a real DLL with this exact name placed next to
+;   FusionCutPro.exe wins the bind. This file defines that DLL: a
+;   forwarder-only image with no code, no imports, and no CRT - just
+;   an export table whose entries forward to the KernelBase
+;   implementations (present since Windows 8). The loader reads OUR
+;   valid export table, follows the forwarders into the already-loaded
+;   KernelBase, and startup proceeds.
+;
+;   On Windows 10/11 this stub is inert (the schema resolves the name
+;   before the file search), so shipping it everywhere is safe.
+;
+; BUILT IN CI (portable-build.yml) with:
+;   gcc -shared -nostdlib \
+;       -o dist/api-ms-win-core-synch-l1-2-0.dll \
+;       packaging/api-ms-win-core-synch-l1-2-0.def
+; and verified there with objdump (the export table must contain
+; WaitOnAddress). The build sandbox has no MinGW/PE toolchain, so CI
+; is the authoritative oracle for this artifact.
+
+LIBRARY api-ms-win-core-synch-l1-2-0
+
+EXPORTS
+    Sleep               = kernelbase.Sleep
+    WaitOnAddress       = kernelbase.WaitOnAddress
+    WakeByAddressAll    = kernelbase.WakeByAddressAll
+    WakeByAddressSingle = kernelbase.WakeByAddressSingle

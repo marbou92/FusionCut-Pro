@@ -4,6 +4,100 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] - 2026-09-01
+
+**Root cause found and fixed — the startup `0xc0000005` that has
+broken every portable build on the user's machine since the first
+MSYS2-FFmpeg package.**
+
+### Root cause (final — confirmed by field data from the v0.4.5
+debug-launch watch)
+- `fcp-loader-check.exe` v2's watch caught the death that WER never
+  reports: a first-chance `0xC0000005` **READ** at `ntdll.dll+0x4b4b4`
+  (the Windows loader's import-snapping code), targeting an address
+  **inside the just-mapped `api-ms-win-core-synch-l1-2-0.dll` image**
+  (`0x7fef69f13f3` = module base `0x7fef69f0000` + `0x13f3`), and the
+  load trail stopped at module 59 of the loader's depth-first walk:
+  `FusionCutPro.exe → avcodec-62.dll → … → librav1e.dll →
+  api-ms-win-core-synch-l1-2-0.dll`.
+- `librav1e.dll` (the Rust-written AV1 encoder in MSYS2's FFmpeg 8
+  dependency tree) hard-imports the `api-ms-win-core-synch-l1-2-0`
+  API set (the `WaitOnAddress` futex family) by its literal name.
+- On Windows 10/11 the loader resolves that name via the ApiSetSchema
+  and redirects to KernelBase before the file search runs — those
+  machines are unaffected (which is why CI, on windows-latest, always
+  passed).
+- On the user's machine (Windows 8.x — corroborated by the
+  `gdi32 → lpk.dll → usp10.dll` load chain and the module size
+  profile: shell32 14.2 MB / user32 1.0 MB / KernelBase 434 KB) the
+  loader does **not** schema-resolve the name. It maps the System32
+  *placeholder stub file*, then dereferences that stub's invalid
+  export data while snapping librav1e's imports → READ fault on an
+  unmapped page → `0xC0000005` inside ntdll, **before any user code
+  runs** → the loader converts the fault into the process exit status
+  → "The application was unable to start correctly (0xc0000005)"
+  dialog, WER never engages, Event Viewer stays empty, no in-process
+  handler (VEH, boot trace) can ever see it. This is why v0.4.1
+  through v0.4.5 all failed identically: the import chain was always
+  present; the crash was never a missing DLL and never a
+  crash-handler-timing issue.
+
+### Fixed — Windows 8.x api-set forwarder stub
+- NEW `packaging/api-ms-win-core-synch-l1-2-0.def`: a
+  forwarder-only DLL definition (no code, no imports, no CRT) that
+  exports `Sleep`, `WaitOnAddress`, `WakeByAddressAll`,
+  `WakeByAddressSingle` as **forwarders to their KernelBase
+  implementations** (present since Windows 8).
+- `portable-build.yml` builds it in the staging step with
+  `gcc -shared -nostdlib -o dist/api-ms-win-core-synch-l1-2-0.dll
+  packaging/api-ms-win-core-synch-l1-2-0.def` and **verifies the
+  artifact with `objdump`** (the export table must contain
+  `WaitOnAddress`), blocking the job if the .def→DLL pipeline ever
+  breaks — the sandbox has no PE toolchain, so CI is the authoritative
+  oracle for this artifact.
+- Mechanism of the fix: the DLL search order tries the **application
+  directory before System32**, so the stub placed next to
+  `FusionCutPro.exe` wins the bind on Windows 8.x. The loader reads
+  OUR valid export table, follows the forwarders into the
+  already-loaded KernelBase, and startup proceeds. On Windows 10/11
+  the schema resolves the name before the file search, so the stub is
+  inert there — shipping it everywhere is safe.
+- `PORTABLE.txt` now tells the user the bundled
+  `api-ms-win-core-synch-l1-2-0.dll` is REQUIRED on Windows 8.x and
+  to leave it in place.
+
+### Improved — `fcp-loader-check.exe` v2.1
+- AV-target module attribution: exception records now also map the
+  access-violation **target** address to the module containing it and
+  print it in the log line (`… (AV read of 0x… -> target inside
+  api-ms-win-core-synch-l1-2-0.dll +0x13f3)`), in the loader-abort
+  VERDICT ("the data being accessed lies in … — THAT module is the
+  culprit; ntdll is only the code reading it"), and in the summary
+  MessageBox. This is the analysis step that had to be done by hand
+  to crack this case; the tool now does it automatically, so the NEXT
+  loader-phase fault (if any) names its culprit directly in the log.
+- Mock `_WIN32` cross-compile (re-created with the full debug-API
+  surface) clean under `-Wall -Wextra -Werror -Wpedantic`; whole-tree
+  clang-format gate exit 0.
+
+### Changed
+- System requirements floor: Windows 7 → **Windows 8.1** (README
+  updated with the rationale — the `WaitOnAddress` implementations do
+  not exist on Windows 7, so no forwarder can rescue it there;
+  Windows 8.x works via the bundled stub, Windows 10/11 natively).
+
+### Verified
+- Mock `_WIN32` cross-compile of the v2.1 tool clean; CI-identical
+  whole-tree format gate exit 0; real CMake pipeline (Linux,
+  `FC_BUILD_APP=OFF`): core 88 + timeline 64 = 152 tests pass;
+  workflow YAML validated.
+- The forwarder DLL itself cannot be built or linked in the sandbox
+  (no MinGW/PE toolchain): CI builds it, CI's `objdump` check proves
+  its export table, and the user's machine is the final oracle. If a
+  further schema-miss API set appears at a later startup stage, the
+  v2.1 tool's log will name it directly (AV-target attribution), and
+  the same forwarder technique applies.
+
 ## [0.4.5] - 2026-09-01
 
 Diagnostic escalation. Field report from the v0.4.4 portable build:
@@ -609,6 +703,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.6]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.6
 [0.4.5]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.5
 [0.4.4]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.4
 [0.4.3]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.3

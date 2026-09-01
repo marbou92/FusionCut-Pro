@@ -104,6 +104,13 @@ struct ExcInfo {
     unsigned long long rip; // thread RIP at the event (0 = unavailable)
     char blame[1024];       // module containing the fault (or note)
     unsigned long long blameOff;
+    // v2.1: module containing the AV TARGET address - for loader-phase
+    // faults this names the DLL whose (invalid) data the loader was
+    // reading, which is the actual culprit (the instruction blame lands
+    // in ntdll, which is only the messenger). Empty if the target lies
+    // outside every recorded module.
+    char avTargetBlame[1024];
+    unsigned long long avTargetOff;
 };
 
 ExcInfo g_excs[kMaxExcs];
@@ -321,6 +328,8 @@ void recordException(const DEBUG_EVENT &ev) {
     e.rip = 0;
     e.blame[0] = 0;
     e.blameOff = 0;
+    e.avTargetBlame[0] = 0;
+    e.avTargetOff = 0;
 
     // Thread RIP as a backup attribution source (ExceptionAddress is
     // usually the faulting instruction itself, but for jumps through
@@ -345,6 +354,19 @@ void recordException(const DEBUG_EVENT &ev) {
     } else {
         snprintf(e.blame, sizeof(e.blame), "(no module - raw address 0x%016llx)", e.addr);
         e.blameOff = e.addr;
+    }
+
+    // Attribute the AV TARGET address too (v2.1). For a loader-phase
+    // fault the instruction address blames ntdll (the loader code),
+    // but the DATA being read belongs to the module named here - that
+    // module is the real culprit.
+    if (r.ExceptionCode == 0xC0000005 && r.NumberParameters >= 2) {
+        unsigned long long toff = 0;
+        const char *tb = blameFor(e.avTarget, &toff);
+        if (tb) {
+            strncpy(e.avTargetBlame, tb, sizeof(e.avTargetBlame) - 1);
+            e.avTargetOff = toff;
+        }
     }
     ++g_excCount;
 }
@@ -511,14 +533,19 @@ void logWatch(const WatchResult &res) {
     logLine(line);
     for (int i = 0; i < g_excCount; ++i) {
         const ExcInfo &e = g_excs[i];
+        char targetNote[1100] = "";
+        if (e.avTargetBlame[0]) {
+            snprintf(targetNote, sizeof(targetNote), " -> target inside %s +0x%llx",
+                     baseNameOf(e.avTargetBlame), e.avTargetOff);
+        }
         snprintf(line, sizeof(line),
-                 "  %s  code=0x%08lx  addr=0x%016llx  in %s +0x%llx  (AV %s 0x%016llx)",
+                 "  %s  code=0x%08lx  addr=0x%016llx  in %s +0x%llx  (AV %s 0x%016llx%s)",
                  e.firstChance ? "1st-chance" : "2ND-CHANCE", (unsigned long)e.code, e.addr,
                  baseNameOf(e.blame), e.blameOff,
                  e.avType == 0
                      ? "read of"
                      : (e.avType == 1 ? "write to" : (e.avType == 8 ? "EXECUTE of" : "?")),
-                 e.avTarget);
+                 e.avTarget, targetNote);
         logLine(line);
     }
     logLine("");
@@ -552,6 +579,13 @@ void logWatch(const WatchResult &res) {
                      (unsigned long)e.code, e.addr, e.blame, e.blameOff);
             logLine(line);
             logLine("  (recorded immediately before death - this is the fault site).");
+            if (e.avTargetBlame[0]) {
+                snprintf(line, sizeof(line),
+                         "  the data being accessed lies in %s +0x%llx - THAT module",
+                         e.avTargetBlame, e.avTargetOff);
+                logLine(line);
+                logLine("  is the culprit (ntdll is only the code reading it).");
+            }
         } else {
             logLine("  no exception was raised at all - the loader aborted on its own.");
             logLine("  prime suspects = the last DLLs on the load trail above");
@@ -690,11 +724,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
         char exc[600] = "";
         if (g_excCount > 0) {
             const ExcInfo &e = g_excs[g_excCount - 1];
+            char tgt[200] = "";
+            if (e.avTargetBlame[0]) {
+                snprintf(tgt, sizeof(tgt),
+                         "Data accessed lies in:\r\n  %s +0x%llx\r\n"
+                         "(that module is the culprit;\r\n"
+                         " ntdll is only the reader.)\r\n",
+                         baseNameOf(e.avTargetBlame), e.avTargetOff);
+            }
             snprintf(exc, sizeof(exc),
                      "A first-chance exception was recorded just before\r\n"
                      "death - that IS the fault site:\r\n"
-                     "  0x%08lx at 0x%016llx in %s +0x%llx\r\n\r\n",
-                     (unsigned long)e.code, e.addr, baseNameOf(e.blame), e.blameOff);
+                     "  0x%08lx at 0x%016llx in %s +0x%llx\r\n"
+                     "%s\r\n",
+                     (unsigned long)e.code, e.addr, baseNameOf(e.blame), e.blameOff, tgt);
         }
         snprintf(summary, sizeof(summary),
                  "DIED DURING LOADER INIT\r\n"

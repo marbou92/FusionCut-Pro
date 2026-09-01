@@ -38,7 +38,7 @@ arrive milestone by milestone.
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+, hardened v0.4.5):** a built-in
+> **Runtime crash reporting (v0.4.1+, hardened v0.4.6):** a built-in
 > crash handler captures access violations, uncaught C++ exceptions, CRT
 > misuses, pure-virtual calls, and POSIX signals, then writes a
 > structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
@@ -72,11 +72,20 @@ arrive milestone by milestone.
 
 | | Minimum | Recommended |
 | --- | --- | --- |
-| OS | Windows 7 SP1+ (32/64-bit) | Windows 10/11 (64-bit) |
+| OS | Windows 8.1+ (64-bit; 32-bit untested) | Windows 10/11 (64-bit) |
 | RAM | 1 GB | 4 GB |
 | CPU | Intel Core 2 Duo / AMD Athlon 64 X2 | Intel i5 / AMD Ryzen 5 |
 | Storage | 500 MB + project space | 2 GB SSD |
 | Graphics | DirectX 9 compatible | DirectX 11 with GPU acceleration |
+
+> **Why not Windows 7:** the FFmpeg 8 runtime stack (via MSYS2)
+> contains Rust-built DLLs (e.g. `librav1e.dll`) that import the
+> `WaitOnAddress` futex API set, which does not exist on Windows 7
+> even with the v0.4.6 forwarder stub (its KernelBase
+> implementations are absent there). Windows 8.x needs the bundled
+> `api-ms-win-core-synch-l1-2-0.dll` forwarder (shipped automatically
+> since v0.4.6); Windows 10/11 resolves the name natively and ignores
+> the stub.
 
 ## Getting a portable build
 
