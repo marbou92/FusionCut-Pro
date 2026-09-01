@@ -4,6 +4,142 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] - 2026-08-30
+
+Correction + diagnostic tool. v0.4.3's pre-main VEH install +
+boot-trace log did NOT resolve the user's "0xc0000005 unable to start"
+crash — the portable .exe still failed immediately on double-click with
+the bare Windows loader dialog and **no log file** was produced.
+
+### Root cause (revised)
+- v0.4.3 assumed the "unable to start correctly (0xc0000005)" dialog
+  was a Win32 exception a VEH could catch if installed early enough.
+  This was wrong. That specific dialog is the **Windows loader's own
+  failure dialog** (`BasepReportFatalError`), shown when
+  `ntdll!LdrpInitializeProcess` returns `STATUS_ACCESS_VIOLATION`
+  during process setup. The Windows loader sequence is:
+  ```
+  map exe image
+    -> walk Import Directory, load each dependent DLL (recursive)
+      -> run each DLL's DllMain(DLL_PROCESS_ATTACH)
+        -> run .CRT$XIA  (CRT init)
+          -> run .CRT$XCU  (user static initializers)   <- v0.4.3 VEH lives here
+            -> call main() / WinMain
+  ```
+- A loader-phase `0xc0000005` aborts **before** the `.CRT$XCU` step.
+  That means the `EarlyCrashHandlerInstaller` static initializer that
+  v0.4.3 added **never runs** — the VEH is never installed, the
+  boot-trace log file is never opened, no `AddVectoredExceptionHandler`
+  / `SetUnhandledExceptionFilter` / `set_terminate` call ever executes.
+- Even if the static initializer DID run, a loader-phase failure is
+  not dispatched as a Win32 exception to user code — the loader hands
+  the failure NTSTATUS straight to Windows Error Reporting, which shows
+  the dialog. No user-mode exception filter can observe it. VEH is the
+  wrong tool for this entire class of failure.
+
+### Added — `fcp-loader-check.exe` (zero-dependency PE import walker)
+- `src/app/loader_check.cpp` (NEW): a Windows-only diagnostic that
+  walks the PE import tree of `FusionCutPro.exe` **from outside the
+  process** and reports, by name, every DLL the loader cannot map.
+  This is the diagnostic the bare "0xc0000005 unable to start" dialog
+  does not show — it names the missing/wrong DLL so the actual fix
+  (a one-line recipe edit to bundle that DLL) is immediate.
+- Design constraints that make the tool survive exactly the scenario
+  it diagnoses:
+  * **WIN32 subsystem app** (no console flash on double-click).
+  * **Fully static link** (`-static` in CMake): the tool has **zero DLL
+    dependencies of its own** — it runs even when the portable folder
+    is missing a DLL that breaks `FusionCutPro.exe`. Without this,
+    `fcp-loader-check.exe` would itself 0xc0000005 at startup, making
+    it useless as a diagnostic.
+  * Uses **only `kernel32` + `user32`** functions — both are always
+    present on every Windows since NT 3.1.
+  * Walks imports via `LoadLibraryEx(..., DONT_RESOLVE_DLL_REFERENCES)`
+    — maps each image **without running DllMain and without resolving
+    its own imports**. A bad `DllMain` in a dependency therefore cannot
+    crash the tool itself.
+  * Recursively walks the transitive import tree (depth-first, with a
+    visited set to break cycles, hard cap at depth 24).
+- Output: a `MessageBox` summarizing the result (0 failures → "the
+  0xc0000005 is a DllMain crash, use Event Viewer"; N failures → "open
+  the log to see the failing DLL name(s)") plus a
+  `loader-check-<timestamp>.log` next to the exe. Falls back to
+  `%TEMP%` if the portable folder is read-only (e.g. extracted to
+  `Program Files`).
+- Each FAIL line names the DLL + the `GetLastError` code + the OS
+  error string. Distinct error codes pin distinct root causes:
+  * `ERROR_MOD_NOT_FOUND` (126) — the classic missing-DLL.
+  * `ERROR_BAD_EXE_FORMAT` (193) — wrong-architecture DLL (e.g. a
+    32-bit `Qt5Core.dll` in a 64-bit package).
+  * other — corrupt PE, access denied, etc.
+- `src/app/CMakeLists.txt`: new `fcp-loader-check` target. Windows-only
+  (`if(WIN32)`), `WIN32` subsystem, links `user32` (kernel32 auto-linked),
+  `target_link_options(... PRIVATE -static)` under MinGW. Install rule
+  drops the exe next to `FusionCutPro.exe` in the portable root.
+- `.github/workflows/portable-build.yml`: the existing ldd sweep
+  (`for bin in dist/*.exe ...`) naturally picks up
+  `fcp-loader-check.exe` — but because the tool is `-static`, ldd
+  returns zero `/mingw64/` deps for it, which is correct, not a bug.
+  Comment added to the sweep explaining this so a future maintainer
+  doesn't "fix" the empty result by removing the static link.
+  `PORTABLE.txt` rewritten with a clear triage ladder:
+  (1) won't start → run `fcp-loader-check.exe` first;
+  (2) starts but crashes at runtime → `crash-logs/` has the report.
+
+### What `fcp-loader-check.exe` does NOT catch
+- A DLL that **maps fine but crashes inside its own `DllMain`** when
+  the real `FusionCutPro.exe` loads it. `DONT_RESOLVE_DLL_REFERENCES`
+  skips `DllMain`, so the tool cannot observe a `DllMain` fault. For
+  that class the documented fallback is **Event Viewer**:
+  `eventvwr.msc → Windows Logs → Application → filter for
+  FusionCutPro.exe → read the "Faulting module name:" line of the most
+  recent Application Error event** (Event ID 1000). That line names the
+  crashing DLL in 30 seconds with no tool install. The
+  `fcp-loader-check.exe` MessageBox explicitly tells the user to do
+  this when the import walk reports 0 failures.
+
+### Fixed (v0.4.3 narrative correction)
+- The `[0.4.3]` CHANGELOG entry claimed the static-init VEH install
+  "closes the loader-phase crash gap". That was incorrect — see the
+  revised root cause above. The static-init install is still useful
+  for **runtime** crashes that happen after `.CRT$XCU` (it widens the
+  window the VEH covers from "main() onward" to "static-init onward"),
+  but it cannot and does not cover loader-phase failures. v0.4.3's
+  code is left in place (it is correct for its actual scope); v0.4.4
+  adds the complementary tool for the class v0.4.3 cannot reach.
+
+### Verified
+- `src/app/loader_check.cpp` standalone cross-compile on Linux with a
+  minimal `_WIN32` mock-header set (re-created for this file only):
+  `g++ -std=c++17 -D_WIN32 -I winmock -Wall -Wextra -Werror -Wpedantic
+  -c loader_check.cpp` parses clean. The mock declares the PE structs
+  (`IMAGE_DOS_HEADER`, `IMAGE_NT_HEADERS`, `IMAGE_IMPORT_DESCRIPTOR`,
+  `IMAGE_DIRECTORY_ENTRY_IMPORT`), the macros
+  (`IMAGE_DOS_SIGNATURE`, `IMAGE_NT_SIGNATURE`,
+  `DONT_RESOLVE_DLL_REFERENCES`, `MAX_PATH`, `WIN32_LEAN_AND_MEAN`,
+  `FORMAT_MESSAGE_FROM_SYSTEM`, `FORMAT_MESSAGE_IGNORE_INSERTS`,
+  `MB_OK`, `MB_ICONERROR`, `MB_ICONINFORMATION`,
+  `FILE_SHARE_READ`, `CREATE_ALWAYS`, `FILE_ATTRIBUTE_NORMAL`,
+  `GENERIC_WRITE`, `INVALID_HANDLE_VALUE`) and the kernel32/user32
+  function signatures (`LoadLibraryExA`, `LoadLibraryA`,
+  `GetLastError`, `FormatMessageA`, `CreateFileA`, `WriteFileA`,
+  `CloseHandle`, `GetModuleFileNameA`, `SetCurrentDirectoryA`,
+  `GetLocalTime`, `GetTempPathA`, `GetConsoleWindow`, `MessageBoxA`)
+  against documented MinGW-w64 typedefs.
+- Real CMake pipeline (Linux, `FC_BUILD_APP=OFF`): core 88 + timeline
+  64 = 152 tests pass via ctest. No regressions — v0.4.4 adds a
+  Windows-only CMake target that the Linux leg does not build.
+- Mock is a syntax-level check only — it does not validate the link
+  step or the runtime behavior of `LoadLibraryExA`. The CI MinGW
+  portable leg (`windows-portable` job) is the authoritative oracle
+  for the Windows build, same as v0.4.2/v0.4.3.
+- The tool's own portability belt-and-braces: `-static` link means the
+  resulting `fcp-loader-check.exe` will run on any Windows x64 machine
+  regardless of whether the MinGW runtime DLLs are present. If the
+  portable zip's own `FusionCutPro.exe` cannot start because, say,
+  `libstdc++-6.dll` is missing, `fcp-loader-check.exe` (which has no
+  such dependency) still runs and names `libstdc++-6.dll` as the FAIL.
+
 ## [0.4.3] - 2026-08-30
 
 Hotfix: portable-build runtime crash class. v0.4.2's MinGW
@@ -353,6 +489,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.4]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.4
 [0.4.3]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.3
 [0.4.2]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.2
 [0.4.1]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.1

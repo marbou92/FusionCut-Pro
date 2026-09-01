@@ -48,3 +48,46 @@ endif()
 # flat directory; CI runs windeployqt plus an ldd sweep for FFmpeg/MinGW
 # runtime DLLs during packaging.
 install(TARGETS FusionCutPro RUNTIME DESTINATION .)
+
+# ---------------------------------------------------------------------------
+# fcp-loader-check: zero-dependency Windows loader diagnostic.
+#
+# The Windows loader dialog "The application was unable to start
+# correctly (0xc0000005)" is shown BEFORE any user code in
+# FusionCutPro.exe runs (it is a loader-phase failure during
+# import-resolution / DllMain / CRT-init). The in-process crash
+# handler installed at .CRT$XCU static-init time is therefore never
+# installed for this crash class - no log is produced. This tool
+# walks the PE import tree of FusionCutPro.exe from OUTSIDE the
+# process and names any DLL the loader cannot map, which is the
+# diagnostic the bare "0xc0000005" dialog does not show.
+#
+# Design constraints:
+#   * WIN32 subsystem app (no console flash on double-click).
+#   * Fully static link (-static): zero DLL deps of its own, so it
+#     runs even when the portable folder is missing a DLL that
+#     breaks FusionCutPro.exe.
+#   * Uses ONLY kernel32 + user32 (always present on every Windows
+#     since NT 3.1).
+#   * Walks imports via DONT_RESOLVE_DLL_REFERENCES - maps each image
+#     without running DllMain, so a bad DllMain in a dependency
+#     cannot crash the tool itself.
+# Windows-only target; the qt-app-ubuntu CI leg does not build it.
+# -------------------------------------------------------------------------
+if(WIN32)
+    add_executable(fcp-loader-check WIN32
+        loader_check.cpp)
+
+    target_link_libraries(fcp-loader-check PRIVATE user32)
+
+    # Full static link so the tool has zero DLL dependencies of its
+    # own. Without this, fcp-loader-check.exe would itself fail with
+    # "0xc0000005 unable to start" if a MinGW runtime DLL was missing
+    # - making it useless as a diagnostic. -static covers libgcc,
+    # libstdc++, and libwinpthread.
+    if(MINGW)
+        target_link_options(fcp-loader-check PRIVATE -static)
+    endif()
+
+    install(TARGETS fcp-loader-check RUNTIME DESTINATION .)
+endif()

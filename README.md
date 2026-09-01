@@ -38,20 +38,27 @@ arrive milestone by milestone.
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+, hardened v0.4.3):** a built-in crash
-> handler captures access violations, uncaught C++ exceptions, CRT misuses,
-> pure-virtual calls, and POSIX signals, then writes a structured report
-> (`crash-logs/FusionCutPro-crash-<timestamp>.log` next to the executable)
-> with the exception code, address, stack backtrace, and (Windows) the
-> loaded-module snapshot - the diagnostic that previously required the
-> `run-console.bat` console launcher is now automatic and reaches far
-> more failure modes than stderr alone. As of v0.4.3 the Windows VEH is
-> registered at static-init time (before `main()`), so it also catches
-> loader-phase startup crashes that previously showed the bare Windows
-> 0xc0000005 dialog with no log; a `FusionCutPro-boot-<timestamp>.log`
-> milestone file is also written during startup and embedded into the
-> crash report. `FusionCutPro.exe --crash-test` writes a synthetic
-> report to verify the pipeline on a clean machine.
+> **Runtime crash reporting (v0.4.1+, hardened v0.4.4):** a built-in
+> crash handler captures access violations, uncaught C++ exceptions, CRT
+> misuses, pure-virtual calls, and POSIX signals, then writes a
+> structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
+> next to the executable) with the exception code, address, stack
+> backtrace, and (Windows) the loaded-module snapshot - the diagnostic
+> that previously required the `run-console.bat` console launcher is
+> now automatic and reaches far more failure modes than stderr alone.
+> As of v0.4.3 the Windows VEH is registered at static-init time
+> (before `main()`), which widens the VEH's coverage to runtime
+> crashes that occur after `.CRT$XCU` but does **not** cover
+> loader-phase failures (the Windows "0xc0000005 unable to start"
+> dialog is the loader's own failure, shown before any user code
+> runs). For that class, v0.4.4 ships `fcp-loader-check.exe` - a
+> zero-dependency PE import-tree walker that runs from outside the
+> broken process and names any DLL the loader cannot map. If
+> `FusionCutPro.exe` won't start, double-click
+> `fcp-loader-check.exe` first; it writes
+> `loader-check-<timestamp>.log` with the failing DLL name(s).
+> `FusionCutPro.exe --crash-test` writes a synthetic runtime report
+> to verify the in-process pipeline on a clean machine.
 
 ## System requirements (target)
 
