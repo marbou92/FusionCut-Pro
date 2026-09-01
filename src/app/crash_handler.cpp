@@ -232,9 +232,8 @@ void writeBootStage(int stage, const char *message) {
     }
     std::lock_guard<std::mutex> lock(g_bootTraceMutex);
     char line[512];
-    const int n = std::snprintf(line, sizeof(line), "[%s] stage%d: %s\n",
-                                timestamp().c_str(), stage,
-                                message ? message : "(null)");
+    const int n = std::snprintf(line, sizeof(line), "[%s] stage%d: %s\n", timestamp().c_str(),
+                                stage, message ? message : "(null)");
     if (n > 0) {
         std::fwrite(line, 1, static_cast<size_t>(n), g_bootTraceFile);
         std::fflush(g_bootTraceFile);
@@ -509,8 +508,7 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
     FILE *fp = std::fopen(path.c_str(), "wb");
     if (!fp) {
         // Fallback 1: cwd-relative.
-        std::fprintf(stderr,
-                     "FusionCut Pro: cannot open crash log at %s; trying cwd\n",
+        std::fprintf(stderr, "FusionCut Pro: cannot open crash log at %s; trying cwd\n",
                      path.c_str());
         path = leaf;
         fp = std::fopen(path.c_str(), "wb");
@@ -534,8 +532,7 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
         writtenPath = path;
         std::fprintf(stderr, "FusionCut Pro: crash log written to %s\n", path.c_str());
     } else {
-        std::fprintf(stderr,
-                     "FusionCut Pro: FAILED to write crash log at any candidate path.\n");
+        std::fprintf(stderr, "FusionCut Pro: FAILED to write crash log at any candidate path.\n");
         writtenPath = "(write failed; see stderr)";
     }
 
@@ -839,8 +836,7 @@ void installCrashHandler(const std::string &appVersion, const std::string &repor
         // without touching libc malloc. Opened once here; reused per
         // crash.
         const std::string dir = resolveReportDir();
-        const std::string path =
-            joinPath(dir, "FusionCutPro-crash-" + timestamp() + ".log");
+        const std::string path = joinPath(dir, "FusionCutPro-crash-" + timestamp() + ".log");
         g_logFd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         // If the open failed, signal handlers fall back to stderr via
         // backtrace_symbols_fd (which writes to STDOUT/STDERR_FILENO).

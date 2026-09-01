@@ -126,6 +126,14 @@ the bare Windows loader dialog and **no log file** was produced.
   `CloseHandle`, `GetModuleFileNameA`, `SetCurrentDirectoryA`,
   `GetLocalTime`, `GetTempPathA`, `GetConsoleWindow`, `MessageBoxA`)
   against documented MinGW-w64 typedefs.
+- Format check: `src/app/crash_handler.cpp` (touched by v0.4.3 but
+  never run through the formatter in that push) is now clang-format
+  22.1.8-clean. v0.4.4's first CI run failed the blocking format job
+  on exactly this file (4 continuation-line spots); this re-run
+  formats it (5 insertions / 9 deletions, whitespace only - no
+  behavior change) and the whole `src/`+`tests/` tree now passes
+  `clang-format --dry-run --Werror`. The `src/app/loader_check.cpp`
+  format pass from the first v0.4.4 push is unchanged.
 - Real CMake pipeline (Linux, `FC_BUILD_APP=OFF`): core 88 + timeline
   64 = 152 tests pass via ctest. No regressions — v0.4.4 adds a
   Windows-only CMake target that the Linux leg does not build.
