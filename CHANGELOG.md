@@ -4,6 +4,118 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] - 2026-09-01
+
+Diagnostic escalation. Field report from the v0.4.4 portable build:
+`FusionCutPro.exe` still dies on double-click with the bare
+"unable to start correctly (0xc0000005)" dialog; `fcp-loader-check.exe`
+(v1) ran its import-tree probe and reported **all DLLs present** — but
+the tool itself then crashed at process exit (WER BEX64 event,
+execute-violation at a raw import-table RVA), and Event Viewer showed
+**no Application-Error event for FusionCutPro.exe at all**.
+
+### Root cause (what the field report proved)
+- The v0.4.4 import probe was *correct*: every DLL in the portable
+  folder maps. The startup crash is therefore **not** a missing or
+  wrong-architecture DLL.
+- The absence of an Event-1000 entry for FusionCutPro.exe means the
+  failure never reaches WER's in-process reporting — it dies inside
+  the loader-initialization phase (DllMain / TLS callbacks / static
+  initializers), where the failure is converted into the process
+  exit status and the "unable to start correctly" dialog is all the
+  user ever sees. No in-process handler (VEH, boot trace) and no
+  post-hoc WER log can observe that window.
+- The v1 tool's own exit crash: it left ~250 DLLs mapped with
+  `DONT_RESOLVE_DLL_REFERENCES` and never freed them; at process exit
+  the loader teardown jumped through an unresolved import-table entry
+  (a raw RVA, e.g. `0x9fade` → DEP execute violation → the WER BEX64
+  event the user pasted). Diagnostic bug in v0.4.4, now fixed.
+
+### Added — phase 2: debug-launch watch in `fcp-loader-check.exe`
+- `src/app/loader_check.cpp` v2 is now a **two-phase** diagnostic:
+  - **Phase 1** (unchanged in spirit): static import-tree probe with
+    `DONT_RESOLVE_DLL_REFERENCES`; catches missing/wrong-arch DLLs by
+    name. v2 change: every probe is `FreeLibrary`d immediately after
+    its subtree walk, so the loader's module list is clean at process
+    death and the tool no longer crashes after finishing (the exact
+    v0.4.4 exit-crash root cause).
+  - **Phase 2** (new — the decisive diagnostic): the tool spawns
+    `FusionCutPro.exe` **suspended with `DEBUG_ONLY_THIS_PROCESS`**
+    (the tool becomes the target's debugger), resumes it, and pumps
+    debug events via the classic Windows debug API
+    (`WaitForDebugEvent` / `ContinueDebugEvent` — kernel32 only, no
+    dbghelp/psapi, no debugger install). Debug events are delivered
+    to the debugger **before** Windows Error Reporting, including
+    exceptions raised inside DllMain / TLS callbacks / static
+    initializers — precisely the class where the bare
+    "0xc0000005 unable to start" dialog appears with no Event-1000
+    entry and no log.
+- What the watch records and reports:
+  - Every `LOAD_DLL` event (module name via the event's file handle +
+    `GetFinalPathNameByHandleA`, base + size via remote PE-header
+    read with `ReadProcessMemory`) — the load trail shows exactly how
+    far initialization got.
+  - Every exception event: code, address, first/second chance, access
+    type (read/write/**execute**) + target address, thread RIP, and
+    **fault-address → module attribution** (module + offset).
+  - A second-chance (unhandled) exception is caught, named, and the
+    target is terminated *before* WER can show any dialog.
+  - If the process dies with an NTSTATUS but no exception reached WER
+    (the exact "unable to start correctly" mode): any first-chance
+    exception recorded just before death **is the fault site** (the
+    loader's SEH swallowed it into the exit status); failing that, the
+    last DLLs on the load trail are reported as prime suspects.
+  - If the process initializes and runs 25 s without a fatal
+    exception: reported healthy — the crash does not reproduce under
+    a debugger, which points at environment injection (antivirus /
+    shell-hook DLL in the Explorer launch path) rather than the app;
+    the summary then suggests unblocking the zip / launching via cmd.
+- First-chance C++ exceptions (`0xE06D7363`, thread-name exceptions
+  `0x406D1388`) are passed through unhandled to the app's own EH —
+  a Qt app legitimately raises benign exceptions during init probing;
+  only second-chance events are treated as fatal.
+- Still zero-dependency by design: `WIN32` subsystem, `-static`
+  link, kernel32 + user32 only.
+
+### Fixed
+- `fcp-loader-check.exe` exit crash (v0.4.4): `DONT_RESOLVE` probe
+  mappings are now `FreeLibrary`d right after each subtree walk
+  (refcount-symmetric probing). The v1 tool reliably produced its log
+  and summary, then crashed at process death with a WER BEX64 event
+  that polluted Event Viewer with an `fcp-loader-check.exe` entry —
+  confusingly similar to the app's own crash signature.
+
+### Verified
+- Mock `_WIN32` cross-compile on Linux
+  (`g++ -std=c++17 -D_WIN32 -I winmock -Wall -Wextra -Werror
+  -Wpedantic`): clean. The mock was extended with the full debug-API
+  surface the new phase uses (`DEBUG_EVENT` + its union of
+  `*_DEBUG_INFO` structs, `EXCEPTION_RECORD` (with
+  `ExceptionInformation[15]`), aligned x64-style `CONTEXT` with
+  `Rip`, `STARTUPINFOA`/`PROCESS_INFORMATION`, `CONTEXT_CONTROL`,
+  `THREAD_GET_CONTEXT`, `DBG_CONTINUE`/`DBG_EXCEPTION_NOT_HANDLED`,
+  event-code constants 1–9, `DEBUG_ONLY_THIS_PROCESS`,
+  `CREATE_SUSPENDED`, `SEM_*`, and the kernel32 signatures for
+  `CreateProcessA`, `ResumeThread`, `WaitForDebugEvent`,
+  `ContinueDebugEvent`, `OpenThread`, `GetThreadContext`,
+  `ReadProcessMemory`, `TerminateProcess`,
+  `GetFinalPathNameByHandleA`, `GetTickCount64`, `SetErrorMode`,
+  `FreeLibrary`). The mock compile caught one real source bug
+  (unused parameter) and one format-truncation risk before CI.
+- Format check: `clang-format -i src/app/loader_check.cpp` then the
+  CI-identical whole-tree gate
+  (`find src tests -type f \( -name '*.cpp' -o -name '*.h' \)
+  -print0 | xargs -0 -n1 clang-format --dry-run --Werror`) exits 0 —
+  **all** touched files formatted this time (the v0.4.4 miss).
+- Real CMake pipeline (Linux, `FC_BUILD_APP=OFF`): core 88 + timeline
+  64 = 152 tests pass. No regressions; the loader-check target is
+  Windows-only.
+- Windows-only behavior (debug-event flow, remote PE read,
+  `GetFinalPathNameByHandleA` path handling) is CI-verified by the
+  MinGW portable leg — same caveat as v0.4.2–v0.4.4: the sandbox has
+  no Windows; the mock is a syntax-level gate, the CI leg is the
+  authoritative oracle.
+
 ## [0.4.4] - 2026-08-30
 
 Correction + diagnostic tool. v0.4.3's pre-main VEH install +
@@ -497,6 +609,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.5]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.5
 [0.4.4]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.4
 [0.4.3]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.3
 [0.4.2]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.2

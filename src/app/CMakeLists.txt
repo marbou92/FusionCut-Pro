@@ -71,7 +71,17 @@ install(TARGETS FusionCutPro RUNTIME DESTINATION .)
 #     since NT 3.1).
 #   * Walks imports via DONT_RESOLVE_DLL_REFERENCES - maps each image
 #     without running DllMain, so a bad DllMain in a dependency
-#     cannot crash the tool itself.
+#     cannot crash the tool itself. Since v0.4.5 every probe mapping
+#     is FreeLibrary'd right after its subtree walk (v0.4.4 left them
+#     mapped and the loader teardown crashed the tool at exit).
+#   * v0.4.5 phase 2: launches FusionCutPro.exe under this tool as
+#     its DEBUGGER (DEBUG_ONLY_THIS_PROCESS + WaitForDebugEvent/
+#     ContinueDebugEvent - kernel32 only, no dbghelp) and records the
+#     module load trail + every exception with fault-address ->
+#     module attribution. Debug events are delivered before Windows
+#     Error Reporting, so this catches DllMain / static-initializer
+#     faults that produce the "0xc0000005 unable to start" dialog
+#     with no Event Viewer entry at all.
 # Windows-only target; the qt-app-ubuntu CI leg does not build it.
 # -------------------------------------------------------------------------
 if(WIN32)

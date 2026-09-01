@@ -38,7 +38,7 @@ arrive milestone by milestone.
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+, hardened v0.4.4):** a built-in
+> **Runtime crash reporting (v0.4.1+, hardened v0.4.5):** a built-in
 > crash handler captures access violations, uncaught C++ exceptions, CRT
 > misuses, pure-virtual calls, and POSIX signals, then writes a
 > structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
@@ -55,10 +55,18 @@ arrive milestone by milestone.
 > zero-dependency PE import-tree walker that runs from outside the
 > broken process and names any DLL the loader cannot map. If
 > `FusionCutPro.exe` won't start, double-click
-> `fcp-loader-check.exe` first; it writes
-> `loader-check-<timestamp>.log` with the failing DLL name(s).
-> `FusionCutPro.exe --crash-test` writes a synthetic runtime report
-> to verify the in-process pipeline on a clean machine.
+> `fcp-loader-check.exe` first. As of v0.4.5 it runs two phases: an
+> import-tree probe that names any DLL the loader cannot map, then a
+> **debug-launch watch** — it starts `FusionCutPro.exe` under a
+> built-in mini-debugger (Windows debug API, kernel32 only) and
+> records every DLL load and every exception — including faults
+> inside DllMain / static initializers that Windows Error Reporting
+> never sees (which is why the "0xc0000005 unable to start" dialog
+> produces no Event Viewer entry). The tool names the faulting module
+> + offset and writes `loader-check-<timestamp>.log` with the full
+> module load trail. `FusionCutPro.exe --crash-test` writes a
+> synthetic runtime report to verify the in-process pipeline on a
+> clean machine.
 
 ## System requirements (target)
 

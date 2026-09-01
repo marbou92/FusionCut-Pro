@@ -1,68 +1,66 @@
-// FusionCut Pro - zero-dependency Windows loader diagnostic.
+// FusionCut Pro - zero-dependency Windows loader + startup diagnostic.
 //
-// WHY THIS EXISTS
-//   The Windows loader dialog "The application was unable to start
-//   correctly (0xc0000005)" is shown by ntdll!LdrpInitializeProcess
-//   when it returns STATUS_ACCESS_VIOLATION during process setup -
-//   i.e. BEFORE any user code in the target .exe runs. The Windows
-//   loader sequence is:
+// v2 (v0.4.5). Two phases, one run:
 //
-//     map exe image
-//       -> walk Import Directory, load each dependent DLL (recursive)
-//         -> run each DLL's DllMain(DLL_PROCESS_ATTACH)
-//           -> run .CRT$XIA  (CRT init)
-//             -> run .CRT$XCU  (user static initializers)
-//               -> call main() / WinMain
+//   PHASE 1 - static import-tree probe (target NOT executed):
+//     Maps FusionCutPro.exe + every DLL in its transitive import tree
+//     with LoadLibraryEx(DONT_RESOLVE_DLL_REFERENCES) and walks the PE
+//     import directories manually. Catches missing DLLs
+//     (ERROR_MOD_NOT_FOUND) and wrong-architecture DLLs
+//     (ERROR_BAD_EXE_FORMAT) by name, without running any DllMain.
 //
-//   A loader-phase 0xc0000005 aborts BEFORE .CRT$XCU. That means:
-//     * the in-process VEH installed by the crash handler's static
-//       initializer is NEVER installed (that initializer never runs)
-//     * the boot-trace log file is NEVER opened
-//     * no static initializer runs, no SetUnhandledExceptionFilter,
-//       no AddVectoredExceptionHandler - nothing in the process
-//       observes the failure
+//     v2 FIX: each probe mapping is FreeLibrary'd immediately after its
+//     subtree walk. v0.4.4 left ~250 DONT_RESOLVE-mapped images in the
+//     process at exit; the loader teardown then jumped through an
+//     unresolved import-table entry (raw RVA like 0x9fade -> DEP
+//     execute violation -> WER BEX64 event) - the tool itself crashed
+//     right AFTER finishing its job. Refcount-symmetric probing keeps
+//     the module list clean at process death.
 //
-//   So the dialog pops with zero diagnostic, exactly as the user sees.
-//   The only way to name the missing/wrong DLL is to inspect the
-//   target .exe's import tree from OUTSIDE the process - which is
-//   exactly what this tool does.
+//   PHASE 2 - debug-launch watch (the decisive diagnostic):
+//     Spawns FusionCutPro.exe SUSPENDED with DEBUG_ONLY_THIS_PROCESS
+//     (this tool becomes its debugger), resumes it, and pumps debug
+//     events. Debug events are delivered to the debugger BEFORE
+//     Windows Error Reporting - including exceptions raised inside
+//     DllMain / TLS callbacks / static initializers during loader
+//     initialization, which is exactly the crash class where the bare
+//     "unable to start correctly (0xc0000005)" dialog appears with NO
+//     Event-1000 entry and NO in-process log.
 //
-// WHAT IT CATCHES
-//   - Missing DLL (most common): LoadLibraryEx returns NULL with
-//     GetLastError = ERROR_MOD_NOT_FOUND (126).
-//   - Wrong-architecture DLL (e.g. 32-bit Qt5Core.dll in a 64-bit
-//     package): GetLastError = ERROR_BAD_EXE_FORMAT (193).
-//   - Corrupt PE: various errors.
-//   Each FAIL line names the DLL + the OS error string, so the cause
-//   is unambiguous.
+//     The watch records:
+//       * every LOAD_DLL event (module name, base, size) - the load
+//         trail shows exactly how far initialization got;
+//       * every exception event (code, address, first/second chance,
+//         AV read/write/execute type + target address, thread RIP);
+//       * a second-chance (unhandled) exception is caught, blamed on
+//         the module containing the faulting address, and the target
+//         is terminated before WER can show any dialog;
+//       * if the process dies with an NTSTATUS but no exception was
+//         dispatched to WER (the pure loader-abort path - the exact
+//         "unable to start correctly (0xc0000005)" mode), any
+//         first-chance exception recorded just before death names the
+//         fault site; failing that, the last DLLs on the load trail
+//         are reported as prime suspects;
+//       * if the process initializes and runs 25 s without a fatal
+//         exception, it is reported healthy - the double-click crash
+//         then does not reproduce under a debugger, which points at
+//         environment injection (antivirus / shell hook DLLs) rather
+//         than the app itself.
 //
-// WHAT IT DOES NOT CATCH
-//   A DLL that MAPS fine but whose DllMain crashes when the real
-//   FusionCutPro.exe loads it. This tool uses
-//   DONT_RESOLVE_DLL_REFERENCES, which maps the image WITHOUT running
-//   DllMain - so a DllMain crash cannot bring the tool down (and
-//   cannot be observed). For that class, use Event Viewer:
-//     eventvwr.msc -> Windows Logs -> Application -> filter
-//     FusionCutPro.exe -> the "Faulting module name:" line of the
-//     most recent Application Error event names the crashing DLL.
-//
-// HOW IT RUNS
-//   - WIN32 subsystem app (no console flash on double-click).
-//   - Statically linked (-static): zero DLL dependencies of its own,
-//     so it runs even when the portable folder is missing a DLL that
-//     breaks FusionCutPro.exe.
-//   - Uses ONLY kernel32 + user32 functions (both always present on
-//     every Windows since NT 3.1).
-//   - Writes loader-check-<timestamp>.log next to itself (falls back
-//     to %TEMP% if the portable folder is read-only), and pops a
-//     MessageBox summarizing the result so a double-click launch
-//     sees something actionable.
-//   - Recursively walks the transitive import tree (depth-first, with
-//     a visited set to break cycles, hard cap at depth 24).
+//   Everything is kernel32 + user32 only; the binary is -static
+//   linked (zero MinGW-runtime DLL dependencies of its own), so it
+//   runs even when the portable folder is missing a DLL that breaks
+//   FusionCutPro.exe. Uses the classic Windows debug API
+//   (CreateProcess + WaitForDebugEvent + ContinueDebugEvent) - no
+//   dbghelp, no psapi, no debugger install required.
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 #include <windows.h>
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -70,6 +68,8 @@ namespace {
 
 constexpr int kMaxVisited = 512;
 constexpr int kMaxDepth = 24;
+constexpr int kMaxMods = 400;
+constexpr int kMaxExcs = 128;
 
 struct Visited {
     char name[256];
@@ -83,6 +83,48 @@ HANDLE g_logFile = INVALID_HANDLE_VALUE;
 // timestamped filename; a 260-char GetTempPathA result + suffix
 // exceeds MAX_PATH. 1024 is well above any realistic Windows path.
 char g_logPath[1024] = {0};
+
+// ----- phase 2 records -------------------------------------------------
+
+struct ModInfo {
+    char name[1024]; // full path (\\?\ prefix stripped)
+    unsigned long long base;
+    unsigned long long size; // SizeOfImage via remote PE header read
+};
+
+ModInfo g_mods[kMaxMods];
+int g_modCount = 0;
+
+struct ExcInfo {
+    DWORD code;
+    unsigned long long addr; // ExceptionRecord.ExceptionAddress
+    DWORD firstChance;
+    unsigned long long avType; // 0 read / 1 write / 8 execute (AV only)
+    unsigned long long avTarget;
+    unsigned long long rip; // thread RIP at the event (0 = unavailable)
+    char blame[1024];       // module containing the fault (or note)
+    unsigned long long blameOff;
+};
+
+ExcInfo g_excs[kMaxExcs];
+int g_excCount = 0;
+
+HANDLE g_dbgProcess = NULL;
+
+// ----- shared log ------------------------------------------------------
+
+void logLine(const char *line) {
+    // Log file only - WIN32 subsystem app has no stdout. The log is
+    // the persistent artifact the user opens after the MessageBox
+    // dismisses.
+    if (g_logFile != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(g_logFile, line, (DWORD)strlen(line), &written, NULL);
+        WriteFile(g_logFile, "\r\n", 2, &written, NULL);
+    }
+}
+
+// ----- phase 1: import-tree probe --------------------------------------
 
 bool alreadyVisited(const char *name) {
     for (int i = 0; i < g_visitedCount; ++i) {
@@ -102,17 +144,6 @@ void markVisited(const char *name) {
         strncpy(g_visited[g_visitedCount].name, name, 255);
         g_visited[g_visitedCount].name[255] = 0;
         ++g_visitedCount;
-    }
-}
-
-void logLine(const char *line) {
-    // Log file only - WIN32 subsystem app has no stdout. The log is
-    // the persistent artifact the user opens after the MessageBox
-    // dismisses.
-    if (g_logFile != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        WriteFile(g_logFile, line, (DWORD)strlen(line), &written, NULL);
-        WriteFile(g_logFile, "\r\n", 2, &written, NULL);
     }
 }
 
@@ -194,7 +225,7 @@ void walkImports(HMODULE h, const char *contextName, int depth) {
 
         // DONT_RESOLVE_DLL_REFERENCES: map image, no DllMain, no
         // transitive load. Catches missing/wrong-arch/corrupt; misses
-        // DllMain crashes (documented at top of file).
+        // DllMain crashes (phase 2 of this tool covers those).
         HMODULE dep = LoadLibraryExA(name, NULL, DONT_RESOLVE_DLL_REFERENCES);
         if (!dep) {
             logFail(name, GetLastError(), contextName);
@@ -202,9 +233,344 @@ void walkImports(HMODULE h, const char *contextName, int depth) {
         }
         logOk(name, contextName);
         walkImports(dep, name, depth + 1);
-        // Intentionally do NOT FreeLibrary(dep): keep it mapped so
-        // the visited set prevents re-walking if a later import pulls
-        // the same DLL (cycle break). OS cleans up at process exit.
+        // v2: NEVER leave a DONT_RESOLVE-mapped image in the loader's
+        // module list. v0.4.4 kept them all mapped (as a re-walk
+        // optimization) and the process then crashed at exit: the
+        // loader teardown jumped through an unresolved import-table
+        // entry (raw RVA -> DEP execute violation, WER BEX64 event).
+        // The visited set above already prevents re-walking; freeing
+        // here keeps the exit path clean. For modules that were
+        // already loaded normally (kernel32 etc.) this is a plain
+        // refcount decrement - symmetric and safe.
+        FreeLibrary(dep);
+    }
+}
+
+// ----- phase 2: debug-launch watch --------------------------------------
+
+// The \\?\ extended-length prefix Win32 path normalization adds; strip
+// it so the log shows a normal user-facing path.
+void stripExtendedPrefix(char *path) {
+    if (strncmp(path, "\\\\?\\", 4) == 0) {
+        memmove(path, path + 4, strlen(path + 4) + 1);
+    }
+}
+
+// Record one module of the debuggee: name via the debug event's file
+// handle, size via reading the remote PE header (SizeOfImage).
+void recordModule(unsigned long long base, HANDLE file) {
+    if (g_modCount >= kMaxMods)
+        return;
+    ModInfo &m = g_mods[g_modCount];
+    m.base = base;
+    m.size = 0;
+    m.name[0] = 0;
+    if (file && file != INVALID_HANDLE_VALUE) {
+        GetFinalPathNameByHandleA(file, m.name, sizeof(m.name) - 1, 0);
+        stripExtendedPrefix(m.name);
+    }
+    if (g_dbgProcess) {
+        IMAGE_DOS_HEADER dos;
+        SIZE_T got = 0;
+        if (ReadProcessMemory(g_dbgProcess, (LPCVOID)base, &dos, sizeof(dos), &got) &&
+            got == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE) {
+            IMAGE_NT_HEADERS nt;
+            got = 0;
+            if (ReadProcessMemory(g_dbgProcess, (LPCVOID)(base + dos.e_lfanew), &nt, sizeof(nt),
+                                  &got) &&
+                got >= sizeof(nt) && nt.Signature == IMAGE_NT_SIGNATURE) {
+                m.size = nt.OptionalHeader.SizeOfImage;
+            }
+        }
+    }
+    ++g_modCount;
+}
+
+// Map a faulting address to the debuggee module containing it.
+// Returns NULL if no module matches (address outside every recorded
+// module - typical for a jump through a garbage pointer).
+const char *blameFor(unsigned long long addr, unsigned long long *offOut) {
+    for (int i = 0; i < g_modCount; ++i) {
+        if (g_mods[i].size != 0 && addr >= g_mods[i].base &&
+            addr < g_mods[i].base + g_mods[i].size) {
+            if (offOut)
+                *offOut = addr - g_mods[i].base;
+            return g_mods[i].name;
+        }
+    }
+    return NULL;
+}
+
+const char *baseNameOf(const char *path) {
+    if (!path)
+        return "";
+    const char *s = strrchr(path, '\\');
+    return s ? s + 1 : path;
+}
+
+void recordException(const DEBUG_EVENT &ev) {
+    if (g_excCount >= kMaxExcs)
+        return;
+    ExcInfo &e = g_excs[g_excCount];
+    const EXCEPTION_RECORD &r = ev.u.Exception.ExceptionRecord;
+    e.code = r.ExceptionCode;
+    e.addr = (unsigned long long)r.ExceptionAddress;
+    e.firstChance = ev.u.Exception.dwFirstChance;
+    e.avType = (r.NumberParameters >= 1) ? r.ExceptionInformation[0] : 0;
+    e.avTarget = (r.NumberParameters >= 2) ? r.ExceptionInformation[1] : 0;
+    e.rip = 0;
+    e.blame[0] = 0;
+    e.blameOff = 0;
+
+    // Thread RIP as a backup attribution source (ExceptionAddress is
+    // usually the faulting instruction itself, but for jumps through
+    // garbage pointers RIP can land in a different module).
+    HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, ev.dwThreadId);
+    if (th) {
+        CONTEXT ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(th, &ctx))
+            e.rip = ctx.Rip;
+        CloseHandle(th);
+    }
+
+    unsigned long long off = 0;
+    const char *b = blameFor(e.addr, &off);
+    if (!b && e.rip)
+        b = blameFor(e.rip, &off);
+    if (b) {
+        strncpy(e.blame, b, sizeof(e.blame) - 1);
+        e.blameOff = off;
+    } else {
+        snprintf(e.blame, sizeof(e.blame), "(no module - raw address 0x%016llx)", e.addr);
+        e.blameOff = e.addr;
+    }
+    ++g_excCount;
+}
+
+struct WatchResult {
+    bool spawned; // CreateProcess succeeded
+    int outcome;  // 0 fatal exception, 1 died with NTSTATUS, 2 clean exit,
+                  // 3 healthy (25 s, no fatal), 4 spawn failed
+    DWORD exitCode;
+    int fatalIdx; // index into g_excs of the second-chance exception (-1)
+    DWORD spawnErr;
+};
+
+void runWatch(const char *targetPath, const char *workDir, WatchResult &res) {
+    res.spawned = false;
+    res.outcome = 4;
+    res.exitCode = 0;
+    res.fatalIdx = -1;
+    res.spawnErr = 0;
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    char cmd[1100];
+    snprintf(cmd, sizeof(cmd), "\"%s\"", targetPath);
+
+    if (!CreateProcessA(targetPath, cmd, NULL, NULL, FALSE,
+                        DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED, NULL, workDir, &si, &pi)) {
+        res.spawnErr = GetLastError();
+        return;
+    }
+    res.spawned = true;
+    g_dbgProcess = pi.hProcess;
+    ResumeThread(pi.hThread);
+
+    ULONGLONG t0 = GetTickCount64();
+    bool sawInitialBreakpoint = false;
+    bool exited = false;
+    bool weKilled = false;
+    bool killAfter = false;
+
+    for (;;) {
+        DEBUG_EVENT ev;
+        memset(&ev, 0, sizeof(ev));
+        if (!WaitForDebugEvent(&ev, 2000)) {
+            // Quiet period: no debug event pending.
+            ULONGLONG elapsed = GetTickCount64() - t0;
+            if (sawInitialBreakpoint && elapsed > 25000) {
+                // Startup completed long ago and nothing fatal happened:
+                // declare healthy and stop the debuggee before it shows a
+                // window the user might mistake for the app working.
+                TerminateProcess(pi.hProcess, 0);
+                weKilled = true;
+            } else if (elapsed > 60000) {
+                // Hard cap: initial breakpoint never even arrived (extreme
+                // loader hang). Kill and fall through to reporting.
+                TerminateProcess(pi.hProcess, 0);
+                weKilled = true;
+            }
+            if (weKilled) {
+                // Loop once more so the EXIT_PROCESS_DEBUG_EVENT drains.
+                if (exited)
+                    break;
+            }
+            continue;
+        }
+
+        DWORD cont = DBG_CONTINUE;
+        switch (ev.dwDebugEventCode) {
+        case EXCEPTION_DEBUG_EVENT: {
+            const DWORD code = ev.u.Exception.ExceptionRecord.ExceptionCode;
+            const bool secondChance = (ev.u.Exception.dwFirstChance == 0);
+            if (code == 0x80000003 && !sawInitialBreakpoint) {
+                // The loader's initial breakpoint - everything is fine.
+                sawInitialBreakpoint = true;
+                cont = DBG_CONTINUE;
+            } else if (code == 0x406D1388) {
+                // SetThreadName() noise - benign, swallow.
+                cont = DBG_CONTINUE;
+            } else {
+                recordException(ev);
+                if (secondChance) {
+                    // Unhandled by the app AND by WER-suppression: this is
+                    // the crash. Swallow it (DBG_CONTINUE) + kill the
+                    // debuggee so no WER dialog pops on the user's screen.
+                    res.fatalIdx = g_excCount - 1;
+                    res.outcome = 0;
+                    killAfter = true;
+                    cont = DBG_CONTINUE;
+                } else {
+                    // First chance: hand it to the app's own handlers (a
+                    // Qt app legitimately raises C++ exceptions during
+                    // init probing). If nobody handles it, the
+                    // second-chance event above follows.
+                    cont = DBG_EXCEPTION_NOT_HANDLED;
+                }
+            }
+            break;
+        }
+        case CREATE_PROCESS_DEBUG_EVENT:
+            recordModule((unsigned long long)(uintptr_t)ev.u.CreateProcessInfo.lpBaseOfImage,
+                         ev.u.CreateProcessInfo.hFile);
+            break;
+        case LOAD_DLL_DEBUG_EVENT:
+            recordModule((unsigned long long)(uintptr_t)ev.u.LoadDll.lpBaseOfDll,
+                         ev.u.LoadDll.hFile);
+            break;
+        case EXIT_PROCESS_DEBUG_EVENT:
+            res.exitCode = ev.u.ExitProcess.dwExitCode;
+            exited = true;
+            if (!weKilled && res.outcome != 0) {
+                // NTSTATUS-failure range (0xC0000005 etc.) = the classic
+                // "unable to start correctly" loader-abort death.
+                res.outcome = (res.exitCode >= 0xC0000000) ? 1 : 2;
+            }
+            break;
+        default:
+            // CREATE/EXIT_THREAD, UNLOAD_DLL, OUTPUT_DEBUG_STRING, RIP:
+            // not needed for the diagnosis; just continue.
+            break;
+        }
+
+        ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, cont);
+        if (killAfter) {
+            TerminateProcess(pi.hProcess, 1);
+            killAfter = false;
+            weKilled = true;
+        }
+        if (exited)
+            break;
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    g_dbgProcess = NULL;
+}
+
+void logWatch(const WatchResult &res) {
+    logLine("");
+    logLine("----- PHASE 2: debug-launch watch -----");
+    if (!res.spawned) {
+        char line[1200];
+        snprintf(line, sizeof(line),
+                 "CreateProcess failed for target: err=%lu - the exe could not even be",
+                 (unsigned long)res.spawnErr);
+        logLine(line);
+        logLine("spawned (missing file / corrupt PE / blocked by policy).");
+        return;
+    }
+    logLine("");
+
+    char line[1200];
+    snprintf(line, sizeof(line), "Module load trail (%d modules):", g_modCount);
+    logLine(line);
+    for (int i = 0; i < g_modCount; ++i) {
+        snprintf(line, sizeof(line), "  [%3d] base=0x%016llx  size=0x%08llx  %s", i + 1,
+                 g_mods[i].base, g_mods[i].size, g_mods[i].name);
+        logLine(line);
+    }
+    logLine("");
+    snprintf(line, sizeof(line), "Exception events (%d):", g_excCount);
+    logLine(line);
+    for (int i = 0; i < g_excCount; ++i) {
+        const ExcInfo &e = g_excs[i];
+        snprintf(line, sizeof(line),
+                 "  %s  code=0x%08lx  addr=0x%016llx  in %s +0x%llx  (AV %s 0x%016llx)",
+                 e.firstChance ? "1st-chance" : "2ND-CHANCE", (unsigned long)e.code, e.addr,
+                 baseNameOf(e.blame), e.blameOff,
+                 e.avType == 0
+                     ? "read of"
+                     : (e.avType == 1 ? "write to" : (e.avType == 8 ? "EXECUTE of" : "?")),
+                 e.avTarget);
+        logLine(line);
+    }
+    logLine("");
+    switch (res.outcome) {
+    case 0:
+        if (res.fatalIdx >= 0) {
+            const ExcInfo &e = g_excs[res.fatalIdx];
+            snprintf(line, sizeof(line),
+                     "VERDICT: unhandled exception 0x%08lx (second-chance) at 0x%016llx in",
+                     (unsigned long)e.code, e.addr);
+            logLine(line);
+            snprintf(line, sizeof(line), "%s +0x%llx. That module is the crashing component.",
+                     e.blame, e.blameOff);
+            logLine(line);
+        }
+        break;
+    case 1:
+        snprintf(line, sizeof(line),
+                 "VERDICT: process died during LOADER INIT with status 0x%08lx.",
+                 (unsigned long)res.exitCode);
+        logLine(line);
+        logLine("No exception was dispatched to WER (that is why Event Viewer shows");
+        logLine("nothing for FusionCutPro.exe). Details:");
+        if (g_excCount > 0) {
+            // A first-chance exception recorded just before death IS the
+            // fault site - the loader's SEH swallowed it into the exit
+            // status instead of letting WER report it.
+            const ExcInfo &e = g_excs[g_excCount - 1];
+            snprintf(line, sizeof(line),
+                     "  first-chance exception 0x%08lx at 0x%016llx in %s +0x%llx",
+                     (unsigned long)e.code, e.addr, e.blame, e.blameOff);
+            logLine(line);
+            logLine("  (recorded immediately before death - this is the fault site).");
+        } else {
+            logLine("  no exception was raised at all - the loader aborted on its own.");
+            logLine("  prime suspects = the last DLLs on the load trail above");
+            logLine("  (the crash happened while one of them was loading/initializing).");
+        }
+        break;
+    case 2:
+        snprintf(line, sizeof(line), "VERDICT: process exited cleanly (code %lu).",
+                 (unsigned long)res.exitCode);
+        logLine(line);
+        break;
+    case 3:
+        logLine("VERDICT: startup completed; process ran 25 s under the debug watch");
+        logLine("without a fatal exception. The double-click crash does NOT reproduce");
+        logLine("under a debugger - pointing at environment injection (antivirus /");
+        logLine("shell hook DLL) rather than at FusionCutPro itself.");
+        break;
+    default:
+        break;
     }
 }
 
@@ -260,7 +626,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     g_logFile = openLog(selfDir);
 
     logLine("==============================================================");
-    logLine("FusionCut Pro loader-check");
+    logLine("FusionCut Pro loader-check v2 (two-phase)");
     {
         char hdr[1100];
         snprintf(hdr, sizeof(hdr), "Target: %s", targetPath);
@@ -268,22 +634,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     }
     logLine("==============================================================");
     logLine("");
-    logLine("Walking the PE import tree. Each FAIL line below names a DLL");
-    logLine("the Windows loader could not map. The first FAIL is the most");
-    logLine("likely root cause of the '0xc0000005 unable to start' dialog.");
-    logLine("");
-    logLine("If all lines are OK below, the 0xc0000005 is NOT a");
-    logLine("missing/wrong DLL - it is a DllMain crash. In that case use");
-    logLine("Event Viewer (eventvwr.msc) -> Windows Logs -> Application ->");
-    logLine("filter for FusionCutPro.exe; the 'Faulting module name:' line");
-    logLine("of the most recent Application Error event names the DLL.");
-    logLine("");
+
+    // Reduce hard-error dialogs while we own the debuggee.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 
     // Set cwd to the portable folder so LoadLibraryExA's default
     // search order (application dir first) matches the real
     // FusionCutPro.exe loader behavior.
     SetCurrentDirectoryA(selfDir);
 
+    logLine("PHASE 1: static import-tree probe (no target execution).");
+    logLine("Each FAIL line names a DLL the loader cannot map:");
+    logLine("");
+
+    // ----- phase 1 -----
     HMODULE h = LoadLibraryExA(targetPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
     if (!h) {
         // The target itself can't be mapped - e.g. the file is gone,
@@ -292,35 +656,87 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmdLine, int) {
     } else {
         markVisited(targetName);
         walkImports(h, targetName, 0);
+        FreeLibrary(h); // refcount-symmetric probe (see walkImports note)
     }
+
+    // ----- phase 2 -----
+    WatchResult res;
+    runWatch(targetPath, selfDir, res);
+    logWatch(res);
 
     if (g_logFile != INVALID_HANDLE_VALUE) {
         CloseHandle(g_logFile);
         g_logFile = INVALID_HANDLE_VALUE;
     }
 
-    char summary[2048];
-    if (g_failCount == 0) {
+    // ----- combined summary -----
+    // 3072: worst case is blame basename + log path + fixed text; the
+    // full module PATHS stay in the log file, the MessageBox uses
+    // base names only.
+    char summary[3072];
+    int bad = (g_failCount > 0) || (res.outcome == 0) || (res.outcome == 1);
+    if (res.outcome == 0 && res.fatalIdx >= 0) {
+        const ExcInfo &e = g_excs[res.fatalIdx];
         snprintf(summary, sizeof(summary),
-                 "All imports resolved (0 failures).\r\n\r\n"
-                 "The 0xc0000005 is NOT a missing/wrong DLL.\r\n"
-                 "Likely cause: a DLL's DllMain crashes at startup.\r\n\r\n"
-                 "Open Event Viewer (eventvwr.msc) ->\r\n"
-                 "  Windows Logs -> Application ->\r\n"
-                 "  filter for FusionCutPro.exe.\r\n"
-                 "The 'Faulting module name:' line names the DLL.\r\n\r\n"
-                 "Full log:\r\n%s",
+                 "CAUGHT THE STARTUP CRASH:\r\n\r\n"
+                 "Unhandled exception 0x%08lx (2nd chance)\r\n"
+                 "at 0x%016llx in module:\r\n  %s +0x%llx\r\n\r\n"
+                 "%d DLLs loaded at the time.\r\n"
+                 "Last loaded: %s\r\n\r\n"
+                 "Full details in the log:\r\n%s",
+                 (unsigned long)e.code, e.addr, baseNameOf(e.blame), e.blameOff, g_modCount,
+                 g_modCount > 0 ? baseNameOf(g_mods[g_modCount - 1].name) : "(none)", g_logPath);
+    } else if (res.outcome == 1) {
+        char exc[600] = "";
+        if (g_excCount > 0) {
+            const ExcInfo &e = g_excs[g_excCount - 1];
+            snprintf(exc, sizeof(exc),
+                     "A first-chance exception was recorded just before\r\n"
+                     "death - that IS the fault site:\r\n"
+                     "  0x%08lx at 0x%016llx in %s +0x%llx\r\n\r\n",
+                     (unsigned long)e.code, e.addr, baseNameOf(e.blame), e.blameOff);
+        }
+        snprintf(summary, sizeof(summary),
+                 "DIED DURING LOADER INIT\r\n"
+                 "(the 'unable to start correctly' class):\r\n\r\n"
+                 "Process exited with status 0x%08lx before any\r\n"
+                 "exception reached WER - which is exactly why\r\n"
+                 "Event Viewer shows nothing for the app.\r\n\r\n"
+                 "%s"
+                 "%d DLLs mapped; last loaded: %s\r\n\r\n"
+                 "Full load trail in the log:\r\n%s",
+                 (unsigned long)res.exitCode, exc, g_modCount,
+                 g_modCount > 0 ? baseNameOf(g_mods[g_modCount - 1].name) : "(none)", g_logPath);
+    } else if (res.outcome == 3) {
+        snprintf(summary, sizeof(summary),
+                 "STARTUP COMPLETED UNDER THE DEBUG WATCH.\r\n\r\n"
+                 "FusionCutPro.exe initialized and ran 25 seconds\r\n"
+                 "without a fatal exception (its window appeared).\r\n\r\n"
+                 "The double-click crash does NOT reproduce under a\r\n"
+                 "debugger - that points at an injected shell/AV DLL\r\n"
+                 "in the Explorer launch path, not at the app.\r\n\r\n"
+                 "Try: right-click the zip -> Properties -> Unblock\r\n"
+                 "(BEFORE extracting), or launch from cmd.exe.\r\n\r\n"
+                 "Full details in the log:\r\n%s",
                  g_logPath);
+    } else if (res.outcome == 2) {
+        snprintf(summary, sizeof(summary),
+                 "Process exited cleanly (code %lu).\r\nPhase 1: %d import failure(s).\r\n\r\n"
+                 "Full details in the log:\r\n%s",
+                 (unsigned long)res.exitCode, g_failCount, g_logPath);
+    } else if (res.outcome == 4) {
+        snprintf(summary, sizeof(summary),
+                 "Could not spawn the target (err=%lu).\r\nPhase 1: %d import failure(s).\r\n\r\n"
+                 "Full details in the log:\r\n%s",
+                 (unsigned long)res.spawnErr, g_failCount, g_logPath);
     } else {
         snprintf(summary, sizeof(summary),
-                 "%d DLL(s) failed to load!\r\n\r\n"
-                 "Open the log file to see the failing DLL name(s).\r\n"
-                 "The first FAIL line is the most likely root cause of\r\n"
-                 "the '0xc0000005 unable to start' dialog.\r\n\r\n"
-                 "Log:\r\n%s",
+                 "Phase 1: %d import failure(s).\r\nPhase 2: no verdict.\r\n\r\n"
+                 "Full details in the log:\r\n%s",
                  g_failCount, g_logPath);
     }
+
     MessageBoxA(NULL, summary, "FusionCut Pro Loader Check",
-                MB_OK | (g_failCount ? MB_ICONERROR : MB_ICONINFORMATION));
-    return g_failCount > 0 ? 1 : 0;
+                MB_OK | (bad ? MB_ICONERROR : MB_ICONINFORMATION));
+    return bad ? 1 : 0;
 }
