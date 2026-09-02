@@ -7,7 +7,7 @@ string(STRIP "${FC_RAW_VERSION}" FC_VERSION)
 project(FusionCutPro
     VERSION ${FC_VERSION}
     DESCRIPTION "FusionCut Pro - lightweight dual-mode video editor (Windows 7+, 1GB RAM target)"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

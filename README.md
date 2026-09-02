@@ -66,26 +66,32 @@ arrive milestone by milestone.
 > + offset and writes `loader-check-<timestamp>.log` with the full
 > module load trail. `FusionCutPro.exe --crash-test` writes a
 > synthetic runtime report to verify the in-process pipeline on a
-> clean machine.
+> clean machine. v0.4.7 fixes the loader-phase root cause the watch
+> exposed (see the Windows 7 / 8.x compatibility note above): the
+> bundled `api-ms-win-core-synch-l1-2-0.dll` shim.
 
 ## System requirements (target)
 
 | | Minimum | Recommended |
 | --- | --- | --- |
-| OS | Windows 8.1+ (64-bit; 32-bit untested) | Windows 10/11 (64-bit) |
+| OS | Windows 7 SP1+ (64-bit; 32-bit untested) | Windows 10/11 (64-bit) |
 | RAM | 1 GB | 4 GB |
 | CPU | Intel Core 2 Duo / AMD Athlon 64 X2 | Intel i5 / AMD Ryzen 5 |
 | Storage | 500 MB + project space | 2 GB SSD |
 | Graphics | DirectX 9 compatible | DirectX 11 with GPU acceleration |
 
-> **Why not Windows 7:** the FFmpeg 8 runtime stack (via MSYS2)
-> contains Rust-built DLLs (e.g. `librav1e.dll`) that import the
-> `WaitOnAddress` futex API set, which does not exist on Windows 7
-> even with the v0.4.6 forwarder stub (its KernelBase
-> implementations are absent there). Windows 8.x needs the bundled
-> `api-ms-win-core-synch-l1-2-0.dll` forwarder (shipped automatically
-> since v0.4.6); Windows 10/11 resolves the name natively and ignores
-> the stub.
+> **Windows 7 / 8.x compatibility:** the FFmpeg 8 runtime stack (via
+> MSYS2) contains Rust-built DLLs (e.g. `librav1e.dll`) that import the
+> `WaitOnAddress` futex API set by its literal api-set name, which
+> pre-10 loaders cannot resolve. The portable build therefore ships a
+> small compatibility shim (`api-ms-win-core-synch-l1-2-0.dll`, built
+> from `src/app/api_set_synch.c` since v0.4.7) that provides REAL
+> implementations of that API set on top of Windows-7-era kernel32
+> primitives — so those Windows versions start AND run correctly.
+> The DLL search order tries the application directory before
+> System32, so the shim wins the bind on Win7/8.x; on Windows 10/11
+> the OS resolves the name natively and the file is ignored. Leave it
+> in place.
 
 ## Getting a portable build
 

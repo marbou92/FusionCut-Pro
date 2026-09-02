@@ -4,6 +4,121 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.7] - 2026-09-01
+
+**v0.4.6 never shipped — the portable workflow itself died in CI
+before it could zip anything. And the v0.4.6 fix design was wrong
+for the user's actual test platform (Windows 7). This release fixes
+both, and the compatibility shim is now a real, first-class build
+component instead of a loose CI-only artifact definition.**
+
+### Fixed — the v0.4.6 CI failure (`syntax error near unexpected token (`)
+- One character class of bug: `PORTABLE.txt` prose was built with a
+  bash `printf` whose arguments are single-quoted strings, and one
+  line contained an **apostrophe escaped as `\'`** (`FFmpeg 8\'s`).
+  Inside single quotes, `\'` is *not* an escape — the backslash is
+  literal and the quote **terminates the string**. That flipped the
+  quote parity of the whole remainder of the script, so the next
+  `(` that landed *outside* quotes (`executable (FusionCutPro-crash-…`)
+  aborted the parse: `line 138: syntax error near unexpected token ('`.
+  The log's line number matches YAML line 192 minus the 54 script
+  header lines exactly; reproduced byte-for-byte in the sandbox with
+  `bash -n` against the v0.4.6 workflow (`exit 2`, same line 138), and
+  the fixed script passes `bash -n` cleanly.
+- Why the previous verification battery missed it: the YAML file is
+  *valid YAML* (python `yaml.safe_load` passes) — the defect only
+  exists at the bash layer. The battery now extracts the run block
+  and runs `bash -n` on it; the `PORTABLE.txt` printf is additionally
+  *executed* in the sandbox and its 58-line output inspected, plus a
+  no-apostrophe scan over the generated file. A comment at the
+  printf now documents the rule: no apostrophes inside the
+  single-quoted arguments (write "the DLL that ships with FFmpeg 8",
+  not "FFmpeg 8's DLL").
+- The `ld.exe: warning: cannot find entry symbol DllMainCRTStartup`
+  in the same log was benign (a DLL with entry RVA 0 is legal — the
+  loader simply skips initialization) — but it is now gone too: the
+  shim below provides a real `DllMain` and passes `--entry=DllMain`.
+
+### Changed — real Win7-compatible api-set shim replaces the forwarder
+- The user's test platform is **Windows 7** (v0.4.6 had assumed
+  8.x from the module-size forensics). That matters: a *forwarder*
+  stub exports `WaitOnAddress` as a forwarder into KernelBase — but
+  KernelBase only implements the futex family since Windows 8. On
+  Windows 7 the import would bind against our export table and then
+  entry-point resolution would fail while loading `librav1e.dll`
+  ("The procedure entry point WaitOnAddress could not be located") —
+  trading the `0xc0000005` startup abort for an entry-point abort.
+- NEW `src/app/api_set_synch.c`: the shim now carries **real
+  implementations** of the full api set (`WaitOnAddress`,
+  `WakeByAddressAll`, `WakeByAddressSingle`, `Sleep`) built
+  exclusively from Windows-7-era kernel32 primitives (SRWLOCK and
+  CONDITION_VARIABLE — both Vista+, both validly initialized by
+  zeroed memory, so all shim state lives in `.bss` and `DllMain`
+  does pointer writes only; `GetTickCount64` for timeouts). Futex
+  semantics on top: a 512-bucket hash table keyed by the waited
+  address, one wait node per active address (static pool of 4096),
+  and — the part that makes it correct — the waiter holds the bucket
+  SRWLock across both the value comparison *and* the
+  `SleepConditionVariableSRW` call, so a concurrent `WakeByAddress*`
+  (which must take the same lock) is impossible to miss: no lost
+  wakes, spurious wakeups only, exactly the documented contract.
+  Node recycling follows a strict bucket → free-list lock order;
+  pool exhaustion fails loudly (`ERROR_NOT_ENOUGH_MEMORY`) instead
+  of corrupting state.
+- The shim keeps the zero-dependency rule of `fcp-loader-check`:
+  linked with `-nostdlib` (kernel32 is its **only** import — no CRT,
+  no MinGW runtime). Verified in the sandbox that the object emits
+  no `memset`/`memcpy`/division-helper references at `-O0` and `-O2`
+  (the code avoids aggregate zeroing and division precisely so
+  `-nostdlib` can never break the link).
+- Mechanism (unchanged from v0.4.6's analysis, now covering Win7
+  too): the DLL search order tries the application directory before
+  System32, so `api-ms-win-core-synch-l1-2-0.dll` next to
+  `FusionCutPro.exe` wins the bind on Windows 7 and 8.x. On
+  Windows 10/11 the ApiSetSchema resolves the name to KernelBase
+  *before* the file search, so the bundled file is never touched —
+  shipping it everywhere is inert and safe.
+
+### Removed — `packaging/` directory
+- `packaging/api-ms-win-core-synch-l1-2-0.def` is deleted. The shim
+  is now a **first-class build component**, not loose CI packaging
+  data: CMake target `fcp-apiset-synch` (in `src/app/CMakeLists.txt`)
+  builds `api_set_synch.c` into `api-ms-win-core-synch-l1-2-0.dll`
+  (exact api-set name via `OUTPUT_NAME` + empty `PREFIX`) and the
+  regular `cmake --install` staging step places it next to
+  `FusionCutPro.exe` — the same pipeline as the executables. The
+  workflow's inline `gcc -shared -nostdlib … packaging/*.def` build
+  is gone; what remains in CI is the export-table verification
+  (end-of-line-anchored `objdump -p` grep for all four export names,
+  blocking) so a silent export regression can never ship.
+- Top-level `project()` gains the C language (`LANGUAGES C CXX`) —
+  required to compile the shim's `.c` source; harmless on every CI
+  leg (gcc/clang/MinGW/MSVC all detect a C compiler).
+
+### Changed — system requirements floor
+- Windows 7 SP1+ **restored** as the minimum (README updated): the
+  bundled shim now provides the missing api set *functionally* on
+  Windows 7, which the v0.4.6 forwarder design could not.
+
+### Verified
+- `bash -n` on the extracted staging script: old workflow reproduces
+  `line 138: syntax error near unexpected token (' exactly; new
+  workflow passes. `PORTABLE.txt` printf executed in the sandbox —
+  58 lines, no apostrophes.
+- Mock `_WIN32` cross-compile of `api_set_synch.c`
+  (`-std=c11 -Wall -Wextra -Werror -Wpedantic`, recreated mock
+  `windows.h` with the exact MinGW-w64 kernel32 surface the shim
+  uses) clean; `nm` confirms all four api-set exports plus `DllMain`
+  and only kernel32 functions as undefined symbols, at `-O0` and
+  `-O2`.
+- Whole-tree clang-format 22.1.8 gate exit 0 (47 sources including
+  the new file); real CMake pipeline (Linux, `FC_BUILD_APP=OFF`):
+  core 88 + timeline 64 = 152 tests pass; workflow YAML validated.
+- The PE link itself (`-nostdlib`, `--entry=DllMain`, `PREFIX ""`)
+  is verified by the CI MinGW leg (the sandbox has no Windows
+  toolchain) — its `objdump` export check is the first gate; the
+  user's Windows 7 machine is the final oracle.
+
 ## [0.4.6] - 2026-09-01
 
 **Root cause found and fixed — the startup `0xc0000005` that has

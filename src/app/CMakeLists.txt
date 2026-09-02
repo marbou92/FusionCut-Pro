@@ -101,3 +101,53 @@ if(WIN32)
 
     install(TARGETS fcp-loader-check RUNTIME DESTINATION .)
 endif()
+
+# ---------------------------------------------------------------------------
+# fcp-apiset-synch: api-ms-win-core-synch-l1-2-0.dll compatibility shim.
+#
+# A real, small DLL (built from api_set_synch.c - see its header for the
+# full root-cause narrative) that provides the WaitOnAddress futex API
+# set for the Windows 7 / 8.x loaders. librav1e.dll (Rust, in MSYS2's
+# FFmpeg 8 dependency tree) hard-imports that api set by literal name;
+# pre-10 loaders cannot resolve it and FusionCutPro.exe dies with the
+# bare "unable to start correctly (0xc0000005)" dialog before any user
+# code runs. The DLL search order tries the application directory
+# before System32, so installing this DLL next to FusionCutPro.exe
+# wins the bind on Win7/8.x; on Win10/11 the ApiSetSchema resolves the
+# name first and this DLL is never touched (inert).
+#
+# Why real implementations instead of v0.4.6's forwarder .def: KernelBase
+# only implements the futex family since Windows 8, so a forwarder would
+# fail entry-point resolution on Windows 7 (the user's test platform)
+# and trade the 0xc0000005 startup abort for a "procedure entry point
+# not located" abort. api_set_synch.c implements the semantics with
+# Win7-era kernel32 primitives only (SRWLOCK + CONDITION_VARIABLE).
+#
+# Build contract (mirrors the zero-dependency rule of fcp-loader-check):
+#   * OUTPUT_NAME + empty PREFIX give the EXACT api-set file name - the
+#     name IS the fix; a lib-prefixed name would never be found.
+#   * -nostdlib: no CRT, no MinGW runtime - kernel32 is the ONLY import.
+#     The source follows CRT-free code rules (see its header), so GCC
+#     never needs memset/memcpy/libgcc helpers.
+#   * --entry=DllMain: with -nostdlib ld cannot find the default
+#     DllMainCRTStartup entry (the v0.4.6 CI run printed that warning);
+#     our own DllMain is the entry point.
+# Windows-only target; the qt-app-ubuntu CI leg does not build it.
+# -------------------------------------------------------------------------
+if(WIN32)
+    add_library(fcp-apiset-synch SHARED api_set_synch.c)
+
+    set_target_properties(fcp-apiset-synch PROPERTIES
+        AUTOMOC OFF
+        OUTPUT_NAME "api-ms-win-core-synch-l1-2-0"
+        PREFIX "")
+
+    target_link_libraries(fcp-apiset-synch PRIVATE kernel32)
+
+    if(MINGW)
+        target_link_options(fcp-apiset-synch PRIVATE
+            -nostdlib -Wl,--entry=DllMain)
+    endif()
+
+    install(TARGETS fcp-apiset-synch RUNTIME DESTINATION .)
+endif()
