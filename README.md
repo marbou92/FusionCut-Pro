@@ -66,7 +66,7 @@ arrive milestone by milestone.
 > + offset and writes `loader-check-<timestamp>.log` with the full
 > module load trail. `FusionCutPro.exe --crash-test` writes a
 > synthetic runtime report to verify the in-process pipeline on a
-> clean machine. v0.4.7 fixes the loader-phase root cause the watch
+> clean machine. v0.4.8 fixes the loader-phase root cause the watch
 > exposed (see the Windows 7 / 8.x compatibility note above): the
 > bundled `api-ms-win-core-synch-l1-2-0.dll` shim.
 

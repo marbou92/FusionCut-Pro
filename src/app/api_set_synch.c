@@ -50,7 +50,12 @@
 //       validly initialized by all-zero memory - the whole shim's
 //       state lives in zero-initialized .bss, so DllMain has no
 //       lock initialization to do at all),
-//     * SleepConditionVariableSRW / Wake / Signal (Vista+),
+//     * SleepConditionVariableSRW / WakeConditionVariable /
+//       WakeAllConditionVariable (Vista+) - note the Windows
+//       condition-variable wake surface is EXACTLY those two
+//       functions; there is no SignalConditionVariable in the Win32
+//       API (v0.4.7 named that phantom and MinGW CI aborted on the
+//       implicit-declaration error),
 //     * GetTickCount64 (Vista+) for timeout bookkeeping.
 //
 // SEMANTICS IMPLEMENTED (documented contract of the api set)
@@ -144,12 +149,21 @@ static FcpWaitNode g_pool[FCP_NODE_POOL];
 static FcpWaitNode *g_free_head;
 static SRWLOCK g_free_lock;
 
-// Forward declarations of the exported api-set surface.
+// Forward declarations of the exported api-set surface. windows.h
+// (synchapi.h) declared Sleep with __declspec(dllimport) (its real home
+// is kernel32); re-declaring it with dllexport - THIS DLL is the api
+// set - makes GCC merge the declarations and warn "redeclared without
+// dllimport attribute". The merged symbol is dllexport, which is
+// exactly the state we want, so the warning is silenced for this block
+// only; no other diagnostic is affected.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wattributes"
 __declspec(dllexport) BOOL WINAPI WaitOnAddress(volatile VOID *Address, PVOID CompareAddress,
                                                 SIZE_T AddressSize, DWORD dwMilliseconds);
 __declspec(dllexport) VOID WINAPI WakeByAddressAll(PVOID Address);
 __declspec(dllexport) VOID WINAPI WakeByAddressSingle(PVOID Address);
 __declspec(dllexport) VOID WINAPI Sleep(DWORD dwMilliseconds);
+#pragma GCC diagnostic pop
 
 // Bucket index for a futex address: shift + fold + mask. Adjacent
 // stack/heap words land in different buckets; no division anywhere.
@@ -305,10 +319,20 @@ static void fcp_wake(PVOID Address, BOOL wake_all) {
     AcquireSRWLockExclusive(&bucket->lock);
     for (node = bucket->head; node != NULL; node = node->hash_next) {
         if (node->address == (const void *)Address) {
+            // The Vista+ condition-variable wake surface is exactly two
+            // functions: WakeAllConditionVariable (broadcast, every
+            // waiter) and WakeConditionVariable (exactly ONE waiter).
+            // v0.4.7 had this backwards - WakeByAddressAll called the
+            // wake-one function, and the single-wake branch named
+            // SignalConditionVariable, a function that does not exist
+            // in the Win32 API at all (MinGW CI: implicit-declaration
+            // error). Correct mapping per the documented api-set
+            // contract: WakeByAddressAll -> broadcast, WakeByAddress
+            // Single -> wake one.
             if (wake_all)
-                WakeConditionVariable(&node->cv);
+                WakeAllConditionVariable(&node->cv);
             else
-                SignalConditionVariable(&node->cv);
+                WakeConditionVariable(&node->cv);
             break;
         }
     }

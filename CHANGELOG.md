@@ -4,7 +4,98 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.8] - 2026-09-02
+
+**v0.4.7's shim source died in the CI MinGW leg on a function
+name that does not exist in the Windows API - and the compile
+error was masking a second, semantic bug in the same function.
+Both are fixed, and the offline verification battery that let the
+phantom name through is rebuilt so it cannot happen again.**
+
+### Fixed - CI compile failure: `SignalConditionVariable` is not a Windows function
+- The MinGW leg aborted at `src/app/api_set_synch.c:311` with
+  `implicit declaration of function 'SignalConditionVariable';
+  did you mean 'WakeAllConditionVariable'?`. The Windows
+  condition-variable wake surface is EXACTLY two functions:
+  `WakeConditionVariable` (wakes ONE waiter) and
+  `WakeAllConditionVariable` (wakes ALL waiters). There is no
+  `SignalConditionVariable` anywhere in the Win32 API - the name
+  was carried over from pthread terminology
+  (`pthread_cond_signal`), the classic API-confusion trap.
+  Cross-evidence that the rest of the surface is right: gcc's
+  suggestion engine only proposes in-scope identifiers, and the
+  neighboring call sites (`WakeConditionVariable`,
+  `SleepConditionVariableSRW`, `AcquireSRWLockExclusive`,
+  `ReleaseSRWLockExclusive`) produced no diagnostics in the same
+  failed log - the real mingw-w64 headers declare all of them at
+  `_WIN32_WINNT 0x0601`.
+- **The branches were also swapped - a latent runtime bug the
+  compile error happened to mask.** `fcp_wake(..., wake_all=TRUE)`
+  (i.e. `WakeByAddressAll`) called `WakeConditionVariable`, which
+  wakes exactly ONE waiter: with N threads blocked on the same
+  address, a wake-one call leaves the other N-1 sleeping until
+  their timeout (or forever with `INFINITE`). Correct mapping now:
+  `WakeByAddressAll` -> `WakeAllConditionVariable` (broadcast),
+  `WakeByAddressSingle` -> `WakeConditionVariable` (wake one),
+  matching the documented api-set contract.
+
+### Fixed - `Sleep` export warning localized
+- The same CI log flagged `-Wattributes` at line 152:
+  windows.h declares `Sleep` with `dllimport` (its real home is
+  kernel32); the shim deliberately re-declares it with
+  `dllexport` because THIS DLL is the api set, and gcc warns while
+  merging the two declarations - the merged symbol is dllexport,
+  which is exactly the state we want. The warning is now silenced
+  by a `#pragma GCC diagnostic push` / `ignored "-Wattributes"` /
+  `pop` pair wrapped around ONLY the four-export prototype block;
+  no other diagnostic is affected.
+
+### Fixed - the verification gap that let the phantom through
+- v0.4.7's mock `windows.h` declared `SignalConditionVariable`
+  because it was authored from the same wrong mental model as the
+  source it was auditing - a self-confirming oracle: the mock
+  agreed with the very bug it existed to catch, so the phantom
+  compiled clean in the sandbox and only CI saw it. The mock is
+  rebuilt (and now kept persistent at `winmock/windows.h` in the
+  delivery workspace instead of ephemeral /tmp) under an explicit
+  rule: it declares EXACTLY the real mingw-w64 function surface
+  for the shim's include context at `_WIN32_WINNT 0x0601` (the
+  full CV + SRW family, `Sleep`, `GetTickCount64`, `SetLastError`,
+  `DisableThreadLibraryCalls`, with the real version guards - the
+  Win8 futex family correctly EXCLUDED at 0x0601, which is what
+  lets the shim own those export names) and NOTHING INVENTED.
+- Regression proof, now a permanent battery item: re-injecting the
+  v0.4.7 line into the fixed source reproduces the CI failure
+  byte-for-byte offline (`implicit declaration of function
+  'SignalConditionVariable'; did you mean 'WakeAllConditionVariable'?`),
+  while the fixed source compiles clean. The mock demonstrably has
+  the teeth that v0.4.7's mock lacked.
+
+### Verified
+- Mock cross-compile clean at `-O0` and `-O2`
+  (`-std=c11 -Wall -Wextra -Werror -Wpedantic`); `nm -u` shows the
+  undefined set is EXACTLY the 8 real kernel32 imports
+  (`AcquireSRWLockExclusive`, `ReleaseSRWLockExclusive`,
+  `SleepConditionVariableSRW`, `WakeConditionVariable`,
+  `WakeAllConditionVariable`, `GetTickCount64`, `SetLastError`,
+  `DisableThreadLibraryCalls`) and zero CRT/libgcc helper
+  references - the `-nostdlib` CRT-free contract is intact.
+- Whole-tree clang-format 22.1.8 gate: 0 violations; the `.c` shim
+  (outside the gate's `*.cpp`/`*.h` glob) individually
+  format-clean.
+- Real CMake pipeline (Linux, `FC_BUILD_APP=OFF`): core 88 +
+  timeline 64 = 152 checks pass. Workflow YAML valid; the staging
+  script passes `bash -n`; the `PORTABLE.txt` printf executed in
+  the sandbox (58 lines, zero apostrophes).
+- Remaining oracles unchanged: the CI MinGW leg for the PE link
+  (`-nostdlib`, `--entry=DllMain`, `PREFIX ""` - the export
+  verification step is untouched, all four export names intact),
+  then the user's Windows 7 machine for the real startup and
+  futex semantics.
+
 ## [0.4.7] - 2026-09-01
+
+**(superseded within one CI run - see [0.4.8])**
 
 **v0.4.6 never shipped — the portable workflow itself died in CI
 before it could zip anything. And the v0.4.6 fix design was wrong
@@ -818,6 +909,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.8]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.8
 [0.4.6]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.6
 [0.4.5]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.5
 [0.4.4]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.4
