@@ -117,6 +117,99 @@ jobs:
                 || true
             done
           done
+          # --- librsvg-2-2.dll stub (v0.4.9): Win7 entry-point fix --------------
+          # v0.4.8 field report (Windows 7 machine): the load trail showed the
+          # api-set shim binding (module 59: our api-ms-win-core-synch-l1-2-0.dll
+          # via librav1e.dll) and then died with STATUS_ENTRYPOINT_NOT_FOUND
+          # (0xc0000139): the Windows dialog named kernel32!
+          # GetSystemTimePreciseAsFileTime, a Windows 8+ export. The importer is
+          # the bundled librsvg-2-2.dll - its Rust core statically imports the
+          # Win8+ time function (modern Rust targets Windows 10+). librsvg is in
+          # the tree only because MSYS2 FFmpeg enables the SVG decoder, which
+          # FusionCut Pro never uses. KERNEL32 is a KnownDLL: no app-dir DLL can
+          # ever supply its exports, so the api-set shim technique cannot apply.
+          # Instead: REPLACE the bundled librsvg-2-2.dll with a stub that exports
+          # EXACTLY the symbols avcodec-62.dll imports (extracted from its real
+          # import table here - no hand-maintained list to drift), all aliasing
+          # one function that returns 0. avcodec then loads on Windows 7; the SVG
+          # decoder fails gracefully if ever invoked (video and audio codecs are
+          # unaffected); and the whole librsvg DLL subtree (pango, gio, xml2, ...)
+          # stops loading - those files stay in dist as inert dead weight, their
+          # Win7 risk pool removed from the launch path.
+          rsvg_syms="$(objdump -p dist/avcodec-62.dll | awk '
+            $1 == "DLL" && $2 == "Name:" { inrsvg = ($3 ~ /^librsvg/); next }
+            inrsvg && $1 ~ /^[0-9a-f]+$/ && NF >= 3 { print $NF }
+          ')"
+          if [ -z "$rsvg_syms" ]; then
+            echo "::error::no librsvg imports found in dist/avcodec-62.dll (import table format change? ordinal imports?)"
+            objdump -p dist/avcodec-62.dll | sed -n '/Import Tables/,$p' | head -80 || true
+            exit 1
+          fi
+          echo "librsvg stub: exporting $(printf '%s\n' "$rsvg_syms" | wc -l) symbol(s) for avcodec"
+          printf '%s\n' 'long fcp_librsvg_stub(void) { return 0; }' > build/librsvg_stub.c
+          {
+            echo "LIBRARY librsvg-2-2"
+            echo "EXPORTS"
+            for s in $rsvg_syms; do
+              echo "    $s = fcp_librsvg_stub"
+            done
+          } > build/librsvg_stub.def
+          gcc -c build/librsvg_stub.c -o build/librsvg_stub.o
+          gcc -shared build/librsvg_stub.o build/librsvg_stub.def -o dist/librsvg-2-2.dll
+          # The stub links the default MinGW CRT (kernel32 + msvcrt, both
+          # Win7-era); sweep it for completeness like every other dist binary
+          # (guarded per the pipefail rule above).
+          ldd dist/librsvg-2-2.dll 2>/dev/null | grep '/mingw64/' | awk '{print $3}' | \
+            while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done \
+            || true
+          # Blocking: every symbol avcodec imports must appear in the stub export
+          # table (entries print as "[ ordinal] name" lines).
+          stub_exports="$(objdump -p dist/librsvg-2-2.dll | awk '
+            /Ordinal\/Name Pointer\] Table/ { inexp = 1; next }
+            inexp && NF == 0 { next }
+            inexp && $1 == "[" { print $NF; next }
+            inexp { inexp = 0 }
+          ' | tr '\n' ' ')"
+          missing=""
+          for s in $rsvg_syms; do
+            case " $stub_exports " in
+              *" $s "*) ;;
+              *) missing="$missing $s" ;;
+            esac
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::librsvg stub is missing export(s):$missing"
+            exit 1
+          fi
+          # --- Windows 7 import tripwire (v0.4.9) --------------------------------
+          # Blocklist of kernel32/KERNELBASE exports introduced after Windows 7
+          # that MSYS2-built binaries are known to import (Rust std, modern glib,
+          # current runtimes). NOT a complete Win7 API oracle: it is a tripwire
+          # that names the next Win7-incompatible import here in CI instead of on
+          # the user machine. If it fires: add the function to this list, then
+          # stub or patch the importer exactly like the librsvg step above.
+          blocklist="GetSystemTimePreciseAsFileTime GetCurrentThreadStackLimits QueryInterruptTime QueryInterruptTimePrecise SetThreadDescription GetSystemCpuSetInformation"
+          tripwire_hit=""
+          for bin in dist/*.exe dist/*.dll dist/*/*.dll dist/plugins/*/*.dll; do
+            [ -f "$bin" ] || continue
+            binimports="$(objdump -p "$bin" 2>/dev/null | awk '
+              $1 == "DLL" && $2 == "Name:" { insys = ($3 ~ /^[Kk][Ee][Rr][Nn][Ee][Ll]/); next }
+              insys && $1 ~ /^[0-9a-f]+$/ && NF >= 3 { print $NF }
+            ' | tr '\n' ' ')"
+            for bad in $blocklist; do
+              case " $binimports " in
+                *" $bad "*)
+                  echo "::error::$bin imports $bad (Windows 8/10+; absent on Windows 7)"
+                  tripwire_hit=1
+                  ;;
+              esac
+            done
+          done
+          if [ -n "$tripwire_hit" ]; then
+            echo "Windows 7 import tripwire fired - see the annotations above."
+            exit 1
+          fi
+
           # --- api-set shim export verification (v0.4.7) --------------------
           # dist/api-ms-win-core-synch-l1-2-0.dll is now built by CMake
           # (target fcp-apiset-synch, src/app/api_set_synch.c) and
@@ -148,7 +241,7 @@ jobs:
           # unexpected token (" at line 138). Write possessives as
           # "the DLL that ships with FFmpeg 8" instead.
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.8)' '' \
+            'FusionCut Pro - portable build (v0.4.9)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'IF FUSIONCUTPRO.EXE WILL NOT START (the Windows dialog says' \
             '"The application was unable to start correctly' \
@@ -178,7 +271,7 @@ jobs:
             'any user code in FusionCutPro.exe - so the in-process crash' \
             'handler cannot see it and no crash-logs/ entry is produced.' \
             'fcp-loader-check.exe is the diagnostic for that class.' '' \
-            'NOTE (v0.4.8): the api-ms-win-core-synch-l1-2-0.dll file' \
+            'NOTE (v0.4.9): the api-ms-win-core-synch-l1-2-0.dll file' \
             'next to FusionCutPro.exe is REQUIRED on Windows 7 and' \
             'Windows 8.x - it fixes the startup crash caused by the' \
             'rav1e encoder DLL that ships with FFmpeg 8 (it imports' \
@@ -186,6 +279,14 @@ jobs:
             'those Windows versions; the bundled file provides a' \
             'compatible real implementation). Leave it in place. On' \
             'Windows 10/11 the file is ignored.' '' \
+            'ALSO NOTE (v0.4.9): the librsvg-2-2.dll file next to' \
+            'FusionCutPro.exe is a small stub (its functions return' \
+            'failure) so the app can start on Windows 7 - the real' \
+            'librsvg from the FFmpeg stack requires Windows 8 or newer' \
+            '(SVG image decoding is therefore unavailable; video and' \
+            'audio codecs are unaffected). Several dormant DLL files' \
+            'beside it belong to the real librsvg family; they are' \
+            'inert (nothing loads them) - leave them in place.' '' \
             'IF FUSIONCUTPRO.EXE STARTS BUT THEN CRASHES at runtime, a' \
             'detailed crash log is written to crash-logs/ next to the' \
             'executable (FusionCutPro-crash-<timestamp>.log) with the' \
