@@ -4,6 +4,107 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.9] - 2026-09-02
+
+**The v0.4.8 shim worked — the field data proves it — and Windows 7
+then hit the next incompatibility in line: an entry point that
+exists only since Windows 8. KERNEL32 cannot be shimmed from the
+app directory (KnownDLL), so this release removes the offending
+dependency instead: the bundled librsvg is replaced by a generated
+stub, and a CI tripwire now scans every bundled binary for
+known Windows 8/10-only imports.**
+
+### Confirmed — the v0.4.8 api-set shim binds on the user machine
+- The v0.4.8 loader-check log (Windows 7) shows module 59 =
+  the bundled `api-ms-win-core-synch-l1-2-0.dll` (app dir), loaded
+  via `librav1e.dll` — the futex import that killed every build
+  since the beginning (the 0xC0000005 era) is resolved. The load
+  trail then advanced 30+ modules further than ever before and died
+  at a NEW, different failure: `STATUS_ENTRYPOINT_NOT_FOUND`.
+
+### Fixed — `GetSystemTimePreciseAsFileTime` (Windows 8+) imported by librsvg
+- Field data: process died with `0xC0000139` ("Entry Point Not
+  Found" dialog: *"The procedure entry point
+  GetSystemTimePreciseAsFileTime could not be located in the
+  dynamic link library KERNEL32.dll"*). The function is a
+  Windows 8+ export — its absence confirms the test platform is
+  Windows 7 (again). The loader-check watch corroborates: 60 DLLs
+  mapped, death at `ntdll` (import snapping) immediately after
+  module 60 (`librsvg-2-2.dll`) was mapped and BEFORE its first
+  dependency (USERENV) loaded — i.e. while snapping librsvg's own
+  KERNEL32 imports.
+- Why librsvg: `librsvg-2-2.dll` is Rust-cored (rsvg-rs), and
+  modern Rust std statically imports
+  `kernel32!GetSystemTimePreciseAsFileTime` for `SystemTime::now()`
+  (Rust 1.78+ targets Windows 10+). librsvg is in the dependency
+  tree only because MSYS2's FFmpeg enables the SVG decoder —
+  a feature a video editor never exercises. (Cross-check:
+  `librav1e.dll`, the other Rust DLL, loaded and snapped cleanly —
+  its Rust build does not import the function.)
+- Why the api-set shim technique cannot apply: KERNEL32 is a
+  KnownDLL — the loader resolves it from System32 directly; an
+  application-directory DLL named `KERNEL32.dll` is never consulted.
+  There is no way to supply a missing kernel32 export from the app
+  folder.
+- The fix (portable-build workflow): REPLACE the bundled
+  `librsvg-2-2.dll` with a tiny stub DLL built in CI. The stub's
+  export list is GENERATED at build time from `avcodec-62.dll`'s
+  real import table (objdump + awk; no hand-maintained symbol
+  list to drift against MSYS2 updates) — every exported name
+  aliases one `long fcp_librsvg_stub(void) { return 0; }`
+  implementation. avcodec-62.dll then loads on Windows 7; if the
+  SVG decoder is ever invoked it fails gracefully (handle-creating
+  calls return NULL); every video/audio codec is unaffected.
+  A blocking verification re-extracts the import list and asserts
+  the stub exports every symbol.
+- Side effect (deliberate): librsvg's entire DLL subtree
+  (libpango, libgio, libxml2, libgdk_pixbuf, ...) stops loading —
+  that whole pool of untested-on-Win7 MSYS2 binaries is removed
+  from the launch path. The files remain in the zip as inert dead
+  weight (nothing imports them; deleting them would require a
+  reachability analysis for zero functional gain).
+
+### Added — Windows 7 import tripwire in CI
+- The portable workflow now scans EVERY bundled binary
+  (exe/dll/plugin DLLs) for imports of a curated blocklist of
+  kernel32/KERNELBASE exports introduced after Windows 7
+  (`GetSystemTimePreciseAsFileTime`,
+  `GetCurrentThreadStackLimits`, `QueryInterruptTime`,
+  `QueryInterruptTimePrecise`, `SetThreadDescription`,
+  `GetSystemCpuSetInformation`) and fails the build loudly,
+  naming the binary and function. This is a tripwire, not a
+  complete Win7 API oracle: curated entries only, extend when a
+  new miss is identified. Its purpose is to name the NEXT
+  Win7-incompatible import in CI instead of on the user machine.
+- Note: Windows itself names entry-point misses directly (the
+  dialog names the function AND the DLL), so any future miss on
+  the user machine is self-identifying: paste the dialog text and
+  the same stub technique applies.
+
+### Verified
+- The new workflow step was executed end-to-end in the sandbox
+  against mocked `objdump`/`gcc`/`ldd` (realistic
+  mingw-w64-format sample data, kept in the delivery workspace
+  for future workflow work) across four cases: clean pass (def
+  generated with the exact aliased symbol set; exit 0), tripwire
+  regression (a DLL importing
+  `GetSystemTimePreciseAsFileTime` → build fails, naming
+  `dist/librav1e.dll` + the function), missing-export regression
+  (stub lacking one symbol → blocking error naming it), and
+  empty-extraction regression (descriptor missing → loud failure
+  with an import-table dump).
+- Embed-drift check: the YAML-embedded step is byte-identical to
+  the script that passed the four sandbox cases (extraction +
+  comparison, not eyeballing). Whole-file `bash -n` on every bash
+  step: PASS. `PORTABLE.txt` printf executed: 67 lines, zero
+  apostrophes, v0.4.9 strings.
+- No C/C++ source changed this release (workflow + docs only), so
+  the 152/152 test baseline and the clang-format gate carry over
+  unchanged; the delta vs v0.4.8 is exactly 4 files.
+- Remaining oracles: the CI MinGW leg (first REAL gcc -shared +
+  .def-alias PE build of the stub — the sandbox has no Windows
+  toolchain), then the user's Windows 7 machine.
+
 ## [0.4.8] - 2026-09-02
 
 **v0.4.7's shim source died in the CI MinGW leg on a function
@@ -909,6 +1010,7 @@ First public baseline: engineering foundation only (no editing features yet).
   were formatted with clang-format 22.1.8, and CI installs that exact
   pinned version - the check is now blocking and reproducible.
 
+[0.4.9]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.9
 [0.4.8]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.8
 [0.4.6]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.6
 [0.4.5]: https://github.com/marbou92/FusionCut-Pro/releases/tag/v0.4.5

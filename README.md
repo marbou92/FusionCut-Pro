@@ -66,9 +66,13 @@ arrive milestone by milestone.
 > + offset and writes `loader-check-<timestamp>.log` with the full
 > module load trail. `FusionCutPro.exe --crash-test` writes a
 > synthetic runtime report to verify the in-process pipeline on a
-> clean machine. v0.4.8 fixes the loader-phase root cause the watch
-> exposed (see the Windows 7 / 8.x compatibility note above): the
-> bundled `api-ms-win-core-synch-l1-2-0.dll` shim.
+> clean machine. v0.4.9 fixes the loader-phase root causes the
+> watch exposed (see the Windows 7 / 8.x compatibility note above):
+> the bundled `api-ms-win-core-synch-l1-2-0.dll` shim (WaitOnAddress
+> api set) and the stubbed `librsvg-2-2.dll` (Windows 8+ import).
+> CONFIRMED IN THE FIELD: the v0.4.8 build showed the shim binding
+> on the user Windows 7 machine (load trail module 59) before the
+> next incompatibility surfaced.
 
 ## System requirements (target)
 
@@ -92,6 +96,20 @@ arrive milestone by milestone.
 > System32, so the shim wins the bind on Win7/8.x; on Windows 10/11
 > the OS resolves the name natively and the file is ignored. Leave it
 > in place.
+>
+> **Windows 7 / librsvg:** the MSYS2 `librsvg-2-2.dll` in the FFmpeg
+> dependency tree is built with a modern Rust toolchain that
+> statically imports `kernel32!GetSystemTimePreciseAsFileTime`
+> (Windows 8+ only) — on Windows 7 the loader aborts with
+> `STATUS_ENTRYPOINT_NOT_FOUND` (0xC0000139). KERNEL32 is a
+> KnownDLL, so no app-dir file can ever supply that export; instead
+> the portable build replaces `librsvg-2-2.dll` with a generated stub
+> exporting exactly the symbols `avcodec-62.dll` imports (all
+> returning failure). Consequence: SVG image decoding is unavailable
+> in the portable build; every video/audio codec is unaffected. A CI
+> tripwire additionally scans every bundled binary for known
+> Windows 8/10-only kernel32 imports and fails the build loudly if
+> one appears.
 
 ## Getting a portable build
 
