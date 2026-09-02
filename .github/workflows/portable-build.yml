@@ -106,9 +106,9 @@ jobs:
           # deps - that is correct, not a missing-sweep bug). The tool
           # must remain dependency-free so it can run on a broken
           # install where the very DLLs this sweep bundles are missing.
-          # The api-ms-win-core-synch-l1-2-0.dll forwarder stub is also
-          # expected to show zero /mingw64/ deps here: it is built with
-          # -nostdlib and contains only forwarder export entries.
+          # The api-ms-win-core-synch-l1-2-0.dll shim is likewise
+          # expected to show zero /mingw64/ deps here: it is built by
+          # CMake (-nostdlib) and imports kernel32 only.
           for pass in 1 2 3; do
             for bin in dist/*.exe dist/*.dll dist/*/*.dll dist/plugins/*/*.dll; do
               [ -f "$bin" ] || continue
@@ -117,43 +117,38 @@ jobs:
                 || true
             done
           done
-          # --- Windows 8.x api-set forwarder stub (v0.4.6) ------------------
-          # Root cause of the startup 0xc0000005 on the user's machine
-          # (diagnosed by fcp-loader-check.exe v2's debug-launch watch):
-          # librav1e.dll (Rust, in avcodec's dependency tree) hard-imports
-          # 'api-ms-win-core-synch-l1-2-0.dll' (WaitOnAddress futex set).
-          # The Win8.x loader cannot schema-resolve that name, maps the
-          # System32 placeholder stub, and faults reading its invalid
-          # export data inside ntdll's import-snapping code - before any
-          # user code runs, so WER never engages (no Event Viewer entry,
-          # no crash log; only the bare "unable to start correctly"
-          # dialog). On Win10/11 the ApiSetSchema resolves the name
-          # before the file search and the fault never happens.
-          # The DLL search order tries the application directory BEFORE
-          # System32, so this forwarder-only DLL (valid export table
-          # forwarding to the KernelBase implementations, no code, no
-          # imports, no CRT) wins the bind on Win8.x and is inert on
-          # Win10/11. See packaging/api-ms-win-core-synch-l1-2-0.def.
-          gcc -shared -nostdlib \
-              -o dist/api-ms-win-core-synch-l1-2-0.dll \
-              packaging/api-ms-win-core-synch-l1-2-0.def
-          if [ ! -s dist/api-ms-win-core-synch-l1-2-0.dll ]; then
-            echo "::error::api-set forwarder stub was not created"
-            exit 1
-          fi
-          # CI-side verification of the .def -> DLL pipeline (the build
-          # sandbox has no PE toolchain): the stub must actually export
-          # the forwarders. Blocks the job if the .def/linker contract
-          # ever breaks instead of shipping a broken stub silently.
-          if ! objdump -p dist/api-ms-win-core-synch-l1-2-0.dll | \
-               grep -q 'WaitOnAddress'; then
-            echo "::error::api-set forwarder stub lacks the WaitOnAddress export"
-            objdump -p dist/api-ms-win-core-synch-l1-2-0.dll || true
-            exit 1
-          fi
+          # --- api-set shim export verification (v0.4.7) --------------------
+          # dist/api-ms-win-core-synch-l1-2-0.dll is now built by CMake
+          # (target fcp-apiset-synch, src/app/api_set_synch.c) and
+          # installed by the cmake --install above - the v0.4.6
+          # packaging/*.def + inline gcc -shared build is gone. The DLL
+          # carries REAL implementations of the WaitOnAddress futex set
+          # (not forwarders: KernelBase only implements it since
+          # Windows 8, and the user's test platform is Windows 7), so
+          # the loader-phase 0xc0000005 is fixed on Win7 AND Win8.x;
+          # on Win10/11 the ApiSetSchema wins and the file is inert.
+          # The export names are anchored at end-of-line so an import
+          # like SleepConditionVariableSRW can never satisfy the check.
+          for sym in Sleep WaitOnAddress WakeByAddressAll \
+                     WakeByAddressSingle; do
+            if ! objdump -p dist/api-ms-win-core-synch-l1-2-0.dll | \
+                 grep -q "${sym}$"; then
+              echo "::error::api-set shim lacks the ${sym} export"
+              objdump -p dist/api-ms-win-core-synch-l1-2-0.dll || true
+              exit 1
+            fi
+          done
           cp VERSION dist/VERSION.txt
+          # PORTABLE.txt prose. RULE (learned the hard way in the v0.4.6
+          # CI run): no apostrophes inside these single-quoted arguments.
+          # In bash, \' inside '...' does NOT escape the quote - it
+          # TERMINATES the string (FFmpeg 8\'s flipped the quote parity
+          # of the whole printf; the first later "(" that landed outside
+          # quotes then killed the script with "syntax error near
+          # unexpected token (" at line 138). Write possessives as
+          # "the DLL that ships with FFmpeg 8" instead.
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.6)' '' \
+            'FusionCut Pro - portable build (v0.4.7)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'IF FUSIONCUTPRO.EXE WILL NOT START (the Windows dialog says' \
             '"The application was unable to start correctly' \
@@ -183,10 +178,14 @@ jobs:
             'any user code in FusionCutPro.exe - so the in-process crash' \
             'handler cannot see it and no crash-logs/ entry is produced.' \
             'fcp-loader-check.exe is the diagnostic for that class.' '' \
-            'NOTE (v0.4.6): the bundled api-ms-win-core-synch-l1-2-0.dll' \
-            'next to FusionCutPro.exe is REQUIRED on Windows 8.x - it' \
-            'fixes a loader crash with FFmpeg 8\'s rav1e encoder DLL.' \
-            'Leave it in place. On Windows 10/11 it is ignored.' '' \
+            'NOTE (v0.4.7): the api-ms-win-core-synch-l1-2-0.dll file' \
+            'next to FusionCutPro.exe is REQUIRED on Windows 7 and' \
+            'Windows 8.x - it fixes the startup crash caused by the' \
+            'rav1e encoder DLL that ships with FFmpeg 8 (it imports' \
+            'the WaitOnAddress futex API set, which does not exist on' \
+            'those Windows versions; the bundled file provides a' \
+            'compatible real implementation). Leave it in place. On' \
+            'Windows 10/11 the file is ignored.' '' \
             'IF FUSIONCUTPRO.EXE STARTS BUT THEN CRASHES at runtime, a' \
             'detailed crash log is written to crash-logs/ next to the' \
             'executable (FusionCutPro-crash-<timestamp>.log) with the' \
