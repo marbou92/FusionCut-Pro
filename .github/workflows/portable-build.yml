@@ -148,7 +148,7 @@ jobs:
           # unexpected token (" at line 138). Write possessives as
           # "the DLL that ships with FFmpeg 8" instead.
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.7)' '' \
+            'FusionCut Pro - portable build (v0.4.8)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'IF FUSIONCUTPRO.EXE WILL NOT START (the Windows dialog says' \
             '"The application was unable to start correctly' \
@@ -178,7 +178,7 @@ jobs:
             'any user code in FusionCutPro.exe - so the in-process crash' \
             'handler cannot see it and no crash-logs/ entry is produced.' \
             'fcp-loader-check.exe is the diagnostic for that class.' '' \
-            'NOTE (v0.4.7): the api-ms-win-core-synch-l1-2-0.dll file' \
+            'NOTE (v0.4.8): the api-ms-win-core-synch-l1-2-0.dll file' \
             'next to FusionCutPro.exe is REQUIRED on Windows 7 and' \
             'Windows 8.x - it fixes the startup crash caused by the' \
             'rav1e encoder DLL that ships with FFmpeg 8 (it imports' \
