@@ -4,7 +4,106 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.10] - 2026-09-02
+
+**v0.4.9 never shipped — the portable workflow died in CI inside
+`ld` while building the librsvg stub: the generated module
+definition file was rejected with `librsvg_stub.def:6: syntax
+error` (then again as a fallback linker script). The Windows 7
+analysis from v0.4.9 is untouched and correct — this release only
+replaces the stub's build mechanism so it no longer depends on
+binutils' module-definition grammar, and makes the extraction
+fail loudly (and legibly) instead of three layers downstream.**
+
+### Fixed — the v0.4.9 CI failure (ld rejects the generated .def)
+- The v0.4.9 step generated `build/librsvg_stub.def`
+  (`LIBRARY` + `EXPORTS` + one `symbol = fcp_librsvg_stub` alias
+  line per extracted import) and passed it to `gcc -shared`.
+  The CI log shows the death chain: `ld: build/librsvg_stub.def:6:
+  syntax error`, then `file format not recognized; treating as
+  linker script`, then `:1: syntax error` → exit 1. Line 6 was the
+  FOURTH alias line — and the v0.4.9 log printed only a symbol
+  COUNT (`exporting 4 symbol(s)`), so the actual line content was
+  never visible in the log.
+- Two candidate shapes for that line, and the fix deliberately
+  does not depend on knowing which one occurred:
+  1. the fourth extracted token was not a clean identifier —
+     e.g. an objdump placeholder row (tokens like `(0)` / `(BAD)`
+     / `<unknown>` that objdump prints for terminator or
+     unresolvable import rows), which the extraction awk fed
+     straight into the .def as a "symbol";
+  2. the binutils module-definition parser rejected the generated
+     alias form itself.
+  Either way, the root design error was the same: the build
+  depended on the def grammar — an implementation detail of
+  binutils — and on tokens never being validated before use.
+
+### Fixed — the stub is now def-free (one `__declspec(dllexport)` function per import)
+- The .def file is gone. The stub C source is GENERATED with one
+  `__declspec(dllexport) long <name>(void) { return 0; }` per
+  symbol `avcodec-62.dll` imports — the documented MinGW export
+  mechanism; the loader binds each import by name, so each export
+  name matches. The old "every name aliases one function" .def
+  trick is unnecessary when the codegen can simply emit N
+  identical functions.
+- Extraction hardening (same objdump+awk pipeline, three changes):
+  - the awk stops at objdump section headers (`The …`, `PE …`,
+    `There …`, `Sections:`), so nothing printed after the import
+    table can leak into the symbol list;
+  - entries are deduplicated (a repeated IAT entry would emit two
+    C definitions of the same function and fail the compile);
+  - **every token is validated as a C identifier before code
+    generation**: placeholder tokens (starting `(` or `<`) are
+    warn-skipped with a `::warning::` naming them; any other
+    non-identifier token fails the build NAMING the token and
+    dumping the librsvg import section. An `ld` syntax error
+    three layers away is not a debuggable message; a named token
+    is a one-iteration fix.
+- The full symbol list is now echoed to the CI log (the count-only
+  line was the blind spot that made the v0.4.9 failure
+  undiagnosable from the log alone).
+- Export verification rewritten: instead of structurally parsing
+  the stub export table, each symbol is checked with an
+  end-of-line-anchored `grep` against `objdump -p` of the built
+  DLL — the exact technique the api-set shim check has used in
+  two green CI runs — so a longer export that merely CONTAINS the
+  symbol can never satisfy the check. Still blocking.
+
+### Verified
+- Sandbox battery (`wfmock/`, now with a persistent runner
+  `run-battery.sh`): 31 assertions, all green — clean pass (4
+  symbols, 4 dllexport stubs, no .def, generated C valid under
+  real `gcc -fsyntax-only`); tail-leak transcript (librsvg last
+  import + `(0)` placeholder row + post-table sections → 3 real
+  symbols kept, placeholder warn-skipped, nothing leaks into the
+  generated C); junk-token transcript fails the build naming
+  `[rsvg+handle+new_from_data]`; duplicate IAT entries dedupe;
+  missing-export blocked naming the symbol; empty extraction
+  fails loudly; the Windows 7 tripwire still fires naming
+  binary+function.
+- **Regression teeth:** the preserved v0.4.9 script, run on the
+  tail-leak transcript, produces a .def whose line 6 is byte-
+  exactly `    (0) = fcp_librsvg_stub` — reproducing the CI
+  failure shape (and the `exporting 4 symbol(s)` count line from
+  the real log). The battery now proves it catches this failure
+  class.
+- Embed-drift check: the YAML-embedded step is byte-identical to
+  the script that passed the battery (de-indented comparison).
+  Whole-file `bash -n` on every bash step: PASS (run under
+  `bash -eo pipefail`, stricter than the msys2 shell).
+  `PORTABLE.txt` printf executed: 67 lines, zero apostrophes,
+  v0.4.10 strings ×3.
+- No C/C++ source changed (workflow + docs only); the 152/152
+  test baseline and the clang-format gate carry over unchanged.
+- Remaining oracles: the CI MinGW leg (first real
+  `__declspec(dllexport)` PE build of the stub), then the user's
+  Windows 7 machine (expect the app to START; if a further
+  entry-point dialog appears, its text names the function+DLL
+  and the same stub pattern applies).
+
 ## [0.4.9] - 2026-09-02
+
+**(superseded within one CI run - see [0.4.10])**
 
 **The v0.4.8 shim worked — the field data proves it — and Windows 7
 then hit the next incompatibility in line: an entry point that
