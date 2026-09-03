@@ -4,7 +4,108 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.11] - 2026-09-03
+
+**v0.4.10 never shipped — the portable workflow died in CI inside
+the new identifier validation: `librsvg import extraction produced
+non-identifier token(s): [01a0c838]`. That error path is the one
+v0.4.10 built for exactly this situation, and it did its job twice
+over: it named the offending token, and the section dump it prints
+finally revealed the REAL MSYS2 objdump format — including a line
+class the extractor had never accounted for, and which turns out to
+be the true author of BOTH the v0.4.9 and the v0.4.10 CI deaths.
+The Windows 7 analysis is untouched and correct — this release only
+tightens the import extraction to the real format.**
+
+### Fixed — a hex thunk address leaked into the symbol list (the import-descriptor line)
+- Root cause, now visible in the CI dump: after every DLL import
+  section, `objdump -p` prints that DLL's import-DESCRIPTOR line —
+  space-indented, six hex fields (descriptor vma, INT RVA,
+  timestamp, forwarder chain, name RVA, first-thunk RVA). Its last
+  field is the vma of the NEXT DLL's first import row; in the dump
+  it is `01a0c838` — which appears again two lines later as the
+  actual row address of `speex_bits_destroy`. The v0.4.10 awk
+  filter ("hex first field, 3+ fields, print the last field")
+  matched that descriptor line like a symbol row and leaked the
+  address into the symbol list. The identifier validation then
+  correctly refused it and failed the build naming it: the safety
+  net held, one layer earlier than in v0.4.9.
+- **This also closes the v0.4.9 cold case with certainty.** The
+  v0.4.9 extraction had the same leak; its unsorted symbol list
+  was `rsvg_handle_get_intrinsic_size_in_pixels`,
+  `rsvg_handle_new_from_data`, `rsvg_handle_render_document`,
+  `01a0c838` — so alias line 6 of the generated `.def` was the hex
+  token, which the binutils module-definition grammar rejects:
+  `librsvg_stub.def:6: syntax error`, exactly as CI showed. The
+  v0.4.10 narrative guessed an objdump placeholder row (`(0)`) as
+  the culprit — wrong, because the sandbox mock transcripts had
+  been authored from a remembered objdump format that never shows
+  descriptor lines (see the verification note below).
+- The fix: the extractor accepts ONLY rows shaped like a real
+  by-name import row — hex vma, `<none>` ordinal column, hex hint,
+  then the name — and prints the Member-Name column (`$4`, not
+  `$NF`), so neither an import-descriptor line nor a filled
+  Bound-To column can masquerade as a symbol. avcodec's librsvg
+  imports are by-name with hints (visible in the dump); if a
+  future toolchain ever lists them by ordinal, the extraction
+  fails LOUDLY — the empty-list error already names that
+  possibility.
+- The Windows 7 tripwire awk gets the same row shape. Its leaked
+  hex tokens could never have matched the name-matched blocklist,
+  so its verdicts were already correct — but the noise is gone and
+  both parsers now share one format contract.
+- The stub export check widens its anchor from " " before the
+  symbol name to `[[:space:]]` (EOL anchor unchanged): that check
+  has not yet run in a green CI, and the class tolerates a tab as
+  the only separator before a name.
+
+### Verified
+- The wfmock transcripts were REBUILT from the real CI log (the
+  failure-path section dump), not from remembered formats. The
+  clean case now carries the actual librsvg import section —
+  `rsvg_handle_get_intrinsic_size_in_pixels`,
+  `rsvg_handle_new_from_data`, `rsvg_handle_render_document` —
+  plus the real descriptor lines around it and the full libspeex
+  section that follows, byte-faithful including tab/space
+  indentation.
+- Battery: 38 assertions green under `bash -eo pipefail` (stricter
+  than the msys2 shell): clean pass (3 symbols, 3 dllexport stubs,
+  no .def, generated C valid under real `gcc -fsyntax-only`, and
+  the descriptor tail `01a0c838` never appears anywhere in the
+  log); placeholder row warn-skipped; post-table sections cannot
+  leak; junk token fails naming it; duplicate IAT deduped;
+  missing-export blocked naming the symbol; empty extraction fails
+  loudly; Win7 tripwire fires naming binary+function.
+- **Regression teeth, corrected record:** the preserved v0.4.10
+  script on the real transcript reproduces the v0.4.10 CI death
+  byte-for-byte (`non-identifier token(s): [01a0c838]`, exit 1,
+  before any codegen); the preserved v0.4.9 script on the SAME
+  transcript generates def line 6 exactly
+  `    01a0c838 = fcp_librsvg_stub` and logs `exporting 4
+  symbol(s)` — the real v0.4.9 failure shape. The v0.4.10 battery
+  asserted the WRONG line 6 (`    (0) = fcp_librsvg_stub`) because
+  its transcripts were invented; both prior CI failures are now
+  reproduced offline from one ground-truth input.
+- Embed-drift check: the YAML-embedded step is byte-identical to
+  the script that passed the battery. Whole-file `bash -n` on
+  every bash step: PASS. YAML parses. `PORTABLE.txt` printf
+  executed: 67 lines, zero apostrophes, v0.4.11 strings ×3.
+- Process lesson (10th): never author a mock transcript from a
+  remembered output format — capture the real transcript from the
+  failure log. The v0.4.10 investment in fail-loudly-with-dump
+  error paths is what converted this from a three-version guessing
+  game into a one-iteration fix.
+- No C/C++ source changed (workflow + docs only); the 152/152 test
+  baseline and the clang-format gate carry over unchanged.
+- Remaining oracles: the CI MinGW leg (first run of the strict-row
+  extractor and the `[[:space:]]` export anchor against real PE
+  files), then the user's Windows 7 machine (expect the app to
+  START; if a further entry-point dialog appears, its text names
+  the function+DLL and the same stub pattern applies).
+
 ## [0.4.10] - 2026-09-02
+
+**(superseded within one CI run - see [0.4.11])**
 
 **v0.4.9 never shipped — the portable workflow died in CI inside
 `ld` while building the librsvg stub: the generated module
