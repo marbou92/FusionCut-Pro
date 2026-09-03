@@ -117,7 +117,7 @@ jobs:
                 || true
             done
           done
-          # --- librsvg-2-2.dll stub (v0.4.9): Win7 entry-point fix --------------
+          # --- librsvg-2-2.dll stub (v0.4.10): Win7 entry-point fix, take 2 ---------
           # v0.4.8 field report (Windows 7 machine): the load trail showed the
           # api-set shim binding (module 59: our api-ms-win-core-synch-l1-2-0.dll
           # via librav1e.dll) and then died with STATUS_ENTRYPOINT_NOT_FOUND
@@ -130,55 +130,110 @@ jobs:
           # ever supply its exports, so the api-set shim technique cannot apply.
           # Instead: REPLACE the bundled librsvg-2-2.dll with a stub that exports
           # EXACTLY the symbols avcodec-62.dll imports (extracted from its real
-          # import table here - no hand-maintained list to drift), all aliasing
-          # one function that returns 0. avcodec then loads on Windows 7; the SVG
+          # import table here - no hand-maintained list to drift), every one a
+          # function that returns 0. avcodec then loads on Windows 7; the SVG
           # decoder fails gracefully if ever invoked (video and audio codecs are
           # unaffected); and the whole librsvg DLL subtree (pango, gio, xml2, ...)
           # stops loading - those files stay in dist as inert dead weight, their
           # Win7 risk pool removed from the launch path.
+          #
+          # v0.4.10 CHANGE - the v0.4.9 CI run of this step died in ld:
+          #   build/librsvg_stub.def:6: syntax error
+          #   build/librsvg_stub.def: file format not recognized; treating as
+          #   linker script ... :1: syntax error
+          # v0.4.9 generated a module definition (.def) file and passed it to
+          # gcc -shared, which made the build depend on the binutils
+          # module-definition grammar - an implementation detail, and evidently
+          # not tolerant of what this run fed it (the v0.4.9 log printed only a
+          # symbol COUNT, so the offending def line was never even visible).
+          # Take 2 removes the .def file entirely:
+          #   - the stub C source declares one __declspec(dllexport) function
+          #     per imported symbol (the documented MinGW export mechanism; the
+          #     loader binds each import by name, so each export name matches);
+          #   - every extracted token is validated as a C identifier BEFORE
+          #     code generation: objdump placeholder rows that carry no real
+          #     name (tokens like (0) / (BAD) / <unknown>, which objdump prints
+          #     for unresolvable or terminator rows) are warn-skipped; anything
+          #     else non-identifier fails the build NAMING the token and
+          #     dumping the import section - an ld syntax error three layers
+          #     away is not a debuggable message;
+          #   - the awk extractor additionally stops at objdump section
+          #     headers, so nothing printed after the import table can leak
+          #     into the symbol list;
+          #   - the full symbol list is echoed to the log.
           rsvg_syms="$(objdump -p dist/avcodec-62.dll | awk '
             $1 == "DLL" && $2 == "Name:" { inrsvg = ($3 ~ /^librsvg/); next }
+            /^(The |PE |There |Sections:)/ { inrsvg = 0; next }
             inrsvg && $1 ~ /^[0-9a-f]+$/ && NF >= 3 { print $NF }
           ')"
           if [ -z "$rsvg_syms" ]; then
             echo "::error::no librsvg imports found in dist/avcodec-62.dll (import table format change? ordinal imports?)"
-            objdump -p dist/avcodec-62.dll | sed -n '/Import Tables/,$p' | head -80 || true
+            objdump -p dist/avcodec-62.dll | sed -n '/DLL Name: *librsvg/,/^The /p' | head -40 || true
             exit 1
           fi
-          echo "librsvg stub: exporting $(printf '%s\n' "$rsvg_syms" | wc -l) symbol(s) for avcodec"
-          printf '%s\n' 'long fcp_librsvg_stub(void) { return 0; }' > build/librsvg_stub.c
+          # Deduplicate: a repeated IAT entry would emit two C definitions of
+          # the same function and fail the compile.
+          rsvg_syms="$(printf '%s\n' "$rsvg_syms" | LC_ALL=C sort -u)"
+          kept=""
+          placeholders=""
+          bad=""
+          for s in $rsvg_syms; do
+            case "$s" in
+              "("*|"<"*)
+                placeholders="$placeholders $s"
+                ;;
+              *)
+                if [[ "$s" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                  kept="$kept $s"
+                else
+                  bad="$bad [$s]"
+                fi
+                ;;
+            esac
+          done
+          if [ -n "$placeholders" ]; then
+            echo "::warning::librsvg import list: skipping objdump placeholder token(s):$placeholders (not import names)"
+          fi
+          if [ -n "$bad" ]; then
+            echo "::error::librsvg import extraction produced non-identifier token(s):$bad"
+            objdump -p dist/avcodec-62.dll | sed -n '/DLL Name: *librsvg/,/^The /p' | head -40 || true
+            exit 1
+          fi
+          if [ -z "$kept" ]; then
+            echo "::error::librsvg import list contained only placeholder tokens - no exportable symbols"
+            exit 1
+          fi
+          rsvg_syms="$kept"
+          echo "librsvg stub: exporting $(printf '%s\n' $rsvg_syms | wc -l) symbol(s) for avcodec:"
+          printf '  %s\n' $rsvg_syms
           {
-            echo "LIBRARY librsvg-2-2"
-            echo "EXPORTS"
+            echo '/* generated by CI (v0.4.10) - librsvg-2-2.dll Windows 7 stub */'
+            echo '/* one exported function per avcodec-62.dll import; returns 0 */'
             for s in $rsvg_syms; do
-              echo "    $s = fcp_librsvg_stub"
+              echo "__declspec(dllexport) long $s(void) { return 0; }"
             done
-          } > build/librsvg_stub.def
+          } > build/librsvg_stub.c
           gcc -c build/librsvg_stub.c -o build/librsvg_stub.o
-          gcc -shared build/librsvg_stub.o build/librsvg_stub.def -o dist/librsvg-2-2.dll
+          gcc -shared build/librsvg_stub.o -o dist/librsvg-2-2.dll
           # The stub links the default MinGW CRT (kernel32 + msvcrt, both
           # Win7-era); sweep it for completeness like every other dist binary
           # (guarded per the pipefail rule above).
           ldd dist/librsvg-2-2.dll 2>/dev/null | grep '/mingw64/' | awk '{print $3}' | \
             while read -r dll; do cp -n "$dll" dist/ 2>/dev/null || true; done \
             || true
-          # Blocking: every symbol avcodec imports must appear in the stub export
-          # table (entries print as "[ ordinal] name" lines).
-          stub_exports="$(objdump -p dist/librsvg-2-2.dll | awk '
-            /Ordinal\/Name Pointer\] Table/ { inexp = 1; next }
-            inexp && NF == 0 { next }
-            inexp && $1 == "[" { print $NF; next }
-            inexp { inexp = 0 }
-          ' | tr '\n' ' ')"
+          # Blocking: every symbol avcodec imports must appear in the stub
+          # export table. Export names are anchored at end-of-line (the same
+          # technique as the api-set check below) so a longer export that merely
+          # CONTAINS the symbol can never satisfy the check.
           missing=""
           for s in $rsvg_syms; do
-            case " $stub_exports " in
-              *" $s "*) ;;
-              *) missing="$missing $s" ;;
-            esac
+            if ! objdump -p dist/librsvg-2-2.dll | grep -q " ${s}\$"; then
+              missing="$missing $s"
+            fi
           done
           if [ -n "$missing" ]; then
             echo "::error::librsvg stub is missing export(s):$missing"
+            objdump -p dist/librsvg-2-2.dll | sed -n '/Export Tables/,$p' | head -40 || true
             exit 1
           fi
           # --- Windows 7 import tripwire (v0.4.9) --------------------------------
@@ -241,7 +296,7 @@ jobs:
           # unexpected token (" at line 138). Write possessives as
           # "the DLL that ships with FFmpeg 8" instead.
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.4.9)' '' \
+            'FusionCut Pro - portable build (v0.4.10)' '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'IF FUSIONCUTPRO.EXE WILL NOT START (the Windows dialog says' \
             '"The application was unable to start correctly' \
@@ -271,7 +326,7 @@ jobs:
             'any user code in FusionCutPro.exe - so the in-process crash' \
             'handler cannot see it and no crash-logs/ entry is produced.' \
             'fcp-loader-check.exe is the diagnostic for that class.' '' \
-            'NOTE (v0.4.9): the api-ms-win-core-synch-l1-2-0.dll file' \
+            'NOTE (v0.4.10): the api-ms-win-core-synch-l1-2-0.dll file' \
             'next to FusionCutPro.exe is REQUIRED on Windows 7 and' \
             'Windows 8.x - it fixes the startup crash caused by the' \
             'rav1e encoder DLL that ships with FFmpeg 8 (it imports' \
@@ -279,7 +334,7 @@ jobs:
             'those Windows versions; the bundled file provides a' \
             'compatible real implementation). Leave it in place. On' \
             'Windows 10/11 the file is ignored.' '' \
-            'ALSO NOTE (v0.4.9): the librsvg-2-2.dll file next to' \
+            'ALSO NOTE (v0.4.10): the librsvg-2-2.dll file next to' \
             'FusionCutPro.exe is a small stub (its functions return' \
             'failure) so the app can start on Windows 7 - the real' \
             'librsvg from the FFmpeg stack requires Windows 8 or newer' \
