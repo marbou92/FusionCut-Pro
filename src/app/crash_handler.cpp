@@ -92,6 +92,7 @@
 #else
 #include <execinfo.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -175,6 +176,17 @@ std::string joinPath(const std::string &dir, const std::string &leaf) {
         return dir + leaf;
     }
     return dir + std::string(1, sep) + leaf;
+}
+
+// Cross-platform thread id for report headers. On Windows the kernel id;
+// on POSIX pthread_self() is opaque but its cast still distinguishes
+// threads in a single report.
+unsigned long currentThreadId() {
+#if defined(_WIN32)
+    return static_cast<unsigned long>(GetCurrentThreadId());
+#else
+    return static_cast<unsigned long>(pthread_self());
+#endif
 }
 
 // Resolve the directory to use for crash logs and the boot trace.
@@ -350,60 +362,152 @@ const char *exceptionCodeName(DWORD code) {
 // handler. We deliberately avoid psapi's EnumProcessModules because
 // that drags in a link dependency on psapi.lib on some toolchains;
 // toolhelp32 is in kernel32 (always linked).
-void appendModuleSnapshot(std::string &out) {
+//
+// v0.4.12: the snapshot is taken ONCE per crash into a vector that is
+// then reused for (a) fault-address attribution (module+RVA blame - the
+// capability the old fcp-loader-check.exe provided from OUTSIDE the
+// process, now baked in), (b) per-frame backtrace attribution, (c) the
+// module list section, and (d) the crash dialog text.
+struct ModEntry {
+    BYTE *base = nullptr;
+    DWORD size = 0;
+    char name[256] = {0}; // MODULEENTRY32.szModule (base name)
+    char path[512] = {0}; // MODULEENTRY32.szExePath (full load path)
+};
+
+bool snapshotModules(std::vector<ModEntry> &mods) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, 0);
     if (snap == INVALID_HANDLE_VALUE) {
-        out += "  (CreateToolhelp32Snapshot failed)\n";
-        return;
+        return false;
     }
     MODULEENTRY32 me{};
     me.dwSize = sizeof(me);
-    char line[1024];
     if (Module32First(snap, &me)) {
-        int idx = 0;
         do {
             if (me.szModule[0] == '\0' && me.szExePath[0] == '\0') {
                 continue;
             }
-            const int n = std::snprintf(
-                line, sizeof(line), "  [%4d] base=0x%p size=%6lu mod=%s path=%s\n", idx++,
-                static_cast<void *>(me.modBaseAddr), static_cast<unsigned long>(me.modBaseSize),
-                me.szModule[0] ? me.szModule : "(unnamed)",
-                me.szExePath[0] ? me.szExePath : "(unknown)");
-            if (n > 0) {
-                out.append(line, static_cast<size_t>(n));
-            }
+            ModEntry m;
+            m.base = me.modBaseAddr;
+            m.size = me.modBaseSize;
+            std::snprintf(m.name, sizeof(m.name), "%s", me.szModule[0] ? me.szModule : "(unnamed)");
+            std::snprintf(m.path, sizeof(m.path), "%s",
+                          me.szExePath[0] ? me.szExePath : "(unknown)");
+            mods.push_back(m);
         } while (Module32Next(snap, &me));
-    } else {
-        out += "  (Module32First failed)\n";
     }
     CloseHandle(snap);
+    return !mods.empty();
+}
+
+// Map an address to "module.dll+0xRVA" using a snapshot from
+// snapshotModules(). Returns an empty string when the address lies
+// outside every recorded module (typical for a jump through a garbage
+// pointer). This is the IN-PROCESS twin of the loader-check blame: it
+// turns a bare 0x7FFxxxxx address into the actionable "which DLL died".
+std::string attributeAddress(const std::vector<ModEntry> &mods, const void *address) {
+    const ULONG_PTR addr = reinterpret_cast<ULONG_PTR>(address);
+    char buf[320];
+    for (const ModEntry &m : mods) {
+        const ULONG_PTR base = reinterpret_cast<ULONG_PTR>(m.base);
+        if (m.size != 0 && addr >= base && addr < base + m.size) {
+            std::snprintf(buf, sizeof(buf), "%s+0x%llX", m.name,
+                          static_cast<unsigned long long>(addr - base));
+            return std::string(buf);
+        }
+    }
+    return {};
+}
+
+// Render the module list section from a snapshot.
+void appendModuleSnapshot(std::string &out, const std::vector<ModEntry> &mods) {
+    if (mods.empty()) {
+        out += "  (module snapshot unavailable)\n";
+        return;
+    }
+    char line[1024];
+    for (size_t i = 0; i < mods.size(); ++i) {
+        const int n =
+            std::snprintf(line, sizeof(line), "  [%4zu] base=0x%p size=%6lu mod=%s path=%s\n", i,
+                          static_cast<void *>(mods[i].base),
+                          static_cast<unsigned long>(mods[i].size), mods[i].name, mods[i].path);
+        if (n > 0) {
+            out.append(line, static_cast<size_t>(n));
+        }
+    }
+}
+
+// x64 register dump from the VEH CONTEXT record. 32-bit builds (and the
+// mock cross-compile on non-x64 hosts) skip the section entirely.
+void appendRegisterDump(std::string &out, PCONTEXT ctx) {
+#if defined(_M_X64) || defined(__x86_64__)
+    if (!ctx) {
+        out += "Registers: (no CONTEXT record on this path)\n";
+        return;
+    }
+    char line[512];
+    const int n = std::snprintf(
+        line, sizeof(line),
+        "Registers (x64):\n"
+        "  RIP=%016llX  RSP=%016llX  RBP=%016llX\n"
+        "  RAX=%016llX  RBX=%016llX  RCX=%016llX  RDX=%016llX\n"
+        "  RSI=%016llX  RDI=%016llX  R8 =%016llX  R9 =%016llX\n"
+        "  R10=%016llX  R11=%016llX  R12=%016llX  R13=%016llX\n"
+        "  R14=%016llX  R15=%016llX\n",
+        static_cast<unsigned long long>(ctx->Rip), static_cast<unsigned long long>(ctx->Rsp),
+        static_cast<unsigned long long>(ctx->Rbp), static_cast<unsigned long long>(ctx->Rax),
+        static_cast<unsigned long long>(ctx->Rbx), static_cast<unsigned long long>(ctx->Rcx),
+        static_cast<unsigned long long>(ctx->Rdx), static_cast<unsigned long long>(ctx->Rsi),
+        static_cast<unsigned long long>(ctx->Rdi), static_cast<unsigned long long>(ctx->R8),
+        static_cast<unsigned long long>(ctx->R9), static_cast<unsigned long long>(ctx->R10),
+        static_cast<unsigned long long>(ctx->R11), static_cast<unsigned long long>(ctx->R12),
+        static_cast<unsigned long long>(ctx->R13), static_cast<unsigned long long>(ctx->R14),
+        static_cast<unsigned long long>(ctx->R15));
+    if (n > 0) {
+        out.append(line, static_cast<size_t>(n));
+    }
+#else
+    (void)ctx;
+    out += "Registers: (x64 register dump not built on this target)\n";
+#endif
 }
 #endif // _WIN32
 
 // Best-effort stack backtrace. Returns the frame count captured so
-// callers can decide whether to fall through to symbolication.
-unsigned appendBacktrace(std::string &out) {
+// callers can decide whether to fall through to symbolication. On
+// Windows, when a module snapshot is supplied every frame is annotated
+// with its module+RVA attribution (raw addresses stay in the log for
+// offline addr2line/cv2pdb symbolication - the annotation is a convenience
+// layer, not a replacement).
 #if defined(_WIN32)
+unsigned appendBacktrace(std::string &out, const std::vector<ModEntry> *mods) {
     void *frames[64];
     const USHORT n = CaptureStackBackTrace(0, 64, frames, nullptr);
-    char line[128];
-    const int m = std::snprintf(
-        line, sizeof(line),
-        "Backtrace (CaptureStackBackTrace, %u frames; raw addresses for offline symbolication):\n",
-        static_cast<unsigned>(n));
+    char line[256];
+    const int m =
+        std::snprintf(line, sizeof(line),
+                      "Backtrace (CaptureStackBackTrace, %u frames; module+RVA attributed, raw "
+                      "addresses for offline symbolication):\n",
+                      static_cast<unsigned>(n));
     if (m > 0) {
         out.append(line, static_cast<size_t>(m));
     }
     for (USHORT i = 0; i < n; ++i) {
-        const int k = std::snprintf(line, sizeof(line), "  [%2u] 0x%p\n", static_cast<unsigned>(i),
-                                    frames[i]);
+        std::string where;
+        if (mods) {
+            where = attributeAddress(*mods, frames[i]);
+        }
+        const int k =
+            std::snprintf(line, sizeof(line), "  [%2u] 0x%p  %s\n", static_cast<unsigned>(i),
+                          frames[i], where.empty() ? "(outside modules)" : where.c_str());
         if (k > 0) {
             out.append(line, static_cast<size_t>(k));
         }
     }
     return n;
+}
 #else
+unsigned appendBacktrace(std::string &out) {
     void *frames[64];
     const int n = backtrace(frames, 64);
     char line[128];
@@ -423,8 +527,8 @@ unsigned appendBacktrace(std::string &out) {
         std::free(syms);
     }
     return static_cast<unsigned>(n > 0 ? n : 0);
-#endif
 }
+#endif
 
 // ---------- Windows VEH (covers all threads, including qwindows init) ----
 
@@ -459,41 +563,68 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
 
     // Build the report body. VEH runs in ordinary thread context, so
     // std::string heap allocation is safe here.
+    //
+    // v0.4.12: one module snapshot feeds fault attribution, frame
+    // attribution, the module list, and the dialog - and the faulting
+    // address gets a "module.dll+0xRVA" blame line (the in-process
+    // loader-check capability).
+    std::vector<ModEntry> mods;
+    snapshotModules(mods);
     std::string body;
-    body.reserve(4096);
+    body.reserve(8192);
     char line[512];
-    int n =
-        std::snprintf(line, sizeof(line),
-                      "FusionCut Pro crash report\n"
-                      "Version: %s\n"
-                      "Timestamp: %s\n"
-                      "Kind: VectoredException\n"
-                      "ExceptionCode: 0x%08lX (%s)\n"
-                      "ExceptionAddress: 0x%p\n",
-                      g_appVersion.c_str(), timestamp().c_str(), static_cast<unsigned long>(code),
-                      exceptionCodeName(code), ep->ExceptionRecord->ExceptionAddress);
+    int n = std::snprintf(line, sizeof(line),
+                          "FusionCut Pro crash report\n"
+                          "Version: %s\n"
+                          "Timestamp: %s\n"
+                          "Kind: VectoredException\n"
+                          "ThreadId: %lu\n"
+                          "ExceptionCode: 0x%08lX (%s)\n"
+                          "ExceptionAddress: 0x%p\n",
+                          g_appVersion.c_str(), timestamp().c_str(),
+                          static_cast<unsigned long>(GetCurrentThreadId()),
+                          static_cast<unsigned long>(code), exceptionCodeName(code),
+                          ep->ExceptionRecord->ExceptionAddress);
     if (n > 0) {
         body.append(line, static_cast<size_t>(n));
     }
+    // Blame the module containing the faulting instruction.
+    const std::string faultBlame = attributeAddress(mods, ep->ExceptionRecord->ExceptionAddress);
+    if (!faultBlame.empty()) {
+        body += "FaultModule: ";
+        body += faultBlame;
+        body += "\n";
+    }
     // ACCESS_VIOLATION / IN_PAGE_ERROR carry an array of sub-params: [0]
-    // is the read/write/execute flag, [1] is the faulting VA.
+    // is the read/write/execute flag, [1] is the faulting VA. Blame the
+    // module containing the TARGET address too: for a heap/heap-manager
+    // fault the instruction lands in a runtime DLL while the data belongs
+    // to the component that owns the allocation - the target module line
+    // names the actual culprit.
     if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR) {
         const ULONG_PTR *info = ep->ExceptionRecord->ExceptionInformation;
         const char *op = info[0] == 0   ? "Read"
                          : info[0] == 1 ? "Write"
                          : info[0] == 8 ? "DEP/Execute"
                                         : "Unknown";
+        const std::string targetBlame = attributeAddress(mods, reinterpret_cast<void *>(info[1]));
         const int k =
             std::snprintf(line, sizeof(line), "AccessType: %s (%lu)\nFaultingAddress: 0x%p\n", op,
                           static_cast<unsigned long>(info[0]), reinterpret_cast<void *>(info[1]));
         if (k > 0) {
             body.append(line, static_cast<size_t>(k));
         }
+        if (!targetBlame.empty()) {
+            body += "FaultTargetModule: ";
+            body += targetBlame;
+            body += "\n";
+        }
     }
+    appendRegisterDump(body, ep->ContextRecord);
     body += "----- Stack -----\n";
-    appendBacktrace(body);
+    appendBacktrace(body, &mods);
     body += "----- Loaded Modules -----\n";
-    appendModuleSnapshot(body);
+    appendModuleSnapshot(body, mods);
     body += "----- Boot Trace -----\n";
     body += readBootTrace();
 
@@ -538,16 +669,22 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
 
     // User-facing dialog: only if a GUI desktop is available. Use
     // MB_SYSTEMMODAL so the dialog stays on top of any hung render.
+    // v0.4.12: the blamed module is IN the dialog - the user can act on
+    // "avcodec-62.dll crashed" without opening the log.
     char msg[1024];
     std::snprintf(msg, sizeof(msg),
                   "FusionCut Pro has stopped unexpectedly.\r\n\r\n"
                   "Exception: %s (code 0x%08lX)\r\n"
-                  "Address: 0x%p\r\n\r\n"
+                  "Address: 0x%p\r\n"
+                  "Fault module: %s\r\n\r\n"
                   "A detailed crash log has been written to:\r\n%s\r\n\r\n"
                   "Please send that log file to the developer so the cause can be fixed.\r\n"
                   "The application will now close.",
                   exceptionCodeName(code), static_cast<unsigned long>(code),
-                  ep->ExceptionRecord->ExceptionAddress, writtenPath.c_str());
+                  ep->ExceptionRecord->ExceptionAddress,
+                  faultBlame.empty() ? "(unknown - address outside all loaded modules)"
+                                     : faultBlame.c_str(),
+                  writtenPath.c_str());
     MessageBoxA(nullptr, msg, "FusionCut Pro - Crash Report",
                 MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND);
 
@@ -671,16 +808,22 @@ void terminateHandler() {
                                 "Version: %s\n"
                                 "Timestamp: %s\n"
                                 "Kind: std::terminate (uncaught C++ exception)\n"
+                                "ThreadId: %lu\n"
                                 "Exception.what(): %s\n",
-                                g_appVersion.c_str(), timestamp().c_str(), what ? what : "(null)");
+                                g_appVersion.c_str(), timestamp().c_str(), currentThreadId(),
+                                what ? what : "(null)");
     if (n > 0) {
         body.append(line, static_cast<size_t>(n));
     }
     body += "----- Stack -----\n";
-    appendBacktrace(body);
 #if defined(_WIN32)
+    std::vector<ModEntry> mods;
+    snapshotModules(mods);
+    appendBacktrace(body, &mods);
     body += "----- Loaded Modules -----\n";
-    appendModuleSnapshot(body);
+    appendModuleSnapshot(body, mods);
+#else
+    appendBacktrace(body);
 #endif
     body += "----- Boot Trace -----\n";
     body += readBootTrace();
@@ -903,10 +1046,14 @@ std::string writeManualCrashReport(const std::string &appVersion, const std::str
         body.append(line, static_cast<size_t>(n));
     }
     body += "----- Stack -----\n";
-    appendBacktrace(body);
 #if defined(_WIN32)
+    std::vector<ModEntry> mods;
+    snapshotModules(mods);
+    appendBacktrace(body, &mods);
     body += "----- Loaded Modules -----\n";
-    appendModuleSnapshot(body);
+    appendModuleSnapshot(body, mods);
+#else
+    appendBacktrace(body);
 #endif
     body += "----- Boot Trace -----\n";
     body += readBootTrace();

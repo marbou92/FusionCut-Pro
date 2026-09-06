@@ -4,6 +4,7 @@
 #include <fc/version.h>
 
 #include "crash_handler.h"
+#include "diag_supervisor.h"
 #include "mainwindow.h"
 
 int main(int argc, char *argv[]) {
@@ -22,7 +23,8 @@ int main(int argc, char *argv[]) {
     // synthetic report and exits without starting the UI. Lets the
     // user confirm the crash-log path + dialog behave as expected.
     for (int i = 1; i < argc; ++i) {
-        if (QString::fromLocal8Bit(argv[i]) == QLatin1String("--crash-test")) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (arg == QLatin1String("--crash-test")) {
             fc::recordBootStage(3, "--crash-test invoked, writing manual report");
             const std::string path = fc::writeManualCrashReport(FC_VERSION_STRING);
             std::fprintf(stdout, "FusionCut Pro crash-test report written to: %s\n",
@@ -33,6 +35,16 @@ int main(int argc, char *argv[]) {
             // crash report - useful for diagnosing the report path
             // resolution itself if the --crash-test failed.
             return 0;
+        }
+        // v0.4.12: the standalone fcp-loader-check.exe is GONE; the
+        // two-phase loader diagnostic (import-tree probe + debug-launch
+        // watch) runs from THIS exe. --diag launches a supervisor copy
+        // of ourselves that debug-watches a --diag-child instance; the
+        // --diag-child marker itself is a NO-OP here (normal startup),
+        // which is also what prevents supervisor recursion.
+        if (arg == QLatin1String("--diag")) {
+            fc::recordBootStage(3, "--diag invoked, running diagnostic supervisor");
+            return fc::runDiagSupervisor(FC_VERSION_STRING);
         }
     }
 

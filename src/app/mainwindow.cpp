@@ -163,8 +163,7 @@ void MainWindow::buildDecodeThread() {
                 fps_ = fps > 1.0 ? fps : 24.0;
                 model_.setFps(fps_);
                 transport_->setMedia(duration_, fps_);
-                timeline_->setSequenceDuration(duration_);
-                timeline_->setFps(fps_);
+                updateSequenceDuration();
                 statusBar()->showMessage(summary, 8000);
                 if (!pendingAddClipPath_.isEmpty()) {
                     const int64_t sourceOut = std::min<int64_t>(
@@ -174,12 +173,23 @@ void MainWindow::buildDecodeThread() {
                     addPendingClip(pendingAddClipPath_, sourceOut);
                     pendingAddClipPath_.clear();
                 }
+                // M4b: a program-source switch was queued during a seek -
+                // the new source is now open; re-resolve the timeline
+                // position (it maps into the clip and seeks directly).
+                if (pendingProgramSeek_) {
+                    pendingProgramSeek_ = false;
+                    requestFrameAt(playhead_);
+                }
             });
     connect(worker_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double pts) {
         programCanvas_->setFrame(frame, pts);
         quickView_->canvas()->setFrame(frame, pts);
-        timeline_->setPlayhead(pts);
-        transport_->setPosition(pts);
+        // The timeline playhead + transport show the TIMELINE position
+        // (playhead_), not the source-relative pts of the arriving
+        // frame - with M4b in-point offsets the two differ, and the
+        // timeline position is what the user scrubbed.
+        timeline_->setPlayhead(playhead_);
+        transport_->setPosition(playhead_);
         if (captureThumbnail_) {
             sourceCanvas_->setFrame(frame, pts);
             projectPanel_->setThumbnail(loadedPath_, frame);
@@ -290,11 +300,44 @@ void MainWindow::buildProWorkspace() {
     connect(timeline_, &TimelinePanel::clipSelected, this,
             [this](int64_t id) { selectedClipId_ = id; });
     connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
+        if (const fc::Track *track = model_.trackAt(trackIndex); track && track->locked) {
+            statusBar()->showMessage(tr("Track %1 is locked - unlock it (header L) to split.")
+                                         .arg(QString::fromStdString(track->name)));
+            return;
+        }
         if (model_.splitAt(frame, trackIndex)) {
-            timeline_->setSequenceDuration(model_.durationSeconds());
-            timeline_->update();
+            updateSequenceDuration();
         }
     });
+    // ---- M4b timeline editing wiring ----
+    connect(timeline_, &TimelinePanel::clipMoveRequested, this,
+            [this](int64_t clipId, int trackIndex, int64_t startFrame) {
+                moveClipTo(clipId, trackIndex, startFrame);
+            });
+    connect(timeline_, &TimelinePanel::clipTrimRequested, this,
+            [this](int64_t clipId, int edge, int64_t deltaFrames) {
+                trimClip(clipId, edge, deltaFrames);
+            });
+    connect(timeline_, &TimelinePanel::rollEditRequested, this,
+            [this](int64_t leftId, int64_t rightId, int64_t deltaFrames) {
+                const fc::Clip *left = model_.clipById(leftId);
+                if (!left) {
+                    return;
+                }
+                if (const fc::Track *track = model_.trackAt(left->trackIndex);
+                    track && track->locked) {
+                    statusBar()->showMessage(tr("Track %1 is locked - rolling edit rejected.")
+                                                 .arg(QString::fromStdString(track->name)));
+                    return;
+                }
+                if (model_.rollEdit(leftId, rightId, deltaFrames)) {
+                    updateSequenceDuration();
+                } else {
+                    statusBar()->showMessage(tr("Rolling edit rejected (boundary limit reached)."));
+                }
+            });
+    connect(timeline_, &TimelinePanel::trackStateToggleRequested, this,
+            [this](int trackIndex, int which) { toggleTrackState(trackIndex, which); });
 }
 
 void MainWindow::buildQuickWorkspace() {
@@ -428,6 +471,7 @@ void MainWindow::loadClip(const QString &sourcePath) {
     playhead_ = 0.0;
     loadedPath_ = sourcePath;
     captureThumbnail_ = true;
+    lastProgramClipId_ = -1;
 
     const int index = projectPanel_->library().indexOfPath(sourcePath);
     const QString path = (index >= 0 && projectPanel_->library().at(index)->hasProxy())
@@ -442,8 +486,7 @@ void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFram
     const int64_t out = std::max<int64_t>(1, sourceOutFrames);
     const QString label = QFileInfo(sourcePath).completeBaseName();
     model_.addClip(1, sourcePath.toStdString(), label.toStdString(), 0, out, start);
-    timeline_->setSequenceDuration(model_.durationSeconds());
-    timeline_->update();
+    updateSequenceDuration();
 }
 
 void MainWindow::splitAtPlayhead() {
@@ -455,9 +498,13 @@ void MainWindow::splitAtPlayhead() {
             trackIndex = clip->trackIndex;
         }
     }
+    if (const fc::Track *track = model_.trackAt(trackIndex); track && track->locked) {
+        statusBar()->showMessage(tr("Track %1 is locked - unlock it (header L) to split.")
+                                     .arg(QString::fromStdString(track->name)));
+        return;
+    }
     if (model_.splitAt(frame, trackIndex)) {
-        timeline_->setSequenceDuration(model_.durationSeconds());
-        timeline_->update();
+        updateSequenceDuration();
     }
 }
 
@@ -465,11 +512,118 @@ void MainWindow::deleteSelectedClip() {
     if (selectedClipId_ <= 0) {
         return;
     }
-    model_.removeClip(selectedClipId_);
+    if (const fc::Clip *clip = model_.clipById(selectedClipId_)) {
+        if (const fc::Track *track = model_.trackAt(clip->trackIndex); track && track->locked) {
+            statusBar()->showMessage(tr("Track %1 is locked - delete rejected.")
+                                         .arg(QString::fromStdString(track->name)));
+            return;
+        }
+    }
+    // M4b: with the Ripple toggle on, the gap closes; otherwise classic.
+    if (!(timeline_ && timeline_->isRippleEnabled() && model_.rippleDelete(selectedClipId_))) {
+        model_.removeClip(selectedClipId_);
+    }
     selectedClipId_ = -1;
+    lastProgramClipId_ = -1;
     timeline_->clearSelection();
-    timeline_->setSequenceDuration(model_.durationSeconds());
+    updateSequenceDuration();
+}
+
+void MainWindow::moveClipTo(int64_t clipId, int trackIndex, int64_t startFrame) {
+    const fc::Clip *clip = model_.clipById(clipId);
+    if (!clip) {
+        return;
+    }
+    if (const fc::Track *target = model_.trackAt(trackIndex); target && target->locked) {
+        statusBar()->showMessage(
+            tr("Track %1 is locked - move rejected.").arg(QString::fromStdString(target->name)));
+        return;
+    }
+    if (const fc::Track *origin = model_.trackAt(clip->trackIndex); origin && origin->locked) {
+        statusBar()->showMessage(tr("Track %1 is locked - unlock it (header L) to move clips.")
+                                     .arg(QString::fromStdString(origin->name)));
+        return;
+    }
+    if (model_.moveClipTo(clipId, trackIndex, startFrame)) {
+        updateSequenceDuration();
+    } else {
+        statusBar()->showMessage(tr("Move rejected - the drop would overlap another clip."));
+    }
+}
+
+void MainWindow::trimClip(int64_t clipId, int edge, int64_t deltaFrames) {
+    const fc::Clip *clip = model_.clipById(clipId);
+    if (!clip || deltaFrames == 0) {
+        return;
+    }
+    if (const fc::Track *track = model_.trackAt(clip->trackIndex); track && track->locked) {
+        statusBar()->showMessage(
+            tr("Track %1 is locked - trim rejected.").arg(QString::fromStdString(track->name)));
+        return;
+    }
+    bool ok = false;
+    if (edge == 1 && timeline_ && timeline_->isRippleEnabled()) {
+        ok = model_.rippleTrimClipEnd(clipId, deltaFrames);
+    } else if (edge == 0) {
+        ok = model_.trimClipStart(clipId, deltaFrames);
+    } else {
+        ok = model_.trimClipEnd(clipId, deltaFrames);
+    }
+    if (ok) {
+        updateSequenceDuration();
+    } else {
+        statusBar()->showMessage(tr("Trim rejected - the clip cannot shrink/extend further."));
+    }
+}
+
+void MainWindow::toggleTrackState(int row, int which) {
+    fc::Track *track = model_.trackAt(row);
+    if (!track) {
+        return;
+    }
+    bool locked = track->locked;
+    bool muted = track->muted;
+    bool solo = track->solo;
+    switch (which) {
+    case 0:
+        locked = !locked;
+        break;
+    case 1:
+        muted = !muted;
+        break;
+    case 2:
+        solo = !solo;
+        break;
+    default:
+        return;
+    }
+    model_.setTrackState(row, locked, muted, solo);
     timeline_->update();
+    QString state;
+    switch (which) {
+    case 0:
+        state = locked ? tr("locked (edits blocked)") : tr("unlocked");
+        break;
+    case 1:
+        state = muted ? tr("muted") : tr("unmuted");
+        break;
+    default:
+        state = solo ? tr("solo") : tr("solo off");
+        break;
+    }
+    statusBar()->showMessage(tr("Track %1: %2").arg(QString::fromStdString(track->name), state));
+}
+
+void MainWindow::updateSequenceDuration() {
+    timeline_->setFps(fps_);
+    const double seq = model_.durationSeconds();
+    const double dur = seq > 0.0 ? seq : (duration_ > 0.0 ? duration_ : 10.0);
+    timeline_->setSequenceDuration(dur);
+    // The transport drives the PROGRAM (the timeline sequence); once
+    // clips exist the sequence extent replaces the media duration.
+    if (seq > 0.0) {
+        transport_->setMedia(dur, fps_);
+    }
 }
 
 void MainWindow::generateProxy(const QString &sourcePath) {
@@ -513,7 +667,45 @@ void MainWindow::stepFrames(int frames) {
 
 void MainWindow::requestFrameAt(double seconds) {
     playhead_ = seconds;
-    QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, seconds));
+    // M4b composite program monitor: resolve the topmost video clip
+    // under the timeline playhead and map the position into that
+    // clip's source (timeline frame - clip start + source in-point).
+    // One decoder serves the whole timeline: moving the playhead into
+    // a clip from a different source lazily switches the decode source
+    // (the switch is debounced per clip, not per frame).
+    const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
+    const fc::Clip *clip = model_.activeVideoClipAt(frame);
+    const int64_t clipId = clip ? clip->id : -1;
+    const bool clipChanged = clipId != lastProgramClipId_;
+    lastProgramClipId_ = clipId;
+    if (!clip) {
+        // Empty timeline region (or empty timeline): plain source-time
+        // behavior (M3 single-media semantics).
+        QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, seconds));
+        return;
+    }
+    const double srcSeconds =
+        static_cast<double>(frame - clip->timelineStart + clip->sourceInFrames) / fps_;
+    const QString clipSource = QString::fromStdString(clip->sourcePath);
+    if (clipSource != loadedPath_) {
+        // Source switch: open the clip's media (proxy when available);
+        // the queued seek re-resolves through mediaInfo once the open
+        // completes (pendingProgramSeek_), then maps directly.
+        startPlayback(false);
+        pendingProgramSeek_ = true;
+        loadedPath_ = clipSource;
+        captureThumbnail_ = true;
+        const int index = projectPanel_->library().indexOfPath(clipSource);
+        const QString path = (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                                 ? projectPanel_->library().at(index)->proxyPath
+                                 : clipSource;
+        QMetaObject::invokeMethod(worker_, "open", Q_ARG(QString, path));
+        return;
+    }
+    if (clipChanged) {
+        statusBar()->showMessage(tr("Program: %1").arg(QString::fromStdString(clip->label)));
+    }
+    QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, srcSeconds));
 }
 
 void MainWindow::restoreLayout() {

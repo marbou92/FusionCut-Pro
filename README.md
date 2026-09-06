@@ -32,48 +32,50 @@ arrive milestone by milestone.
 | M1 - Engineering foundation | Build system, CI, portable pipeline, core primitives | Shipped (v0.1.0) |
 | M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
 | M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
-| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 1 shipped (v0.4.0) |
+| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 2 shipped (v0.4.12) |
 | M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Planned |
 | M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+, hardened v0.4.6):** a built-in
-> crash handler captures access violations, uncaught C++ exceptions, CRT
-> misuses, pure-virtual calls, and POSIX signals, then writes a
-> structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
-> next to the executable) with the exception code, address, stack
-> backtrace, and (Windows) the loaded-module snapshot - the diagnostic
-> that previously required the `run-console.bat` console launcher is
-> now automatic and reaches far more failure modes than stderr alone.
+> **Runtime crash reporting (v0.4.1+, attribution upgrade v0.4.12):** a
+> built-in crash handler captures access violations, uncaught C++
+> exceptions, CRT misuses, pure-virtual calls, and POSIX signals, then
+> writes a structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
+> next to the executable) with the exception code, the **faulting
+> module + offset** (one Toolhelp32 snapshot feeds the blame line, the
+> per-frame module+RVA-annotated stack backtrace, the module list, and
+> the crash dialog), the AV read/write/execute type + target address,
+> the crashing thread id, an x64 register dump, and the boot trace -
+> the dialog the user sees now names the culprit DLL directly.
 > As of v0.4.3 the Windows VEH is registered at static-init time
 > (before `main()`), which widens the VEH's coverage to runtime
 > crashes that occur after `.CRT$XCU` but does **not** cover
 > loader-phase failures (the Windows "0xc0000005 unable to start"
 > dialog is the loader's own failure, shown before any user code
-> runs). For that class, v0.4.4 ships `fcp-loader-check.exe` - a
-> zero-dependency PE import-tree walker that runs from outside the
-> broken process and names any DLL the loader cannot map. If
-> `FusionCutPro.exe` won't start, double-click
-> `fcp-loader-check.exe` first. As of v0.4.5 it runs two phases: an
-> import-tree probe that names any DLL the loader cannot map, then a
-> **debug-launch watch** — it starts `FusionCutPro.exe` under a
-> built-in mini-debugger (Windows debug API, kernel32 only) and
-> records every DLL load and every exception — including faults
+> runs).
+>
+> **Loader-phase diagnostic, baked in (v0.4.12):** the separate
+> `fcp-loader-check.exe` of v0.4.4-v0.4.11 is RETIRED - its
+> two-phase diagnostic now runs from the exe itself. Run
+> `FusionCutPro.exe --diag` if the app will not start: phase 1 maps
+> the exe's PE import tree from outside (no DllMain) and names any
+> DLL the loader cannot map; phase 2 launches a fresh copy of the app
+> under a built-in mini-debugger (Windows debug API, kernel32 only)
+> and records every DLL load and every exception — including faults
 > inside DllMain / static initializers that Windows Error Reporting
 > never sees (which is why the "0xc0000005 unable to start" dialog
-> produces no Event Viewer entry). The tool names the faulting module
-> + offset and writes `loader-check-<timestamp>.log` with the full
+> produces no Event Viewer entry). It names the faulting module +
+> offset and writes `FusionCutPro-diag-<timestamp>.log` with the full
 > module load trail. `FusionCutPro.exe --crash-test` writes a
 > synthetic runtime report to verify the in-process pipeline on a
-> clean machine. v0.4.10 fixes the loader-phase root causes the
-> clean machine. v0.4.11 fixes the loader-phase root causes the
+> clean machine. v0.4.11 fixed the loader-phase root causes the
 > watch exposed (see the Windows 7 / 8.x compatibility note above):
 > the bundled `api-ms-win-core-synch-l1-2-0.dll` shim (WaitOnAddress
-> api set) and the stubbed `librsvg-2-2.dll` (Windows 8+ import).
-> CONFIRMED IN THE FIELD: the v0.4.8 build showed the shim binding
-> on the user Windows 7 machine (load trail module 59) before the
-> next incompatibility surfaced.
+> api set) and the stubbed `librsvg-2-2.dll` (Windows 8+ import);
+> v0.4.11 is CONFIRMED BOOTING end-to-end on the user's Windows 7
+> machine (full seven-stage boot trace + workspace rendering), so
+> `--diag` is the safety net rather than the daily driver.
 
 ## System requirements (target)
 
@@ -161,12 +163,17 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Two suites run: **core** (88 checks: rational frame rates, timecode
-parse/format/math, LRU eviction, memory-pool ownership/alignment) and
-**media** (317 checks: synthetic media is generated at runtime - no binary
+Two suites run in the core-only configuration: **core** (88 checks:
+rational frame rates, timecode parse/format/math, LRU eviction,
+memory-pool ownership/alignment) and **timeline** (130 checks: clip
+placement/split/trim/move semantics, cross-track moves with overlap
+rejection, magnetic drop resolution, ripple delete/trim, rolling
+boundary edits, topmost-clip lookup) plus **media** (317 checks:
+synthetic media is generated at runtime - no binary
 assets in the repo - then probed, decoded frame-accurately with color-order
 assertions, seeked, and transcoded to 360p proxies with geometry, audio,
-progress, cancellation, and no-upscale verification).
+progress, cancellation, and no-upscale verification) when the media layer
+is enabled.
 
 ## Project layout
 

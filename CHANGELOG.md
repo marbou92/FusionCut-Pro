@@ -4,6 +4,145 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.12] - 2026-09-06
+
+**First release confirmed RUNNING on the Windows 7 target machine: the
+user's v0.4.11 boot trace shows all seven startup stages green (VEH
+install → main → QApplication → MainWindow → app.exec) and the full
+dual-mode workspace rendering. With the loader-phase war won, this
+release pays three debts at once: the separate `fcp-loader-check.exe`
+diagnostic tool is retired and its capability is BAKED INTO
+`FusionCutPro.exe` as `--diag` (one less file in the portable zip), the
+in-process crash system gets the module-attribution/register-dump
+upgrade (the report now names the faulting DLL + offset instead of a
+bare address), and M4b ships — the timeline editing milestone: drag-move
+with magnetic snapping, edge trims, rolling edits, ripple mode, L/M/S
+track toggles, and a program monitor that follows the timeline across
+multiple clips.**
+
+### Changed — fcp-loader-check.exe retired, diagnostic baked in (`--diag`)
+- `FusionCutPro.exe --diag` now runs the two-phase loader diagnostic
+  from inside the exe itself. Phase 1 maps the exe's PE import tree
+  with `DONT_RESOLVE_DLL_REFERENCES` and names any DLL the loader
+  cannot map (no DllMain runs — the refcount-symmetric probe/free
+  discipline of v0.4.5 is preserved). Phase 2 spawns a second copy of
+  the exe (`--diag-child`) with `DEBUG_ONLY_THIS_PROCESS` and pumps
+  debug events — module load trail, every exception (first and second
+  chance, AV read/write/execute + target), fault→module+RVA blame —
+  then writes `FusionCutPro-diag-<timestamp>.log` (next to the exe,
+  `%TEMP%` fallback) and a MessageBox verdict. A process debugging
+  another instance of its own image is legal and standard; the
+  `--diag-child` marker is a no-op in main() so the mode cannot
+  recurse.
+- The tool's old design constraint — a `-static` binary that runs when
+  the app's own DLLs are missing — is consciously traded away: v0.4.11
+  boots on the user's machine, so the "install so broken nothing runs"
+  scenario now has the boot trace + CI tripwire as its net, and
+  shipping the diagnostic inside the app means it can never be
+  forgotten in a build or left behind in an old zip.
+- Deleted: `src/app/loader_check.cpp` (785 lines) and the CMake
+  `fcp-loader-check` target + install rule. The portable zip loses a
+  file; the Win7 import tripwire scans one binary less; the ldd sweep
+  loses its `-static` tool carve-out comment.
+
+### Changed — crash reports that name the culprit (crash_handler v2)
+- One Toolhelp32 module snapshot per crash now feeds four consumers:
+  a `FaultModule: <dll>+0xRVA` blame line for the exception address
+  (the in-process twin of the old loader-check blame), a
+  `FaultTargetModule` line for AV/IN_PAGE target addresses (for
+  loader/heap faults the instruction lands in a runtime DLL while the
+  data belongs to the real culprit — the target line names it), a
+  module+RVA annotation on EVERY `CaptureStackBackTrace` frame (raw
+  addresses stay in the log for offline addr2line/cv2pdb), and the
+  crash dialog itself — the user now sees "Fault module:
+  avcodec-62.dll+0x1234" without opening the log.
+- New in the report: `ThreadId` of the crashing thread, and a full x64
+  register dump (RIP/RSP/RBP/RAX–R15) from the VEH `CONTEXT` record
+  (guarded to `_M_X64 || __x86_64__`; 32-bit builds print a note).
+- The terminate-path and `--crash-test` reports share the same
+  attribution machinery (snapshot once, annotate everywhere).
+
+### Added — M4b: the timeline editing milestone (fc::TimelineModel + UI)
+- Model (`src/core/timeline_model.{h,cpp}`, pure C++, unit-tested —
+  64 → 130 checks): `moveClipTo` (cross-track move with overlap
+  rejection and video/audio kind enforcement), `findDropPosition`
+  (magnetic snap: nearest gap-legal start for a clip of a given
+  duration, the moving clip excluded, wrong-kind track refused),
+  `rippleDelete` (remove + shift later clips left by the duration),
+  `rippleTrimClipEnd` (tail trim + equal shift of the following
+  clips), `rollEdit` (boundary shift between two adjacent clips,
+  total length invariant, guarded against collapse/negative
+  in-points), `activeVideoClipAt` (topmost video clip at a frame —
+  the program monitor lookup), and a const `clipById` overload.
+- Timeline panel: a tool row ([Select (V)] [Razor (C)] | [Ripple]
+  toggle); drag-move with a translucent snap ghost (blue when legal,
+  red when the lane/spot cannot host the clip — resolution via
+  `findDropPosition`); edge-drag trims (head/tail, 8px grab zones,
+  preview rectangle); Alt+edge-drag rolling boundary edits (amber
+  boundary marker, clamped inside both clips); razor hover line; L/M/S
+  header boxes are now CLICKABLE and wired; locked tracks render
+  dimmed with a forbidden cursor and reject edits (split/move/trim/
+  roll/delete all guarded with a status-bar explanation); muted and
+  non-solo-when-any-solo tracks render dimmed.
+- MainWindow: sequence duration = timeline extent (transport follows
+  the program, not the source file); the program monitor now follows
+  the TIMELINE — the topmost clip under the playhead is decoded at
+  its source-relative position (timeline frame − clip start + source
+  in-point); moving the playhead into a clip from a different source
+  lazily switches the single decode worker to that source (proxy used
+  when available; the switch is debounced per clip, and the queued
+  seek re-resolves through mediaInfo once the open completes). Known
+  limitation, documented: one decoder serves the timeline — true
+  multi-source compositing (V2 over V1 pixel blending) arrives with
+  the M5 renderer; today the monitor shows the topmost clip.
+
+### Fixed — battery + workflow consistency for the new file set
+- PORTABLE.txt rewritten for `--diag` (73 lines, 0 apostrophes,
+  v0.4.12 x3): the loader-check instructions now describe the flag,
+  and the runtime-crash section advertises the new fault-module
+  content of the reports. The smoke-test list swaps
+  `fcp-loader-check.exe` for `FusionCutPro.exe --diag`.
+- wfmock battery: the PORTABLE gate now asserts 73 lines /
+  v0.4.12 x3 / `--diag` present / zero `fcp-loader-check` strings;
+  38/38 assertions green.
+
+### Verified
+- fc_core + timeline suites via real CMake (cmake 4.4.3, sandbox):
+  core 88 checks + timeline 130 checks = 218 green
+  (`FC_BUILD_APP=OFF`, `FC_BUILD_MEDIA=OFF`).
+- crash_handler.cpp: Linux branch compiles clean
+  (`-std=c++17 -Wall -Wextra -Werror`); Windows branch
+  mock-cross-compiled clean at `-O0` and `-O2`
+  (`-D_WIN32 -D_WIN32_WINNT=0x0601 -I winmock -Wall -Wextra -Werror
+  -Wpedantic`), which is what caught the diag buffer truncations
+  below.
+- diag_supervisor.cpp: POSIX stub compiles clean; Windows branch
+  mock-cross-compiled clean at `-O0`/`-O2` under the same flags —
+  the persistent winmock surface was extended for the audit (real
+  mingw-w64 names only: EXCEPTION_*/STATUS_* codes,
+  EXCEPTION_RECORD/EXCEPTION_POINTERS, x64 CONTEXT members
+  Rip/Rsp/Rbp/Rax–R15, DEBUG_EVENT + the 9 event codes + union
+  members, PE image structs, debug/process/file API, VEH,
+  CaptureStackBackTrace, MODULEENTRY32 via a new winmock/tlhelp32.h,
+  and the CRT sec_api hooks `_set_invalid_parameter_handler` /
+  `_set_purecall_handler` / `localtime_s`).
+- `-Wformat-truncation` findings from the mock audit fixed in source:
+  diag log path buffers 1024→2048 (`selfDir` up to 1023 + 38-char
+  suffix), summary header buffer 1200→2112, and the module-trail
+  lines now print the name with an explicit `.%s` precision (gcc
+  models `g_mods[i].name` worst-case across the whole array).
+- The Qt layer (timeline_panel / mainwindow / main) is
+  compile-verified only by CI (no Qt in the sandbox) — the delivery #8
+  lesson was applied proactively: `QHBoxLayout`, `QKeySequence`,
+  `QGuiApplication`, and `QEvent` are included explicitly in
+  timeline_panel.cpp. CI's `qt-app-ubuntu` leg is the Qt oracle.
+- wfmock battery 38/38 under `bash -eo pipefail`; workflow YAML
+  parses; `bash -n` passes on every bash step; the
+  step-librsvg-stub.sh embed is byte-identical to the YAML block.
+- Remaining oracles: the CI MinGW portable leg (first build of the
+  app WITH diag_supervisor.cpp compiled in, no loader_check.cpp), then
+  the user's Windows 7 machine.
+
 ## [0.4.11] - 2026-09-03
 
 **v0.4.10 never shipped — the portable workflow died in CI inside

@@ -34,8 +34,11 @@ struct Track {
 
 // Frame-accurate timeline model (Module 6.2 / Module 4 editing core).
 // Pure data + operations, no Qt, no FFmpeg - unit tested in fc_timeline_tests.
-// Multi-track compositing, ripple/rolling, and audio mixing arrive in later
-// M4 phases; this layer owns placement, split, trim, and move semantics.
+// M4a owned placement, split, trim, and move; M4b adds cross-track moves
+// with overlap rejection, magnetic drop resolution, ripple delete/trim,
+// rolling boundary edits, and topmost-clip lookup for the program monitor.
+// Multi-source compositing beyond topmost-wins and audio mixing arrive in
+// later M4/M5 phases.
 class TimelineModel {
 public:
     TimelineModel() = default;
@@ -69,6 +72,23 @@ public:
 
     bool moveClip(int64_t id, int64_t newTimelineStart);
 
+    // M4b: move a clip to another track and/or position. Rejects invalid
+    // track, negative start, kind mismatch (a clip on a video track cannot
+    // move to an audio track and vice versa - clip kind is the kind of its
+    // current track), and any overlap with another clip on the target
+    // track. Use findDropPosition() first to get a guaranteed-valid start.
+    bool moveClipTo(int64_t id, int newTrackIndex, int64_t newTimelineStart);
+
+    // M4b: resolve the nearest valid drop start for a clip of the given
+    // duration on the given track (the moving clip itself is excluded by
+    // id so an in-place drop is always legal). Returns the start closest
+    // to desiredStart that fits without overlapping anything; -1 when no
+    // gap on the track can hold the clip or the target track is of the
+    // wrong kind for the clip. "Magnetic": the desired position wins if
+    // it is free, otherwise the result snaps to the nearest gap edge.
+    int64_t findDropPosition(int trackIndex, int64_t clipId, int64_t desiredStart,
+                             int64_t durationFrames) const;
+
     // Trim the start by `delta` timeline frames (positive = lose content
     // from the head, negative = extend). Source in-point and timeline start
     // move together. Honors sourceIn >= 0 and timelineStart >= 0.
@@ -78,8 +98,35 @@ public:
     // shrink). Honors sourceOut > sourceIn.
     bool trimClipEnd(int64_t id, int64_t deltaFrames);
 
+    // M4b ripple delete: remove the clip and shift every later clip on the
+    // same track left by exactly its duration, closing the gap it leaves.
+    bool rippleDelete(int64_t id);
+
+    // M4b ripple trim end: trimClipEnd + shift every clip that started at
+    // or after the trimmed clip's ORIGINAL end by the same delta (positive
+    // delta pushes the following clips right, negative pulls them left).
+    // The gap after the trimmed edge closes/opens; later gaps are kept.
+    bool rippleTrimClipEnd(int64_t id, int64_t deltaFrames);
+
+    // M4b rolling edit: move the shared boundary of two adjacent clips on
+    // one track by `delta` timeline frames. The left clip's out-point and
+    // the right clip's in-point + timeline start all shift by delta; the
+    // total sequence length is unchanged. Rejects non-adjacent clips and
+    // any delta that would collapse either clip to zero length or push the
+    // right clip's source in-point negative.
+    bool rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrames);
+
     const Clip *clipAt(int64_t frame, int trackIndex) const;
     Clip *clipById(int64_t id);
+    // Const lookup for const views (findDropPosition resolves the moving
+    // clip's kind from a const model).
+    const Clip *clipById(int64_t id) const;
+
+    // M4b: the clip the program monitor should show at a timeline frame -
+    // the clip on the visually TOPMOST video lane that covers the frame
+    // (video tracks are drawn bottom-up; track 0 is the topmost lane, so
+    // the scan runs from index 0 downward). Returns nullptr in gaps.
+    const Clip *activeVideoClipAt(int64_t frame) const;
 
     int64_t durationFrames() const;
     double durationSeconds() const;

@@ -57,6 +57,14 @@ private:
     void stepFrames(int frames);
     void requestFrameAt(double seconds);
 
+    // M4b: timeline editing actions (drag-move / trim / roll / L-M-S).
+    void moveClipTo(int64_t clipId, int trackIndex, int64_t startFrame);
+    void trimClip(int64_t clipId, int edge, int64_t deltaFrames);
+    void toggleTrackState(int row, int which);
+    // M4b: sequence duration = timeline extent (falls back to the loaded
+    // media duration for an empty timeline); refreshes panel + transport.
+    void updateSequenceDuration();
+
     // Restore/save panel layout.
     void restoreLayout();
     void saveLayout() const;
@@ -87,11 +95,13 @@ private:
     QString proxySourcePath_;
     QString pendingAddClipPath_;
     int64_t selectedClipId_ = -1;
+    int64_t lastProgramClipId_ = -1; // M4b: debounce for program source switches
     double playhead_ = 0.0;
     double duration_ = 0.0;
     double fps_ = 24.0;
     bool playing_ = false;
     bool captureThumbnail_ = false;
+    bool pendingProgramSeek_ = false; // M4b: apply seek after a program source switch
 };
 
 } // namespace fc

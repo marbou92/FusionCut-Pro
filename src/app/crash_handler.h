@@ -39,13 +39,16 @@ namespace fc {
 //
 // On crash, the handler:
 //   1. Writes FusionCutPro-crash-<YYYYMMDD-HHMMSS.mmm>.log into reportDir
-//      with version, timestamp, exception kind/code/address, a best-effort
-//      stack backtrace, and (Windows) the loaded-module list.
+//      with version, timestamp, crashing thread id, exception kind/code/
+//      address, the FAULTING MODULE + RVA blame (Toolhelp32 snapshot),
+//      AV read/write/execute type + target (when applicable), an x64
+//      register dump, a module-attributed stack backtrace, the loaded-
+//      module list, and the embedded boot trace.
 //   2. Mirrors a one-line summary to stderr so a console launch still
 //      shows the failure.
-//   3. On Windows, opens a modal MessageBox naming the log file path so
-//      a double-click launch (no console) sees something actionable
-//      instead of the bare "0xc0000005" dialog.
+//   3. On Windows, opens a modal MessageBox naming the faulting module
+//      and the log file path so a double-click launch (no console) sees
+//      something actionable instead of the bare "0xc0000005" dialog.
 //   4. Re-raises the original exception / terminates the process.
 //
 // The handler is reentrancy-guarded; a crash inside the handler itself
