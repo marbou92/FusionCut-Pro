@@ -1,0 +1,1210 @@
+<UserControl x:Class="FfxTool.Gui.ListerPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:FfxTool.Gui"
+             AllowDrop="True" DragEnter="Page_DragEnter" DragLeave="Page_DragLeave" Drop="Page_Drop">
+    <UserControl.Resources>
+        <!-- inspector sub-tabs: M3 segmented control (pill container below) -->
+        <Style x:Key="InspTab" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="14,7"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource M3FocusVisual}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}" CornerRadius="9"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Opacity" Value="0.85"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource B.PrimaryContainer}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource B.OnPrimaryContainer}"/>
+                                <Setter TargetName="Bg" Property="Opacity" Value="1"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- graph mode toggle: same segmented language, one size smaller -->
+        <Style x:Key="GraphModeTab" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource M3FocusVisual}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}" CornerRadius="7"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Opacity" Value="0.85"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource B.PrimaryContainer}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource B.OnPrimaryContainer}"/>
+                                <Setter TargetName="Bg" Property="Opacity" Value="1"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- AE property-triangle: points right when the inline keyframe
+             lane is closed, down when it is open — AE disclosure feel -->
+        <Style x:Key="AEDisclosure" TargetType="ToggleButton">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+            <Setter Property="Width" Value="16"/>
+            <Setter Property="Height" Value="16"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource M3FocusVisual}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}" CornerRadius="5">
+                            <ContentPresenter x:Name="Cp" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <ContentPresenter.LayoutTransform>
+                                    <RotateTransform Angle="-90"/>
+                                </ContentPresenter.LayoutTransform>
+                            </ContentPresenter>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource B.SCHigh}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource B.Primary}"/>
+                                <Setter TargetName="Cp" Property="LayoutTransform">
+                                    <Setter.Value>
+                                        <RotateTransform Angle="0"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- AE keyframe-navigator button: 19px ghost square behind a glyph
+             (three of them must fit the reserved left gutter of a row) -->
+        <Style x:Key="KfNavBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+            <Setter Property="Width" Value="19"/>
+            <Setter Property="Height" Value="19"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource M3FocusVisual}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" Background="{TemplateBinding Background}" CornerRadius="7">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource B.SCHigh}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource B.OnSurface}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource B.SCLow}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- INSPECTOR parameter row (Parameters tab): the simple read —
+             one calm 24px line, AE's Effect Controls weight. A small
+             stopwatch mark (lit accent = animated), the name, the value.
+             No triangle, no eye, no chips: grouped parameters sit under
+             quiet caption rows, and a click on an animated row drives the
+             Keyframes/Graph tabs, which is the simpler path to the same
+             data. -->
+        <DataTemplate x:Key="InspRow">
+            <Border Padding="10,0,12,0" ToolTip="{Binding MatchName}"
+                    Cursor="{Binding RowCursor}" MouseLeftButtonUp="ParamRow_Click">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource B.SCLowest}"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid Height="24">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="20"/>   <!-- stopwatch mark -->
+                        <ColumnDefinition Width="*"/>    <!-- name -->
+                        <ColumnDefinition Width="Auto"/> <!-- value -->
+                    </Grid.ColumnDefinitions>
+                    <!-- stopwatch: the row's only state mark — lit accent
+                         for animated, faint for static. Foreground keyed
+                         through a trigger so theme swaps keep working. -->
+                    <controls:IconGlyph IconName="Stopwatch" Width="13" Height="13"
+                                        VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        IsHitTestVisible="False"
+                                        Opacity="{Binding StopwatchOpacity}" ToolTip="{Binding StopwatchTip}">
+                        <controls:IconGlyph.Style>
+                            <Style TargetType="controls:IconGlyph">
+                                <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsAnimated}" Value="True">
+                                        <Setter Property="Foreground" Value="{DynamicResource B.Primary}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </controls:IconGlyph.Style>
+                    </controls:IconGlyph>
+                    <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12"
+                               Foreground="{DynamicResource B.OnSurface}" VerticalAlignment="Center"
+                               Margin="6,0,12,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}"/>
+                    <!-- value: plain grey-black like AE's rest state; the
+                         stream summary (animated · travel · span) and the
+                         exact range live in the tooltip -->
+                    <TextBlock Grid.Column="2" Text="{Binding ValueText}" FontSize="12"
+                               Foreground="{DynamicResource B.OnSurface}" VerticalAlignment="Center"
+                               Visibility="{Binding ValueVisible}"
+                               TextTrimming="CharacterEllipsis" ToolTip="{Binding ValueTip}"/>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- INSPECTOR group caption: a quiet, now COLLAPSIBLE label above
+             its children — the caption row twirls like AE's group headers
+             (state persisted per effect+path, default open, folding in
+             place without a rebuild). Reuses EcSubGroupVm, so the body
+             binds through the same BodyVisible property. The nested body
+             asks for this template by KEY, not by {StaticResource}: a
+             template cannot resolve a StaticResource to itself — WPF
+             expands template content off-tree, where the template's own
+             key is unreachable ("Cannot find resource named
+             'InspGroupTpl'"). -->
+        <DataTemplate x:Key="InspGroupTpl">
+            <StackPanel>
+                <Grid Background="Transparent" MouseLeftButtonUp="InspSub_Click" Cursor="Hand"
+                      Height="21" Margin="10,6,0,2" ToolTip="Show / hide this parameter group">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ToggleButton Style="{StaticResource AEDisclosure}" IsChecked="{Binding Open}"
+                                  Click="InspSubToggle_Click" VerticalAlignment="Center"
+                                  ToolTip="Show / hide this parameter group">
+                        <controls:IconGlyph IconName="ArrowDrop" Width="12" Height="12"/>
+                    </ToggleButton>
+                    <TextBlock Grid.Column="1" Text="{Binding Title}" FontSize="11" FontWeight="SemiBold"
+                               Foreground="{DynamicResource B.OnSurfaceVariant}" VerticalAlignment="Center"
+                               Margin="4,0,0,0" TextTrimming="CharacterEllipsis"/>
+                </Grid>
+                <ItemsControl ItemsSource="{Binding Items}" Margin="16,0,0,0"
+                              Visibility="{Binding BodyVisible}">
+                    <ItemsControl.ItemTemplateSelector>
+                        <controls:EcBodySelector GroupTemplateKey="InspGroupTpl"
+                                                 RowTemplate="{StaticResource InspRow}"/>
+                    </ItemsControl.ItemTemplateSelector>
+                </ItemsControl>
+            </StackPanel>
+        </DataTemplate>
+
+        <!-- EFFECT CONTROLS property row: AE's Effect Controls line at
+             AE's weight — a flat 19px property line, the reserved
+             keyframe-navigator gutter (‹ ◆ › on animated rows, empty on
+             static ones so every NAME column aligns, exactly like AE),
+             the stopwatch slot (lit = time-varying), the fixed-width
+             name column, and the value slot rendered per the decoded
+             control kind: right-aligned number, checkbox, popup box or
+             color swatch, grey-black at rest, picking up AE's
+             editable-value underline + accent only on hover. No eye and
+             no keyframe lane here — AE keeps those in the timeline. -->
+        <DataTemplate x:Key="EcRow">
+            <Border Padding="2,0,6,0" ToolTip="{Binding MatchName}"
+                    Cursor="{Binding RowCursor}" MouseLeftButtonUp="ParamRow_Click">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Style.Triggers>
+                            <!-- hover tint on the whole line: the rows are
+                                 clickable (animated ones drive the tabs),
+                                 and the affordance was invisible before -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource B.SCLowest}"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid Height="19">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="56"/>   <!-- keyframe navigator gutter -->
+                        <ColumnDefinition Width="19"/>   <!-- stopwatch slot -->
+                        <ColumnDefinition Width="150"/>  <!-- property name (fixed: AE column alignment) -->
+                        <ColumnDefinition Width="*"/>    <!-- value slot -->
+                    </Grid.ColumnDefinitions>
+                    <!-- keyframe navigator: AE parks ‹ ◆ › in the
+                         leftmost gutter of animated rows -->
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                                Visibility="{Binding NavVisible}">
+                        <Button Style="{StaticResource KfNavBtn}" Click="KfPrev_Click"
+                                ToolTip="Go to previous keyframe">
+                            <controls:IconGlyph IconName="ChevLeft" Width="11" Height="11"/>
+                        </Button>
+                        <Button Style="{StaticResource KfNavBtn}" Click="KfShow_Click" Margin="1,0"
+                                ToolTip="{Binding KeyCountTip}">
+                            <controls:IconGlyph IconName="Diamond" Width="10" Height="10"/>
+                        </Button>
+                        <Button Style="{StaticResource KfNavBtn}" Click="KfNext_Click"
+                                ToolTip="Go to next keyframe">
+                            <controls:IconGlyph IconName="ChevRight" Width="11" Height="11"/>
+                        </Button>
+                    </StackPanel>
+                    <!-- stopwatch: lit accent for animated, dim for static
+                         (state mark, not a button — this panel is
+                         read-only and never removes keyframe data) -->
+                    <controls:IconGlyph Grid.Column="1" IconName="Stopwatch" Width="12" Height="12"
+                                        VerticalAlignment="Center" IsHitTestVisible="False"
+                                        HorizontalAlignment="Center"
+                                        Opacity="{Binding StopwatchOpacity}" ToolTip="{Binding StopwatchTip}">
+                        <controls:IconGlyph.Style>
+                            <Style TargetType="controls:IconGlyph">
+                                <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsAnimated}" Value="True">
+                                        <Setter Property="Foreground" Value="{DynamicResource B.Primary}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </controls:IconGlyph.Style>
+                    </controls:IconGlyph>
+                    <!-- property name at AE's fixed column; the stream
+                         summary (animated · travel · span) lives in the
+                         tooltip, keeping the row one line tall -->
+                    <TextBlock Grid.Column="2" Text="{Binding Name}" FontSize="12"
+                               Foreground="{DynamicResource B.OnSurface}" VerticalAlignment="Center"
+                               Margin="2,0,10,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}"/>
+                    <!-- value slot: the control AE draws for this kind —
+                         the reverse-engineered parT type picks between a
+                         right-aligned number (hover: accent + underline),
+                         a real checkbox, a popup box, a color swatch, and
+                         a slider track + number for ranged sliders. All
+                         read-only; AE's Effect Controls is the reference. -->
+                    <Grid Grid.Column="3">
+                        <!-- slider: AE draws ranged sliders as a thin track
+                             with the filled proportion plus the number at
+                             the right — the parT min/max decoded from the
+                             preset drives the fill; read-only -->
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                                    HorizontalAlignment="Right"
+                                    Visibility="{Binding SliderVisible}"
+                                    ToolTip="{Binding ValueTip}">
+                            <Grid Width="92" Height="14" VerticalAlignment="Center">
+                                <Border Height="4" CornerRadius="2"
+                                        Background="{DynamicResource B.SCHighest}"
+                                        VerticalAlignment="Center"/>
+                                <Border Height="4" CornerRadius="2"
+                                        Background="{DynamicResource B.Primary}"
+                                        VerticalAlignment="Center" HorizontalAlignment="Left"
+                                        Width="{Binding SliderFillW}"/>
+                            </Grid>
+                            <TextBlock Text="{Binding ValueText}" FontSize="12"
+                                       Foreground="{DynamicResource B.OnSurface}"
+                                       VerticalAlignment="Center" Margin="8,0,0,0"
+                                       MinWidth="34" TextAlignment="Right"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                        <TextBlock Text="{Binding ValueText}" FontSize="12"
+                                   VerticalAlignment="Center" HorizontalAlignment="Right"
+                                   Visibility="{Binding TextVisible}"
+                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding ValueTip}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="{DynamicResource B.OnSurface}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Border, AncestorLevel=1}}" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource B.Primary}"/>
+                                            <Setter Property="TextDecorations" Value="Underline"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <!-- checkbox: AE's value-column on/off box -->
+                        <Border Width="14" Height="14" CornerRadius="3" BorderThickness="1"
+                                VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,2,0"
+                                Visibility="{Binding CheckboxVisible}" ToolTip="{Binding ValueTip}">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background" Value="{DynamicResource B.SCLowest}"/>
+                                    <Setter Property="BorderBrush" Value="{DynamicResource B.Outline}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Checked}" Value="True">
+                                            <Setter Property="Background" Value="{DynamicResource B.Primary}"/>
+                                            <Setter Property="BorderBrush" Value="{DynamicResource B.Primary}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <controls:IconGlyph IconName="Check" Width="11" Height="11">
+                                <controls:IconGlyph.Style>
+                                    <Style TargetType="controls:IconGlyph">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource B.OnPrimary}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Checked}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </controls:IconGlyph.Style>
+                            </controls:IconGlyph>
+                        </Border>
+                        <!-- popup: AE's flat menu box, selected entry + chevron -->
+                        <Border Height="17" MinWidth="70" CornerRadius="4" Padding="7,0,4,0"
+                                VerticalAlignment="Center" HorizontalAlignment="Right"
+                                Background="{DynamicResource B.SCLowest}"
+                                BorderBrush="{DynamicResource B.OutlineVariant}" BorderThickness="1"
+                                Visibility="{Binding PopupVisible}" ToolTip="{Binding ValueTip}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding PopupText}" FontSize="11.5"
+                                           Foreground="{DynamicResource B.OnSurface}"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <controls:IconGlyph Grid.Column="1" IconName="ArrowDrop" Width="13" Height="13"
+                                                    Foreground="{DynamicResource B.OnSurfaceVariant}"
+                                                    VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <!-- color: AE's swatch -->
+                        <Border Width="20" Height="13" CornerRadius="3" BorderThickness="1"
+                                VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,2,0"
+                                Background="{Binding ColorBrush}"
+                                BorderBrush="{DynamicResource B.Outline}"
+                                Visibility="{Binding SwatchVisible}" ToolTip="{Binding ValueTip}"/>
+                    </Grid>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- keyframe row: # · AE timecode (frame + Δframes sub-line) ·
+             value · easing chip; the row is clickable and highlights while
+             selected, staying in sync with the graph's selection ring -->
+        <DataTemplate x:Key="KfRow">
+            <!-- same rule as ParamRow: no local Background, or the
+                 selection highlight would never paint -->
+            <Border Padding="12,7" CornerRadius="10" Margin="0,1" Cursor="Hand"
+                    MouseLeftButtonUp="KfRow_Click" ToolTip="{Binding Tip}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Selected}" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource B.SCLow}"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding Index}" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding TimeSec}" Style="{StaticResource Body}" FontWeight="Medium"
+                                   Foreground="{DynamicResource B.Primary}"/>
+                        <TextBlock Text="{Binding Sub}" Style="{StaticResource Caption}" Margin="0,1,0,0"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding Value}" Style="{StaticResource Body}" FontWeight="Medium"
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                    <Border Grid.Column="3" Style="{StaticResource Chip}" VerticalAlignment="Center" Margin="8,0,0,0">
+                        <TextBlock Text="{Binding Interp}" Style="{StaticResource Caption}"/>
+                    </Border>
+                </Grid>
+            </Border>
+        </DataTemplate>
+        <!-- named parameter group inside an effect block: AE's collapsible
+             sub-group row ("Compositing Options" and friends). The nested
+             body reuses the same template selector, so deeper nesting
+             keeps working; templates come from the selector because WPF
+             XAML cannot target the page's nested VM classes with x:Type,
+             and the recursion asks for this template by KEY — a template
+             cannot resolve a StaticResource to itself (off-tree expansion
+             makes its own key unreachable). -->
+        <DataTemplate x:Key="EcSubGroupTpl">
+            <StackPanel>
+                <Grid Background="Transparent" MouseLeftButtonUp="EcSub_Click" Cursor="Hand"
+                      Height="19" Margin="0,1,0,1" ToolTip="Show / hide this parameter group">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ToggleButton Style="{StaticResource AEDisclosure}" IsChecked="{Binding Open}"
+                                  Click="EcSubToggle_Click" VerticalAlignment="Center"
+                                  ToolTip="Show / hide this parameter group">
+                        <controls:IconGlyph IconName="ArrowDrop" Width="13" Height="13"/>
+                    </ToggleButton>
+                    <TextBlock Grid.Column="1" Text="{Binding Title}" FontSize="12" FontWeight="SemiBold"
+                               Foreground="{DynamicResource B.OnSurface}"
+                               VerticalAlignment="Center" Margin="2,0,0,0"
+                               TextTrimming="CharacterEllipsis"/>
+                </Grid>
+                <ItemsControl ItemsSource="{Binding Items}" Margin="14,0,0,0"
+                              Visibility="{Binding BodyVisible}">
+                    <ItemsControl.ItemTemplateSelector>
+                        <controls:EcBodySelector GroupTemplateKey="EcSubGroupTpl"
+                                                 RowTemplate="{StaticResource EcRow}"/>
+                    </ItemsControl.ItemTemplateSelector>
+                </ItemsControl>
+            </StackPanel>
+        </DataTemplate>
+
+        <!-- one Effect Controls group: AE's block anatomy, and NOTHING
+             on top of it — the header carries the twirl, AE's italic fx
+             badge, the effect name, and the Reset/About links at the
+             right; then the property tree; then a quiet hairline so
+             blocks read apart without becoming cards. (The vendor /
+             parameters / animated / status line under the title was
+             removed — AE's panel doesn't clutter its blocks with a
+             caption strip, and the user asked for exactly that calm;
+             the facts still live in the header tooltip and the About
+             popover.) -->
+        <DataTemplate x:Key="EcEffectGroup">
+            <StackPanel>
+                <Grid Background="Transparent" MouseLeftButtonUp="EcHeader_Click" Cursor="Hand"
+                      Height="24" ToolTip="{Binding Sub}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <ToggleButton Style="{StaticResource AEDisclosure}" IsChecked="{Binding Open}"
+                                  Click="EcToggle_Click" VerticalAlignment="Center"
+                                  ToolTip="Show / hide this effect's parameters">
+                        <controls:IconGlyph IconName="ArrowDrop" Width="14" Height="14"/>
+                    </ToggleButton>
+                    <!-- AE's fx badge: the italic fx chip every Effect
+                         Controls block opens with -->
+                    <Border Grid.Column="1" Width="19" Height="19" CornerRadius="5.5" Margin="4,0,0,0"
+                            Background="{DynamicResource B.PrimaryContainer}" IsHitTestVisible="False"
+                            VerticalAlignment="Center">
+                        <TextBlock Text="fx" FontSize="10" FontWeight="SemiBold" FontStyle="Italic"
+                                   Foreground="{DynamicResource B.OnPrimaryContainer}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock Grid.Column="2" Text="{Binding Title}" FontSize="13" FontWeight="SemiBold"
+                               Foreground="{DynamicResource B.OnSurface}" VerticalAlignment="Center"
+                               Margin="4,0,8,0" TextTrimming="CharacterEllipsis"/>
+                    <!-- AE's per-effect header links: Reset (display-only —
+                         this panel never rewrites preset data) and About -->
+                    <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="Reset" FontSize="11.5" FontWeight="Medium"
+                                   VerticalAlignment="Center" Margin="0,0,10,0" Opacity="0.45"
+                                   ToolTip="AE shows a per-effect Reset here; this panel is read-only and never rewrites preset data"
+                                   Cursor="Hand">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Opacity" Value="0.8"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="About" FontSize="11.5" FontWeight="Medium"
+                                   VerticalAlignment="Center" ToolTip="What this effect is, its AE menu group and compatibility"
+                                   Cursor="Hand" MouseLeftButtonUp="EcAbout_Click">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource B.OnSurface}"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </StackPanel>
+                </Grid>
+                <!-- body: property lines + nested parameter groups in
+                     document order — the selector picks the group
+                     disclosure template or the AE property row -->
+                <ItemsControl ItemsSource="{Binding Items}" Margin="12,2,0,4"
+                              Visibility="{Binding BodyVisible}">
+                    <ItemsControl.ItemTemplateSelector>
+                        <controls:EcBodySelector GroupTemplate="{StaticResource EcSubGroupTpl}"
+                                                 RowTemplate="{StaticResource EcRow}"/>
+                    </ItemsControl.ItemTemplateSelector>
+                </ItemsControl>
+                <!-- quiet AE-style block separator -->
+                <Border Height="1" Background="{DynamicResource B.OutlineVariant}" Opacity="0.55"
+                        Margin="0,2,0,7" IsHitTestVisible="False"/>
+            </StackPanel>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="32,24,32,24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Margin="0,0,0,20">
+            <TextBlock Text="Effect Lister" Style="{StaticResource TitlePage}"/>
+            <!-- view switcher: the split workspace (compatibility list +
+                 tabbed inspector, the default — a fresh preset opens it)
+                 vs. AE's Effect Controls panel -->
+            <StackPanel x:Name="ViewSwitcher" Orientation="Horizontal" HorizontalAlignment="Right"
+                        VerticalAlignment="Center">
+                <Border Background="{DynamicResource B.SCLowest}" CornerRadius="12" Padding="3">
+                    <StackPanel Orientation="Horizontal">
+                        <ToggleButton x:Name="ViewEcBtn" Content="Effect Controls" Style="{StaticResource InspTab}"
+                                      Click="ViewBtn_Click"/>
+                        <ToggleButton x:Name="ViewInspectorBtn" Content="Inspector" Style="{StaticResource InspTab}"
+                                      IsChecked="True" Click="ViewBtn_Click"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Grid>
+
+        <!-- ============ workspace ============ -->
+        <Grid Grid.Row="1">
+            <!-- empty state -->
+            <Border x:Name="EmptyState" CornerRadius="28" Background="Transparent" Margin="8">
+                <Grid>
+                    <Rectangle x:Name="EmptyDash" RadiusX="28" RadiusY="28" Fill="{DynamicResource B.SCLow}"
+                               Stroke="{DynamicResource B.OutlineVariant}" StrokeThickness="1.6"
+                               StrokeDashArray="4 3" IsHitTestVisible="False"/>
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Border Width="84" Height="84" CornerRadius="42" Background="{DynamicResource B.SCHigh}"
+                                HorizontalAlignment="Center" Margin="0,0,0,16">
+                            <controls:IconGlyph IconName="FolderOpen" Width="42" Height="42"
+                                                Foreground="{DynamicResource B.Primary}"/>
+                        </Border>
+                        <TextBlock Text="No preset loaded" FontSize="20" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource B.OnSurface}" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                        <TextBlock Text="Open an .ffx file — or a whole folder of them — to see effects and check them against your plugin profile. You can also drag and drop files or folders directly into this workspace."
+                                   Style="{StaticResource BodySecondary}" TextAlignment="Center" MaxWidth="460"
+                                   TextWrapping="Wrap" HorizontalAlignment="Center" Margin="0,0,0,18"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,22">
+                            <Button Content="Open .ffx file" Width="170" Click="Open_Click"/>
+                            <Button Content="Open folder…" Width="170" Margin="10,0,0,0" Click="FolderBtn_Click"
+                                    Style="{StaticResource OutlinedButton}"
+                                    ToolTip="Load every .ffx in a folder — flip through them here, or scan the whole folder into one report"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <Border x:Name="RecentCard" Style="{StaticResource Card}" Width="220" Padding="16"
+                                    MouseLeftButtonUp="Recent_Click" Cursor="Hand">
+                                <StackPanel Orientation="Horizontal">
+                                    <controls:IconGlyph IconName="History" Width="22" Height="22"
+                                                        Foreground="{DynamicResource B.Primary}" VerticalAlignment="Center"/>
+                                    <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+                                        <TextBlock Text="Recent Files" Style="{StaticResource Body}" FontWeight="Medium" FontSize="12.5"/>
+                                        <TextBlock x:Name="RecentText" Text="View last 5 analyzed presets"
+                                                   Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" MaxWidth="160"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- loaded state: effect list + inspector side by side -->
+            <Grid x:Name="SplitHost" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="340"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- effect list -->
+                <Border x:Name="ListHost" Grid.Column="0" Margin="8,8,4,0" CornerRadius="22"
+                        Background="{DynamicResource B.SC}">
+                    <Grid Margin="14,10,14,10">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- column header mirrors the two-line rows:
+                             identity at the left, status chip rail right -->
+                        <Grid Grid.Row="0" Margin="6,2,6,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="EFFECT" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="1" Text="STATUS" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                        </Grid>
+                        <ListBox x:Name="EffectList" Grid.Row="1" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 VirtualizingPanel.ScrollUnit="Pixel" Focusable="False"
+                                 SelectionChanged="EffectList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <!-- two-line row: identity (name over
+                                         vendor) at the left; a QUIET status
+                                         chip (dot + label, neutral surfaces)
+                                         and the animated marker at the right.
+                                         Rows stay uncolored until clicked — the
+                                         selected row tints with its own status
+                                         (or the theme's selection color when
+                                         the status is calm), the old always-on
+                                         per-status rainbow is gone -->
+                                    <Border CornerRadius="10" Padding="12,7" Margin="0,1"
+                                            ToolTip="{Binding MatchTip}">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="Transparent"/>
+                                                <Style.Triggers>
+                                                    <!-- color ONLY on click: each
+                                                         selected row shows its own
+                                                         status container; calm
+                                                         statuses leave the theme's
+                                                         own selection color visible -->
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/>
+                                                            <Condition Binding="{Binding Status}" Value="Installed"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Background" Value="{DynamicResource B.PrimaryContainer}"/>
+                                                    </MultiDataTrigger>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/>
+                                                            <Condition Binding="{Binding Status}" Value="Likely to fail"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Background" Value="{DynamicResource B.ErrorContainer}"/>
+                                                    </MultiDataTrigger>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"/>
+                                                            <Condition Binding="{Binding Status}" Value="Unknown plugin"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Background" Value="{DynamicResource B.TertiaryContainer}"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Name}" Style="{StaticResource Body}" FontWeight="Medium"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock Text="{Binding VendorLabel}" Style="{StaticResource Caption}"
+                                                           Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="10,0,0,0">
+                                                <!-- neutral chip: the status reads
+                                                     in text; the COLOR now lives on
+                                                     the clicked row only -->
+                                                <Border CornerRadius="9" Padding="8,2" HorizontalAlignment="Right"
+                                                        Background="{DynamicResource B.SCLow}">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Ellipse Width="7" Height="7" VerticalAlignment="Center"
+                                                                 Fill="{DynamicResource B.OnSurfaceVariant}"/>
+                                                        <TextBlock Text="{Binding Status}" FontSize="11" FontWeight="Medium"
+                                                                   Foreground="{DynamicResource B.OnSurface}" Margin="5,0,0,0"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <!-- animated marker: the diamond
+                                                     the keyframe navigator uses,
+                                                     so the two reads stay linked -->
+                                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,3,2,0"
+                                                            Visibility="{Binding HasAnimated}"
+                                                            ToolTip="this effect carries keyframe streams — select it and open the Keyframes or Graph tab">
+                                                    <controls:IconGlyph IconName="Diamond" Width="9" Height="9"
+                                                                        Foreground="{DynamicResource B.Primary}" VerticalAlignment="Center"/>
+                                                    <TextBlock Text="{Binding AnimText}" FontSize="10.5"
+                                                               Foreground="{DynamicResource B.Primary}" Margin="4,0,0,0"
+                                                               VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
+                </Border>
+
+                <!-- ============ inspector ============ -->
+                <Border x:Name="InspectorHost" Grid.Column="1" Margin="4,8,8,0" CornerRadius="22"
+                        Background="{DynamicResource B.SC}">
+                    <Grid Margin="14,10,14,12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0">
+                            <TextBlock x:Name="InspTitle" Text="Inspector" Style="{StaticResource Body}"
+                                       FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="InspSub" Text="Select an effect to inspect it"
+                                       Style="{StaticResource Caption}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+
+                        <Border Grid.Row="1" Background="{DynamicResource B.SCLowest}" CornerRadius="12"
+                                Padding="3" Margin="0,12,0,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <ToggleButton x:Name="TabParamsBtn" Content="Parameters" Style="{StaticResource InspTab}"
+                                              IsChecked="True" Click="TabBtn_Click"/>
+                                <ToggleButton x:Name="TabKeyframesBtn" Grid.Column="1" Content="Keyframes"
+                                              Style="{StaticResource InspTab}" Click="TabBtn_Click"/>
+                                <ToggleButton x:Name="TabGraphBtn" Grid.Column="2" Content="Graph"
+                                              Style="{StaticResource InspTab}" Click="TabBtn_Click"/>
+                            </Grid>
+                        </Border>
+
+                        <Grid Grid.Row="2">
+                            <!-- prompts (nothing selected / undecodable) -->
+                            <TextBlock x:Name="InspEmpty" Text="Select an effect on the left to inspect its parameters, keyframe timing and value/speed graphs."
+                                       Style="{StaticResource BodySecondary}" TextWrapping="Wrap"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center"
+                                       MaxWidth="240"/>
+                            <TextBlock x:Name="InspUnavailable" Text="Parameter data for this effect couldn't be decoded — the preset may use a structure this inspector doesn't know yet."
+                                       Style="{StaticResource BodySecondary}" TextWrapping="Wrap"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center"
+                                       MaxWidth="240" Visibility="Collapsed"/>
+
+                            <!-- tab 1: parameters -->
+                            <ScrollViewer x:Name="ParamPane" Visibility="Collapsed"
+                                          ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                                    <ItemsControl x:Name="ParamList">
+                                        <ItemsControl.ItemTemplateSelector>
+                                            <controls:EcBodySelector GroupTemplate="{StaticResource InspGroupTpl}"
+                                                                     RowTemplate="{StaticResource InspRow}"/>
+                                        </ItemsControl.ItemTemplateSelector>
+                                    </ItemsControl>
+                                    <TextBlock x:Name="ParamEmpty" Text="No decodable parameters in this effect block."
+                                               Style="{StaticResource Caption}" Margin="12,8,12,8" TextWrapping="Wrap"
+                                               Visibility="Collapsed"/>
+                                </StackPanel>
+                            </ScrollViewer>
+
+                            <!-- tab 2: keyframes -->
+                            <Grid x:Name="KfPane" Visibility="Collapsed">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <ComboBox x:Name="KfParamSelect" Grid.Row="0" Margin="0,0,0,8"
+                                          SelectionChanged="AnimParam_SelectionChanged"/>
+                                <!-- AE-timeline strip: the stream's keyframes as
+                                     clickable markers on a frame grid — the
+                                     "when do the keys land" view; the table
+                                     below carries the exact numbers -->
+                                <Border Grid.Row="1" Background="{DynamicResource B.SCLowest}" CornerRadius="10"
+                                        Padding="4" Margin="0,0,0,8">
+                                    <Canvas x:Name="KfTimeline" Height="44" Background="Transparent"
+                                            ClipToBounds="True"/>
+                                </Border>
+                                <!-- column header mirrors the KfRow grid -->
+                                <Grid Grid.Row="2" Margin="12,0,12,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="24"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="#" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                                    <TextBlock Grid.Column="1" Text="TIME" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                                    <TextBlock Grid.Column="2" Text="VALUE" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                                    <TextBlock Grid.Column="3" Text="EASING" Style="{StaticResource Caption}" FontWeight="SemiBold" Margin="8,0,0,0"/>
+                                </Grid>
+                                <ScrollViewer Grid.Row="3" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                    <StackPanel>
+                                        <ItemsControl x:Name="KfList" ItemTemplate="{StaticResource KfRow}"/>
+                                        <TextBlock x:Name="KfEmpty" Text="This effect has no animated parameters — its values are static. Static values are listed under Parameters."
+                                                   Style="{StaticResource Caption}" Margin="12,8,12,8" TextWrapping="Wrap"
+                                                   Visibility="Collapsed"/>
+                                    </StackPanel>
+                                </ScrollViewer>
+                                <!-- easing numbers for the selected keyframe, AE
+                                     Graph Editor style (slope + influence per side) -->
+                                <TextBlock x:Name="KfDetail" Grid.Row="4" Style="{StaticResource Caption}"
+                                           Foreground="{DynamicResource B.OnSurfaceVariant}"
+                                           Margin="12,8,12,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+                                <TextBlock Grid.Row="5" Text="timecode at 30 fps · 1 tick = 1/1024 s (derived from the preset data) · click a row or a timeline marker, then read its easing below"
+                                           Style="{StaticResource Caption}" Opacity="0.75" Margin="12,6,12,0"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </Grid>
+
+                            <!-- tab 3: AE-style graphs (value + speed) -->
+                            <Grid x:Name="GraphPane" Visibility="Collapsed">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <ComboBox x:Name="GraphParamSelect" Grid.Row="0" Margin="0,0,0,8"
+                                          SelectionChanged="AnimParam_SelectionChanged"/>
+                                <Grid Grid.Row="1" Margin="0,0,0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Background="{DynamicResource B.SCLowest}" CornerRadius="9" Padding="2">
+                                        <StackPanel Orientation="Horizontal">
+                                            <ToggleButton x:Name="GraphValueBtn" Content="Value" Style="{StaticResource GraphModeTab}"
+                                                          IsChecked="True" Click="GraphMode_Click"/>
+                                            <ToggleButton x:Name="GraphSpeedBtn" Content="Speed" Style="{StaticResource GraphModeTab}"
+                                                          Click="GraphMode_Click"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <TextBlock x:Name="GraphLegend" Grid.Column="1" Text="value over time"
+                                               Style="{StaticResource Caption}" Opacity="0.85" Margin="10,0,0,0"
+                                               VerticalAlignment="Center" HorizontalAlignment="Right"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                                <Border Grid.Row="2" Background="{DynamicResource B.SCLowest}" CornerRadius="14" Padding="6">
+                                    <Grid>
+                                        <Canvas x:Name="GraphCanvas" Background="Transparent" ClipToBounds="True"
+                                                MouseMove="GraphCanvas_MouseMove" MouseLeave="GraphCanvas_MouseLeave"/>
+                                        <!-- hover readout floats over the plot, top-right -->
+                                        <Border x:Name="GraphReadout" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                IsHitTestVisible="False" Margin="0,8,52,0" Background="{DynamicResource B.SC}" CornerRadius="8"
+                                                Padding="8,4" Visibility="Collapsed"
+                                                BorderBrush="{DynamicResource B.OutlineVariant}" BorderThickness="1">
+                                            <TextBlock x:Name="GraphReadoutText" Style="{StaticResource Caption}"/>
+                                        </Border>
+                                        <TextBlock x:Name="GraphHint" Text="Pick an animated parameter to plot its curve — then click any keyframe to inspect its easing."
+                                                   Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                   TextAlignment="Center" MaxWidth="220"/>
+                                    </Grid>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <!-- ============ Effect Controls view (AE panel anatomy) ============
+                 Every effect of the preset as one scrollable group list,
+                 laid out exactly like AE's Effect Controls panel: a flat
+                 header line (twirl + effect name at the left, the About
+                 link at the right), then the familiar property
+                 lines (keyframe-navigator gutter, stopwatch, fixed name
+                 column, hover-underlined value — no eyes, no keyframe
+                 lanes; AE keeps those in the timeline). The switcher
+                 above flips between this view and the split inspector;
+                 both read the same decoded data. -->
+            <Border x:Name="EcHost" Visibility="Collapsed" Margin="8,8,8,0" CornerRadius="22"
+                    Background="{DynamicResource B.SC}">
+                <Grid Margin="16,12,16,14">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0" Margin="2,0,2,10">
+                        <TextBlock Text="Effect Controls" Style="{StaticResource Body}"
+                                   FontWeight="SemiBold" FontSize="15"/>
+                        <TextBlock x:Name="EcSub" Text="Open a preset to see its effect controls"
+                                   Style="{StaticResource Caption}" Margin="0,3,0,0"
+                                   TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <ScrollViewer Grid.Row="1" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <ItemsControl x:Name="EcList" ItemTemplate="{StaticResource EcEffectGroup}"/>
+                            <TextBlock x:Name="EcEmpty" Text="Parameter data for this preset couldn't be decoded - the compatibility list still works, and the inspector explains what could be read."
+                                       Style="{StaticResource BodySecondary}" TextWrapping="Wrap"
+                                       HorizontalAlignment="Center" TextAlignment="Center" MaxWidth="430"
+                                       Margin="8,18,8,8" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <!-- drag feedback overlay (visual only — drop is handled by the page root) -->
+            <Border x:Name="DragOverlay" Visibility="Collapsed" IsHitTestVisible="False" CornerRadius="26"
+                    Background="{DynamicResource B.PrimaryContainer}" Opacity="0.95">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="28" ShadowDepth="6" Opacity="0.22"/>
+                </Border.Effect>
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <controls:IconGlyph IconName="Upload" Width="54" Height="54"
+                                        Foreground="{DynamicResource B.OnPrimaryContainer}" HorizontalAlignment="Center"
+                                        Margin="0,0,0,14"/>
+                    <TextBlock Text="Release to analyze the preset" FontSize="19" FontWeight="SemiBold"
+                               Foreground="{DynamicResource B.OnPrimaryContainer}" HorizontalAlignment="Center"
+                               Margin="0,0,0,6"/>
+                    <TextBlock Text=".ffx · every effect checked against your plugin profile"
+                               FontSize="12" Foreground="{DynamicResource B.OnPrimaryContainer}"
+                               Opacity="0.8" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+
+            <!-- recent-files flyout: the RecentCard becomes a picker over the
+                 full 5-entry history instead of only re-opening the newest -->
+            <Popup x:Name="RecentFlyout" PlacementTarget="{Binding ElementName=RecentCard}"
+                   Placement="Top" VerticalOffset="-8" StaysOpen="False" AllowsTransparency="True"
+                   PopupAnimation="Fade">
+                <Border Background="{DynamicResource B.SCLowest}" CornerRadius="14"
+                        BorderBrush="{DynamicResource B.OutlineVariant}" BorderThickness="1"
+                        Width="330" MaxHeight="320" Margin="4,4,12,12" Padding="6">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.25"/>
+                    </Border.Effect>
+                    <StackPanel>
+                        <TextBlock Text="RECENT FILES" Style="{StaticResource Caption}" FontWeight="SemiBold"
+                                   Margin="10,6,10,4"/>
+                        <ListBox x:Name="RecentList" Focusable="False" Margin="2,0,2,2"
+                                 SelectionChanged="RecentList_SelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <!-- dead entries dim themselves + stop hit-testing
+                                         purely from bindings — no container timing races -->
+                                    <!-- explicit columns: Grid.Column=1 with no
+                                         definitions leaves the layout to chance -->
+                                    <Grid Margin="6,5">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.Style>
+                                            <Style TargetType="Grid">
+                                                <Setter Property="Opacity" Value="1"/>
+                                                <Setter Property="IsHitTestVisible" Value="True"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Exists}" Value="False">
+                                                        <Setter Property="Opacity" Value="0.45"/>
+                                                        <Setter Property="IsHitTestVisible" Value="False"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Grid.Style>
+                                        <controls:IconGlyph IconName="Description" Width="20" Height="20"
+                                                            Foreground="{DynamicResource B.Primary}"
+                                                            VerticalAlignment="Center"/>
+                                        <StackPanel Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center"
+                                                    ToolTip="{Binding Path}">
+                                            <TextBlock Text="{Binding FileName}" Style="{StaticResource Body}" FontWeight="Medium"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Meta}" Style="{StaticResource Caption}" Margin="0,1,0,0"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock x:Name="RecentEmptyHint" Text="No recent files yet — open a preset to start building history."
+                                   Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="10,4,10,8"
+                                   Visibility="Collapsed"/>
+                    </StackPanel>
+                </Border>
+            </Popup>
+        </Grid>
+
+        <!-- ============ header + status bar ============ -->
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="OpenBtn" Content="Open .ffx file…" Width="170" Click="Open_Click"/>
+                <Border Style="{StaticResource Chip}" Margin="12,0,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <controls:IconGlyph IconName="Info" Width="16" Height="16"
+                                            Foreground="{DynamicResource B.OnSurfaceVariant}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="FileChipText" Text="No file loaded" Style="{StaticResource BodySecondary}"
+                                   Margin="8,0,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+                <Button x:Name="FilterBtn" Width="40" Height="40" Margin="12,0,0,0" Click="Filter_Click"
+                        Style="{StaticResource OutlinedButton}" Padding="0" ToolTip="Cycle filter: all / missing only / compatible only">
+                    <controls:IconGlyph x:Name="FilterIcon" IconName="FilterList" Width="20" Height="20"/>
+                </Button>
+                <Button x:Name="SortBtn" Width="40" Height="40" Margin="8,0,0,0" Click="Sort_Click"
+                        Style="{StaticResource OutlinedButton}" Padding="0" ToolTip="Toggle sort direction (by effect name)">
+                    <controls:IconGlyph x:Name="SortIcon" IconName="SortArrows" Width="20" Height="20"/>
+                </Button>
+                <Button x:Name="FolderBtn" Content="Open folder…" Margin="12,0,0,0" Click="FolderBtn_Click"
+                        Style="{StaticResource OutlinedButton}" MinWidth="118" Height="40"
+                        ToolTip="Load every .ffx in a folder — flip through them here, or scan the whole folder into one report"/>
+                <!-- folder queue: only visible when a folder (or a multi-file
+                     selection) is loaded — the combo switches the workspace
+                     between the folder's presets -->
+                <StackPanel x:Name="QueuePanel" Orientation="Horizontal" Visibility="Collapsed" Margin="12,0,0,0">
+                    <ComboBox x:Name="QueueCombo" Width="290" VerticalAlignment="Center"
+                              SelectionChanged="QueueCombo_SelectionChanged"
+                              ToolTip="The presets of the loaded folder — pick one to open it"/>
+                    <TextBlock x:Name="ScanLink" Text="Folder report" Style="{StaticResource M3Link}" Cursor="Hand"
+                               Margin="14,0,0,0" VerticalAlignment="Center" MouseLeftButtonUp="Scan_Click"
+                               ToolTip="Deep-read every preset in the folder into one report — exportable as CSV"/>
+                </StackPanel>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+                <TextBlock x:Name="StatusBarLeft" Text="" Style="{StaticResource Caption}"/>
+                <TextBlock x:Name="StatusSep" Text="    ·    " Style="{StaticResource Caption}" Visibility="Collapsed"/>
+                <TextBlock x:Name="StatusBarVersion" Style="{StaticResource Caption}"/>
+                <TextBlock x:Name="StatusBarMode" Text="Ready" Style="{StaticResource Caption}" Margin="24,0,0,0"
+                           Foreground="{DynamicResource B.Outline}"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- About popover: what the effect is, the AE menu group it belongs
+             to, vendor/suite, the raw match name and the compatibility
+             status — AE's About line, made useful for a downgrade call -->
+        <Popup x:Name="EcAboutPop" AllowsTransparency="True" StaysOpen="False"
+               Placement="Mouse" PopupAnimation="Fade">
+            <Border Background="{DynamicResource B.Surface}" CornerRadius="14"
+                    BorderBrush="{DynamicResource B.Outline}" BorderThickness="1"
+                    Padding="14,12" Width="280">
+                <StackPanel>
+                    <TextBlock x:Name="AboutTitle" FontSize="14" FontWeight="SemiBold"
+                               Foreground="{DynamicResource B.OnSurface}" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="AboutGroup" FontSize="11.5" FontWeight="Medium"
+                               Foreground="{DynamicResource B.Primary}"
+                               Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="AboutVendor" FontSize="11.5"
+                               Foreground="{DynamicResource B.OnSurfaceVariant}"
+                               Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="AboutOrigin" FontSize="11"
+                               Foreground="{DynamicResource B.OnSurfaceVariant}"
+                               Margin="0,2,0,0" TextWrapping="Wrap"/>
+                    <Border Height="1" Background="{DynamicResource B.OutlineVariant}" Opacity="0.55"
+                            Margin="0,8" IsHitTestVisible="False"/>
+                    <TextBlock x:Name="AboutMatch" FontSize="11"
+                               Foreground="{DynamicResource B.OnSurfaceVariant}"
+                               TextWrapping="Wrap"/>
+                    <TextBlock x:Name="AboutStatus" FontSize="11.5"
+                               Foreground="{DynamicResource B.OnSurface}"
+                               Margin="0,6,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </Popup>
+
+        <!-- folder report flyout (the baked-in batch inspect): the whole
+             queue deep-read into one table — status, counts, size, first
+             decode notes — exportable as CSV; nothing is ever written -->
+        <Popup x:Name="ScanFlyout" PlacementTarget="{Binding ElementName=ScanLink}"
+               Placement="Top" VerticalOffset="-8" StaysOpen="False" AllowsTransparency="True"
+               PopupAnimation="Fade">
+            <Border Background="{DynamicResource B.SCLowest}" CornerRadius="14"
+                    BorderBrush="{DynamicResource B.OutlineVariant}" BorderThickness="1"
+                    Width="600" MaxHeight="400" Margin="4,4,12,12" Padding="10">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.25"/>
+                </Border.Effect>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0" Margin="6,4,6,6">
+                        <TextBlock Text="FOLDER REPORT" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                        <Grid Margin="0,7,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="54"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="34"/>
+                                <ColumnDefinition Width="34"/>
+                                <ColumnDefinition Width="34"/>
+                                <ColumnDefinition Width="56"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="STATUS" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="1" Text="FILE" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="2" Text="EFF" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="3" Text="PAR" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="4" Text="ANIM" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                            <TextBlock Grid.Column="5" Text="SIZE" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                        </Grid>
+                    </StackPanel>
+                    <ListBox x:Name="ScanList" Grid.Row="1" Focusable="False" Margin="2,0,2,4"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             VirtualizingPanel.ScrollUnit="Pixel">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="4,3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="54"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="34"/>
+                                        <ColumnDefinition Width="34"/>
+                                        <ColumnDefinition Width="34"/>
+                                        <ColumnDefinition Width="56"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding Status}" VerticalAlignment="Top">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+                                                <Setter Property="Foreground" Value="{DynamicResource B.Primary}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Status}" Value="FAILED">
+                                                        <Setter Property="Foreground" Value="{DynamicResource B.Error}"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Status}" Value="WARN">
+                                                        <Setter Property="Foreground" Value="{DynamicResource B.OnSurfaceVariant}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBlock Grid.Column="1" Text="{Binding FileName}" Style="{StaticResource Body}"
+                                               FontWeight="Medium" VerticalAlignment="Top" TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding Note}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding Effects}" Style="{StaticResource Caption}" VerticalAlignment="Top"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding Params}" Style="{StaticResource Caption}" VerticalAlignment="Top"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding Animated}" Style="{StaticResource Caption}" VerticalAlignment="Top"/>
+                                    <TextBlock Grid.Column="5" Text="{Binding Size}" Style="{StaticResource Caption}" VerticalAlignment="Top"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <Grid Grid.Row="2" Margin="6,2,6,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ScanSummary" Style="{StaticResource Caption}" Opacity="0.85"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="ScanCsvLink" Grid.Column="1" Text="Export CSV" Style="{StaticResource M3Link}"
+                                   Cursor="Hand" Margin="14,0,0,0" MouseLeftButtonUp="ScanCsv_Click"
+                                   ToolTip="Writes the report as a spreadsheet-friendly CSV (UTF-8 with BOM for Excel)"/>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Popup>
+    </Grid>
+</UserControl>

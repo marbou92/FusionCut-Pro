@@ -1,203 +1,71 @@
-# FusionCut Pro
+# FFX Compatibility Tool — C# / .NET Framework 4.8 port
 
-**A lightweight, dual-mode video editor for Windows 7 and later - engineered for a 1 GB RAM budget.**
+A from-scratch port of the Python `ffx_core` engine to C#, targeting
+**.NET Framework 4.8** specifically for real Windows 7 compatibility —
+see the repo's earlier history for why: Python 3.9+, Qt6 (PySide6), and
+even PySide2's available wheel range all independently stopped supporting
+Win7, and chasing each one individually stopped being productive.
 
-[![CI](https://github.com/marbou92/FusionCut-Pro/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/marbou92/FusionCut-Pro/actions/workflows/ci.yml)
-[![Portable Build](https://github.com/marbou92/FusionCut-Pro/actions/workflows/portable-build.yml/badge.svg)](https://github.com/marbou92/FusionCut-Pro/actions/workflows/portable-build.yml)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-informational)](./LICENSE)
+## Important: what's verified and what isn't yet
 
-FusionCut Pro combines the professional panel workspace of a Premiere-style editor (**Pro Mode**)
-with the streamlined, one-tap flow of a CapCut-style editor (**Quick Mode**) in a single native
-application built with **C++17 and Qt 5.15** - the last Qt line that still runs on Windows 7.
+**I could not compile or run this C# code myself** — this sandbox has no
+.NET SDK installed and no way to install one (network access here is
+locked to a handful of package registries, not Microsoft's). Every line
+was written by careful manual translation from the Python version that
+*was* fully tested against your real preset files across this whole
+project, but **the C# port itself has not been executed by anyone yet.**
 
-Everything ships **through GitHub**: sources, tests, CI, and portable builds produced by
-GitHub Actions. No installer, no registry writes.
+`.github/workflows/test.yml` is set up to build and run the full test
+suite (a port of every meaningful test from `tests/test_riff.py` and
+`tests/test_pipeline.py`, including a real-file round-trip using the same
+`sample_1.ffx` fixture) on `windows-latest` the moment you push this. That
+CI run is the actual first real test of this code — please check it
+before trusting the logic, the same discipline the Python version went
+through before any of it got called "confirmed."
 
-## Highlights
+If it fails, the most likely culprits, roughly in order of likelihood:
+1. A typo or off-by-one in the manual translation (most likely — this is
+   hand-ported, not machine-translated)
+2. `System.Text.Json` version pin needing adjustment for net48 compat
+3. Something about the `<None Include>` linked-file paths for
+   `plugin_table.json` / the `.ffx` fixture not resolving the way I
+   expect across `dotnet build`'s output structure
 
-- **Dual-mode workspace** - dockable Pro Mode panels vs. streamlined Quick Mode timeline
-- **Legacy-friendly** - targets Windows 7 SP1+ (32/64-bit era hardware), 1 GB RAM minimum
-- **Deterministic memory core** - fixed block pools and LRU frame-cache eviction, never guesswork
-- **Portable-first distribution** - every build is a self-contained zip straight from CI
-- **Fully tested engine primitives** - timecode, caching, and allocation units run in CI on
-  every push (Ubuntu + Windows)
+None of these would be surprising for a first-pass port — flag whatever
+the CI output shows and I'll fix it directly rather than guess further.
 
-## Status
+## Structure
 
-FusionCut Pro is in **pre-alpha**. The engineering foundation ships first; editing features
-arrive milestone by milestone.
+```
+FfxTool.Core/              # port of ffx_core — RiffNode.cs, Pipeline.cs, PluginLookup.cs
+FfxTool.Core.Tests/         # xUnit port of test_riff.py / test_pipeline.py (incl. fixtures/sample_1.ffx)
+FfxTool.Gui/               # WPF GUI — MainWindow, ConvertPage (single preset or a whole folder), ListerPage (single preset or a folder queue + report), ProfilePage, SettingsPage + MD3 theme
+data/plugin_table.json      # shared verbatim — copied to output via <None Include Link> (Core + Gui)
+.github/workflows/test.yml  # dotnet build + test on windows-latest (Core + Gui)
+.github/workflows/build.yml # Release zip of FfxTool.Gui.exe + dependencies + data/plugin_table.json
+.github/workflows/nightly.yml # rolling "nightly" pre-release of main (every push + daily) for feature testing
+```
 
-| Milestone | Scope | Status |
-| --- | --- | --- |
-| M1 - Engineering foundation | Build system, CI, portable pipeline, core primitives | Shipped (v0.1.0) |
-| M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
-| M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
-| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 1 shipped (v0.4.0) |
-| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Planned |
-| M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
-| M7 - AI features | Face tracking, background removal, auto-captions | Planned |
-| M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
+`FfxTool.sln` includes all three projects (`Core`, `Core.Tests`, `Gui`) so a single `dotnet build FfxTool.sln` builds the entire repo. Each csproj links `../data/plugin_table.json` with `CopyToOutputDirectory=PreserveNewest`; `Core.Tests` additionally links `fixtures/*.ffx`.
 
-> **Runtime crash reporting (v0.4.1+, hardened v0.4.6):** a built-in
-> crash handler captures access violations, uncaught C++ exceptions, CRT
-> misuses, pure-virtual calls, and POSIX signals, then writes a
-> structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
-> next to the executable) with the exception code, address, stack
-> backtrace, and (Windows) the loaded-module snapshot - the diagnostic
-> that previously required the `run-console.bat` console launcher is
-> now automatic and reaches far more failure modes than stderr alone.
-> As of v0.4.3 the Windows VEH is registered at static-init time
-> (before `main()`), which widens the VEH's coverage to runtime
-> crashes that occur after `.CRT$XCU` but does **not** cover
-> loader-phase failures (the Windows "0xc0000005 unable to start"
-> dialog is the loader's own failure, shown before any user code
-> runs). For that class, v0.4.4 ships `fcp-loader-check.exe` - a
-> zero-dependency PE import-tree walker that runs from outside the
-> broken process and names any DLL the loader cannot map. If
-> `FusionCutPro.exe` won't start, double-click
-> `fcp-loader-check.exe` first. As of v0.4.5 it runs two phases: an
-> import-tree probe that names any DLL the loader cannot map, then a
-> **debug-launch watch** — it starts `FusionCutPro.exe` under a
-> built-in mini-debugger (Windows debug API, kernel32 only) and
-> records every DLL load and every exception — including faults
-> inside DllMain / static initializers that Windows Error Reporting
-> never sees (which is why the "0xc0000005 unable to start" dialog
-> produces no Event Viewer entry). The tool names the faulting module
-> + offset and writes `loader-check-<timestamp>.log` with the full
-> module load trail. `FusionCutPro.exe --crash-test` writes a
-> synthetic runtime report to verify the in-process pipeline on a
-> clean machine. v0.4.11 fixes the loader-phase root causes the
-> watch exposed (see the Windows 7 / 8.x compatibility note above):
-> the bundled `api-ms-win-core-synch-l1-2-0.dll` shim (WaitOnAddress
-> api set) and the stubbed `librsvg-2-2.dll` (Windows 8+ import).
-> CONFIRMED IN THE FIELD: the v0.4.8 build showed the shim binding
-> on the user Windows 7 machine (load trail module 59) before the
-> next incompatibility surfaced.
+## What was deliberately preserved from the Python version
 
-## System requirements (target)
+Every hard-won detail from `RESEARCH_NOTES.md` carried over as-is:
+- `fnam` chunks get padded to a fixed 48 bytes; `tdsn`/`pdnm` stay
+  variable-length — these are NOT the same treatment (this distinction
+  was Mistake #3 in the original derivation; getting it wrong crashes AE).
+- Effect removal matches `sspc` blocks to `tdsp` entries by **position**,
+  not name, and always renumbers `tdix` afterward.
+- Keyframe (`lhd3`/`ldat`) and third-party plugin blob data is never
+  touched by any pipeline step, and `Pipeline.Verify()` checks this holds
+  after every conversion — same verification discipline as the Python
+  version, not weakened for the port.
 
-| | Minimum | Recommended |
-| --- | --- | --- |
-| OS | Windows 7 SP1+ (64-bit; 32-bit untested) | Windows 10/11 (64-bit) |
-| RAM | 1 GB | 4 GB |
-| CPU | Intel Core 2 Duo / AMD Athlon 64 X2 | Intel i5 / AMD Ryzen 5 |
-| Storage | 500 MB + project space | 2 GB SSD |
-| Graphics | DirectX 9 compatible | DirectX 11 with GPU acceleration |
-
-> **Windows 7 / 8.x compatibility:** the FFmpeg 8 runtime stack (via
-> MSYS2) contains Rust-built DLLs (e.g. `librav1e.dll`) that import the
-> `WaitOnAddress` futex API set by its literal api-set name, which
-> pre-10 loaders cannot resolve. The portable build therefore ships a
-> small compatibility shim (`api-ms-win-core-synch-l1-2-0.dll`, built
-> from `src/app/api_set_synch.c` since v0.4.7) that provides REAL
-> implementations of that API set on top of Windows-7-era kernel32
-> primitives — so those Windows versions start AND run correctly.
-> The DLL search order tries the application directory before
-> System32, so the shim wins the bind on Win7/8.x; on Windows 10/11
-> the OS resolves the name natively and the file is ignored. Leave it
-> in place.
->
-> **Windows 7 / librsvg:** the MSYS2 `librsvg-2-2.dll` in the FFmpeg
-> dependency tree is built with a modern Rust toolchain that
-> statically imports `kernel32!GetSystemTimePreciseAsFileTime`
-> (Windows 8+ only) — on Windows 7 the loader aborts with
-> `STATUS_ENTRYPOINT_NOT_FOUND` (0xC0000139). KERNEL32 is a
-> KnownDLL, so no app-dir file can ever supply that export; instead
-> the portable build replaces `librsvg-2-2.dll` with a generated stub
-> exporting exactly the symbols `avcodec-62.dll` imports (all
-> returning failure). Consequence: SVG image decoding is unavailable
-> in the portable build; every video/audio codec is unaffected. A CI
-> tripwire additionally scans every bundled binary for known
-> Windows 8/10-only kernel32 imports and fails the build loudly if
-> one appears.
-
-## Getting a portable build
-
-1. Open the **Actions** tab -> **Portable Build** -> **Run workflow** (or open the latest run).
-2. Download the `FusionCutPro-<version>-win64-portable.zip` artifact.
-3. Extract anywhere and run `FusionCutPro.exe`. Nothing is installed.
-
-Pushing a tag named `v*` (e.g. `v0.1.0`) does the same and additionally attaches the zip to a
-GitHub **Release**. The first run on a fresh runner takes ~15-25 minutes (Qt toolchain download);
-subsequent runs reuse the MSYS2 cache.
-
-## Building from source
-
-**Ubuntu (Qt 5.15 + FFmpeg from apt):**
+## Running locally
 
 ```bash
-sudo apt-get install -y cmake g++ pkg-config qtbase5-dev \
-  libavformat-dev libavcodec-dev libavutil-dev \
-  libswscale-dev libswresample-dev
-cmake -S . -B build -DFC_BUILD_APP=ON
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+dotnet restore FfxTool.sln
+dotnet build FfxTool.sln --configuration Release
+dotnet test FfxTool.sln --configuration Release
+# GUI: FfxTool.Gui\bin\Release\net48\FfxTool.Gui.exe (+ data\plugin_table.json alongside it)
 ```
-
-**Windows (MSYS2 MinGW64 - what the portable pipeline uses):**
-
-```bash
-pacman -S --needed mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
-  mingw-w64-x86_64-pkgconf mingw-w64-x86_64-qt5-base \
-  mingw-w64-x86_64-qt5-tools mingw-w64-x86_64-ffmpeg
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFC_BUILD_APP=ON
-cmake --build build --parallel
-./build/src/app/FusionCutPro.exe
-```
-
-The core library and tests build with no third-party dependencies
-(`-DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=OFF`), which is what the fast CI
-matrix verifies on every push. The media layer (`-DFC_BUILD_MEDIA=ON`,
-default ON) needs FFmpeg development libraries via pkg-config and compiles
-against both the FFmpeg 4.4 and 5.1+/7.x API generations - CI runs its
-integration suite on Ubuntu (FFmpeg 7.x), an Ubuntu 22.04 container
-(FFmpeg 4.4, the Windows 7 target generation), and MinGW/Windows (portable
-workflow).
-
-## Tests
-
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-Two suites run: **core** (88 checks: rational frame rates, timecode
-parse/format/math, LRU eviction, memory-pool ownership/alignment) and
-**media** (317 checks: synthetic media is generated at runtime - no binary
-assets in the repo - then probed, decoded frame-accurately with color-order
-assertions, seeked, and transcoded to 360p proxies with geometry, audio,
-progress, cancellation, and no-upscale verification).
-
-## Project layout
-
-```
-.
-├── .github/workflows/     # ci.yml (lint + core/media/Qt matrix) + portable-build.yml
-├── cmake/                 # CMake templates (version.h.in)
-├── docs/                  # repository metadata; specs and wireframes land here
-├── src/
-│   ├── app/               # Qt 5.15 desktop shell (Pro/Quick workspace host)
-│   ├── core/              # dependency-free engine primitives (fc_core)
-│   └── media/             # FFmpeg I/O layer (fc_media): probe, decode, proxy
-├── tests/                 # core + media suites, shared harness, synthetic media generator
-├── CMakeLists.txt
-├── LICENSE                # GPL-3.0
-└── VERSION                # single source of truth for the version number
-```
-
-## License
-
-Copyright (C) 2026  FusionCut Pro contributors.
-
-This program is free software: you can redistribute it and/or modify it under the terms of the
-[GNU General Public License](./LICENSE) as published by the Free Software Foundation, either
-version 3 of the License, or (at your option) any later version.
-
-GPL-3.0 was chosen for forward compatibility with the FFmpeg ecosystem planned for Milestone 2.
-A `THIRD_PARTY_NOTICES.md` ships with the first bundled dependency (Qt is dynamically linked,
-which satisfies its LGPL-3.0 terms; the Noto/OFL emoji font planned for Milestone 6 is not
-bundled yet).
-
-## Repository settings
-
-The canonical repo description, topics, and recommended settings live in
-[docs/repo-settings.md](./docs/repo-settings.md).
