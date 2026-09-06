@@ -460,7 +460,7 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
             dragBoundary_ = clip->timelineStart;
             dragRollLeftId_ = left->id;
             dragRollRightId_ = clip->id;
-            dragRollMin_ = left->timelineStart() + 1;
+            dragRollMin_ = left->timelineStart + 1;
             dragRollMax_ = clip->timelineEnd() - 1;
             ghostEnd_ = dragBoundary_;
         } else {
@@ -474,7 +474,7 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
             dragBoundary_ = clip->timelineEnd();
             dragRollLeftId_ = clip->id;
             dragRollRightId_ = right->id;
-            dragRollMin_ = clip->timelineStart() + 1;
+            dragRollMin_ = clip->timelineStart + 1;
             dragRollMax_ = right->timelineEnd() - 1;
             ghostEnd_ = dragBoundary_;
         } else {

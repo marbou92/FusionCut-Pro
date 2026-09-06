@@ -32,13 +32,13 @@ arrive milestone by milestone.
 | M1 - Engineering foundation | Build system, CI, portable pipeline, core primitives | Shipped (v0.1.0) |
 | M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
 | M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
-| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 2 shipped (v0.4.12) |
+| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 2 shipped (v0.4.13) |
 | M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Planned |
 | M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+, attribution upgrade v0.4.12):** a
+> **Runtime crash reporting (v0.4.1+, attribution upgrade v0.4.13):** a
 > built-in crash handler captures access violations, uncaught C++
 > exceptions, CRT misuses, pure-virtual calls, and POSIX signals, then
 > writes a structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
@@ -55,7 +55,7 @@ arrive milestone by milestone.
 > dialog is the loader's own failure, shown before any user code
 > runs).
 >
-> **Loader-phase diagnostic, baked in (v0.4.12):** the separate
+> **Loader-phase diagnostic, baked in (v0.4.13):** the separate
 > `fcp-loader-check.exe` of v0.4.4-v0.4.11 is RETIRED - its
 > two-phase diagnostic now runs from the exe itself. Run
 > `FusionCutPro.exe --diag` if the app will not start: phase 1 maps

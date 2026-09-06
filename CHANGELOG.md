@@ -4,7 +4,61 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.13] - 2026-09-06
+
+**v0.4.12 never compiled — the first CI run of its Qt layer died in
+`g++` with `error: expression cannot be used as a function` at two
+sites in `timeline_panel.cpp` (`left->timelineStart() + 1` and
+`clip->timelineStart() + 1`). `fc::Clip::timelineStart` is a data
+member; `timelineEnd()` is the member function — the two rolling-edit
+lines were written with the wrong mental model and slipped past every
+local gate because the sandbox had no Qt. This release is the two-token
+fix, plus the process change that closes that gap permanently: the
+sandbox now carries a real Qt 5.15 + FFmpeg dev toolchain, so the app
+layer is configure+compile+link+test verified locally before every
+push from now on.**
+
+### Fixed — M4b rolling-edit drag did not compile (first Qt-layer build)
+- `src/app/timeline_panel.cpp` (2 sites, `beginClipDrag`): the
+  `DragMode::RollBoundary` clamp bounds were computed as
+  `timelineStart() + 1` — calling the `Clip::timelineStart` data
+  member as if it were a function like `timelineEnd()`. The Qt 5.15
+  ubuntu CI leg and the MinGW portable leg both abort there; no
+  v0.4.12 binary of any kind ever existed. Fix: `timelineStart + 1`.
+  Whole-tree audit for the same member-vs-function class (all
+  `fc::Clip` / `fc::Track` fields called with parens): zero further
+  sites.
+
+### Changed — the "no Qt in the sandbox" blind spot is closed
+- The verification sandbox now has a persistent, relocatable Qt 5.15
+  toolchain (Debian trixie `qtbase5-dev` 5.15.15 + `qtbase5-dev-tools`
+  + `qt5-qmake` + runtime libs, extracted via `apt download` +
+  `dpkg -x`, the same technique previously proven for FFmpeg) and a
+  re-extracted FFmpeg 7.1.5 dev tree. The full CI matrix equivalent of
+  the `qt-app-ubuntu` leg — `cmake -DFC_BUILD_APP=ON
+  -DFC_BUILD_MEDIA=ON`, `FusionCutPro` compile AND link, all 3 ctest
+  suites — now runs locally before delivery. From v0.4.13 on, "the Qt
+  layer is CI-verified only" is no longer an acceptable verification
+  note: the class of miss this hotfix exists for could not have
+  survived it.
+
+### Verification
+- Real Qt 5.15.15 + FFmpeg 7.1.5 in-sandbox: configure clean, all 13
+  app translation units compile (incl. the fixed `timeline_panel.cpp`
+  and the AUTOMOC pass), `FusionCutPro` links (after providing the two
+  transitive Qt runtime deps `libdouble-conversion` / `libmd4c`),
+  ctest 3/3 (core 88 + timeline 130 + media 317 = 535 checks green).
+- Whole-tree member-vs-function audit: clean. clang-format 22.1.8
+  gate: 0 violations. wfmock battery: green with v0.4.13 strings.
+- Remaining oracles unchanged: CI (all legs should now be green for
+  the first time since the v0.4.12 push), then the Windows 7 machine
+  (M4b interactions; `--diag`; crash report FaultModule line).
+
 ## [0.4.12] - 2026-09-06
+
+**(superseded within one CI run - see [0.4.13]: never compiled, the
+two-site `timelineStart()` build error was fixed before any binary
+existed)**
 
 **First release confirmed RUNNING on the Windows 7 target machine: the
 user's v0.4.11 boot trace shows all seven startup stages green (VEH
