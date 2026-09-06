@@ -38,6 +38,8 @@
 #include "project_panel.h"
 #include "quick_mode_view.h"
 #include "timeline_panel.h"
+#include "transitions.h"
+#include "transitions_panel.h"
 #include "transport_bar.h"
 
 namespace fc {
@@ -124,6 +126,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
+    if (decodeThreadB_) {
+        decodeThreadB_->quit();
+        decodeThreadB_->wait(3000);
+    }
     if (decodeThread_) {
         decodeThread_->quit();
         decodeThread_->wait(3000);
@@ -227,15 +233,54 @@ void MainWindow::buildDecodeThread() {
     });
 
     decodeThread_->start();
+
+    // ---- M5 Phase 2: the held-frame worker (worker B) ----
+    // Serves ONLY the incoming clip's first frame during transition
+    // windows. It never drives the program source: its mediaInfo feeds
+    // nothing but the queued held-frame request, its failures degrade the
+    // composite to A-only.
+    decodeThreadB_ = new QThread(this);
+    workerB_ = new DecodeWorker; // no parent: moves to its own thread
+    workerB_->moveToThread(decodeThreadB_);
+    connect(decodeThreadB_, &QThread::finished, workerB_, &QObject::deleteLater);
+    connect(workerB_, &DecodeWorker::mediaInfo, this,
+            [this](const QString &, double, double, int64_t) {
+                if (pendingBFirst_) {
+                    pendingBFirst_ = false;
+                    const fc::Clip *clip = model_.clipById(pendingBFirstClipId_);
+                    if (clip) {
+                        QMetaObject::invokeMethod(
+                            workerB_, "requestFrame",
+                            Q_ARG(double, static_cast<double>(clip->sourceInFrames) / fps_));
+                    }
+                }
+            });
+    connect(workerB_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double) {
+        bRequestInFlight_ = false;
+        if (pendingBFirstClipId_ > 0 && pendingBFirstClipId_ == heldIncomingClipId_) {
+            heldIncomingFrame_ = frame;
+            applyProgramFrame(); // complete the pair, composite now
+        }
+    });
+    connect(workerB_, &DecodeWorker::failed, this, [this](const QString &error) {
+        statusBar()->showMessage(
+            tr("Transition preview: could not decode the incoming clip (%1)").arg(error), 8000);
+        bRequestInFlight_ = false;
+        bFailedClipId_ = heldIncomingClipId_; // do not retry per tick
+        heldIncomingFrame_ = QImage();        // composite falls back to A
+    });
+    decodeThreadB_->start();
 }
 
 void MainWindow::buildProWorkspace() {
-    // Left zone: Project | Effects (tabbed).
+    // Left zone: Project | Effects | Transitions (tabbed).
     projectPanel_ = new ProjectPanel(this);
     effectsPanel_ = new EffectsPanel(this);
+    transitionsPanel_ = new TransitionsPanel(this); // M5 Phase 2
     auto *leftTabs = new QTabWidget(this);
     leftTabs->addTab(projectPanel_, tr("Project"));
     leftTabs->addTab(effectsPanel_, tr("Effects"));
+    leftTabs->addTab(transitionsPanel_, tr("Transitions"));
     auto *leftDock = makeDock(tr("Project"), leftTabs, this);
     addDockWidget(Qt::LeftDockWidgetArea, leftDock);
 
@@ -326,6 +371,43 @@ void MainWindow::buildProWorkspace() {
                 if (frameClipId_ == clipId) {
                     applyProgramFrame(); // instant re-render from the raw cache
                 }
+            });
+
+    // ---- M5 Phase 2 transition wiring ----
+    connect(transitionsPanel_, &TransitionsPanel::transitionAddRequested, this,
+            [this](const QString &kind) { addTransitionToSelectedClip(kind); });
+    connect(timeline_, &TimelinePanel::transitionSelected, this, [this](int64_t id) {
+        selectedTransitionId_ = id;
+        const fc::Transition *t = id > 0 ? model_.transitionById(id) : nullptr;
+        if (t) {
+            pushTransitionToEditor(*t);
+        } else {
+            effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
+        }
+    });
+    connect(effectControls_, &EffectControlsPanel::transitionDurationChanged, this,
+            [this](int64_t id, int64_t frames) {
+                if (!model_.setTransitionDuration(id, frames)) {
+                    statusBar()->showMessage(
+                        tr("Duration rejected - it does not fit the outgoing clip."), 4000);
+                }
+                if (const fc::Transition *t = model_.transitionById(id)) {
+                    pushTransitionToEditor(*t); // refresh slider bounds + value
+                }
+                timeline_->update(); // marker width follows the duration
+                applyProgramFrame(); // live re-render inside the window
+            });
+    connect(effectControls_, &EffectControlsPanel::transitionRemoveRequested, this,
+            [this](int64_t id) {
+                if (!model_.removeTransition(id)) {
+                    return;
+                }
+                selectedTransitionId_ = -1;
+                timeline_->clearTransitionSelection();
+                effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
+                timeline_->update();
+                applyProgramFrame();
+                statusBar()->showMessage(tr("Transition removed."), 4000);
             });
     connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
         if (const fc::Track *track = model_.trackAt(trackIndex); track && track->locked) {
@@ -419,8 +501,12 @@ void MainWindow::buildMenus() {
 
     // ---- Effects ----
     QMenu *effects = menuBar()->addMenu(tr("&Effects"));
-    addMenuAction(effects, tr("Apply &Default Transition"), QKeySequence(tr("Ctrl+D")))
-        ->setEnabled(false);
+    QAction *defaultTransition =
+        addMenuAction(effects, tr("Apply &Default Transition"), QKeySequence(tr("Ctrl+D")));
+    defaultTransition->setToolTip(
+        tr("Adds a 1 s Cross Dissolve on the cut after the selected clip"));
+    connect(defaultTransition, &QAction::triggered, this,
+            [this] { addTransitionToSelectedClip(QStringLiteral("dissolve.cross")); });
 
     // ---- View ----
     QMenu *view = menuBar()->addMenu(tr("&View"));
@@ -653,6 +739,9 @@ void MainWindow::updateSequenceDuration() {
     if (seq > 0.0) {
         transport_->setMedia(dur, fps_);
     }
+    // M5 Phase 2: every MainWindow model mutation funnels through here;
+    // keep the transition editor in sync with pruned/clamped transitions.
+    syncTransitionEditor();
 }
 
 void MainWindow::generateProxy(const QString &sourcePath) {
@@ -713,6 +802,17 @@ void MainWindow::requestFrameAt(double seconds) {
         QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, seconds));
         return;
     }
+
+    // M5 Phase 2: the cut under the playhead may carry a transition -
+    // make sure the HELD first frame of the incoming clip is on hand
+    // (fetched once per incoming clip on the dedicated worker B). The
+    // outgoing clip keeps streaming through the regular path below.
+    if (clip->trackIndex >= 0) {
+        fc::TransitionSample sample;
+        if (model_.resolveTransitionAt(frame, clip->trackIndex, sample)) {
+            ensureHeldIncomingFrame(sample);
+        }
+    }
     const double srcSeconds =
         static_cast<double>(frame - clip->timelineStart + clip->sourceInFrames) / fps_;
     const QString clipSource = QString::fromStdString(clip->sourcePath);
@@ -743,12 +843,47 @@ void MainWindow::applyProgramFrame() {
     }
     const fc::Clip *clip = model_.clipById(frameClipId_);
     QImage out = rawProgramFrame_; // shallow copy; bits() detaches below
+    if (out.format() != QImage::Format_RGBA8888) {
+        out = out.convertToFormat(QImage::Format_RGBA8888);
+    }
     if (clip && !clip->effectStack.empty()) {
-        if (out.format() != QImage::Format_RGBA8888) {
-            out = out.convertToFormat(QImage::Format_RGBA8888);
-        }
         fc::applyEffectStack(out.bits(), out.width(), out.height(), clip->effectStack);
     }
+
+    // M5 Phase 2: when the playhead sits inside a transition window AND
+    // the cached raw frame belongs to the outgoing (left) clip AND the
+    // held (incoming) frame is available, composite the cut live. The
+    // held frame runs the incoming clip's effect stack first (standard
+    // order: per-clip effects, then the transition blend), and is scaled
+    // to the outgoing frame's geometry when the sources differ.
+    if (clip) {
+        const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
+        fc::TransitionSample sample;
+        if (model_.resolveTransitionAt(frame, clip->trackIndex, sample) &&
+            sample.leftClipId == frameClipId_ && heldIncomingClipId_ == sample.rightClipId &&
+            !heldIncomingFrame_.isNull()) {
+            const fc::Clip *right = model_.clipById(sample.rightClipId);
+            QImage held = heldIncomingFrame_; // shallow; detaches on convert/scale
+            if (held.format() != QImage::Format_RGBA8888) {
+                held = held.convertToFormat(QImage::Format_RGBA8888);
+            }
+            if (right && !right->effectStack.empty()) {
+                fc::applyEffectStack(held.bits(), held.width(), held.height(), right->effectStack);
+            }
+            if (held.size() != out.size()) {
+                held = held.scaled(out.size(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
+            }
+            if (held.size() == out.size() && out.width() > 0 && out.height() > 0) {
+                QImage blended(out.width(), out.height(), QImage::Format_RGBA8888);
+                fc::applyTransition(out.bits(), held.bits(), blended.bits(), out.width(),
+                                    out.height(), sample.kind, sample.progress);
+                programCanvas_->setFrame(blended, rawFramePts_);
+                quickView_->canvas()->setFrame(blended, rawFramePts_);
+                return;
+            }
+        }
+    }
+
     programCanvas_->setFrame(out, rawFramePts_);
     quickView_->canvas()->setFrame(out, rawFramePts_);
 }
@@ -777,6 +912,130 @@ void MainWindow::restoreLayout() {
     QSettings settings;
     restoreGeometry(settings.value("main/geometry").toByteArray());
     restoreState(settings.value("main/state").toByteArray());
+}
+
+// ---------------------------------------------------------------------------
+// M5 Phase 2: cut transitions.
+// ---------------------------------------------------------------------------
+
+void MainWindow::addTransitionToSelectedClip(const QString &kind) {
+    fc::Clip *clip = selectedClipId_ > 0 ? model_.clipById(selectedClipId_) : nullptr;
+    if (!clip) {
+        statusBar()->showMessage(
+            tr("Select a timeline clip first (the transition goes on its outgoing cut)."), 6000);
+        return;
+    }
+    if (const fc::Track *track = model_.trackAt(clip->trackIndex); track && track->locked) {
+        statusBar()->showMessage(tr("Track %1 is locked - transition rejected.")
+                                     .arg(QString::fromStdString(track->name)));
+        return;
+    }
+    // The right neighbor sharing the cut (the boundary = this clip's end).
+    const fc::Clip *right = nullptr;
+    for (const fc::Clip &other : model_.clips()) {
+        if (other.trackIndex == clip->trackIndex && other.id != clip->id &&
+            other.timelineStart == clip->timelineEnd()) {
+            right = &other;
+            break;
+        }
+    }
+    if (!right) {
+        statusBar()->showMessage(
+            tr("The clip must touch another clip - transitions live on the cut between "
+               "two adjacent clips."),
+            6000);
+        return;
+    }
+    const int64_t cap = model_.maxTransitionDuration(clip->id, right->id);
+    if (cap < 1) {
+        statusBar()->showMessage(
+            tr("This cut cannot carry a transition (it may already have one, or the clip "
+               "is too short)."),
+            6000);
+        return;
+    }
+    // Default: 1 second of timeline frames, clamped to the clip extent.
+    int64_t want = static_cast<int64_t>(std::llround(1.0 * fps_));
+    if (want < 1) {
+        want = 1;
+    }
+    if (want > cap) {
+        want = cap;
+    }
+    const int64_t id = model_.addTransition(clip->id, right->id, kind.toStdString(), want);
+    if (id <= 0) {
+        statusBar()->showMessage(tr("Transition rejected - unknown kind or invalid duration."),
+                                 6000);
+        return;
+    }
+    const fc::TransitionDescriptor *d = fc::findTransition(kind.toStdString());
+    statusBar()->showMessage(tr("Added %1 on the cut %2 -> %3 (click its green marker to edit)")
+                                 .arg(d ? QString::fromStdString(d->label) : kind,
+                                      QString::fromStdString(clip->label),
+                                      QString::fromStdString(right->label)),
+                             6000);
+    updateSequenceDuration();
+    timeline_->selectTransition(id); // opens the editor on the new marker
+    applyProgramFrame();             // live when the playhead is in the window
+}
+
+void MainWindow::ensureHeldIncomingFrame(const fc::TransitionSample &sample) {
+    // Cached, in flight, or already failed for exactly this clip?
+    if (heldIncomingClipId_ == sample.rightClipId &&
+        (!heldIncomingFrame_.isNull() || bRequestInFlight_ ||
+         bFailedClipId_ == sample.rightClipId)) {
+        return;
+    }
+    const fc::Clip *right = model_.clipById(sample.rightClipId);
+    if (!right) {
+        return;
+    }
+    heldIncomingClipId_ = sample.rightClipId;
+    heldIncomingFrame_ = QImage();
+    pendingBFirstClipId_ = sample.rightClipId;
+    bRequestInFlight_ = true;
+
+    const QString clipSource = QString::fromStdString(right->sourcePath);
+    const int index = projectPanel_->library().indexOfPath(clipSource);
+    const QString path = (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                             ? projectPanel_->library().at(index)->proxyPath
+                             : clipSource;
+    if (path != bLoadedPath_) {
+        bLoadedPath_ = path;
+        pendingBFirst_ = true; // the mediaInfo handler fires the request
+        QMetaObject::invokeMethod(workerB_, "openQuiet", Q_ARG(QString, path));
+    } else {
+        pendingBFirst_ = false;
+        QMetaObject::invokeMethod(workerB_, "requestFrame",
+                                  Q_ARG(double, static_cast<double>(right->sourceInFrames) / fps_));
+    }
+}
+
+void MainWindow::pushTransitionToEditor(const fc::Transition &t) {
+    const fc::Clip *left = model_.clipById(t.leftClipId);
+    const fc::Clip *right = model_.clipById(t.rightClipId);
+    const fc::TransitionDescriptor *d = fc::findTransition(t.kind);
+    const QString label = d ? QString::fromStdString(d->label) : QString::fromStdString(t.kind);
+    const QString pair = tr("%1 -> %2")
+                             .arg(left ? QString::fromStdString(left->label) : tr("(removed)"),
+                                  right ? QString::fromStdString(right->label) : tr("(removed)"));
+    effectControls_->setTransition(t.id, label, t.durationFrames,
+                                   left ? left->durationFrames() : t.durationFrames, pair, fps_);
+}
+
+void MainWindow::syncTransitionEditor() {
+    if (selectedTransitionId_ < 0) {
+        return;
+    }
+    const fc::Transition *t = model_.transitionById(selectedTransitionId_);
+    if (!t) {
+        // Pruned by a mutation (clip removed / moved / trimmed apart).
+        selectedTransitionId_ = -1;
+        timeline_->clearTransitionSelection();
+        effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
+        return;
+    }
+    pushTransitionToEditor(*t); // durations may have clamped
 }
 
 void MainWindow::saveLayout() const {

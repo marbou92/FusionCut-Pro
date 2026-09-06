@@ -86,6 +86,7 @@ bool TimelineModel::removeClip(int64_t id) {
     for (auto it = clips_.begin(); it != clips_.end(); ++it) {
         if (it->id == id) {
             clips_.erase(it);
+            pruneTransitions();
             return true;
         }
     }
@@ -104,6 +105,7 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
         if (frame > start && frame < end) {
             const int64_t sourceDelta =
                 static_cast<int64_t>(std::llround(static_cast<double>(frame - start) * clip.rate));
+            const int64_t splitClipId = clip.id; // clip dangles after insert below
             Clip right = clip;
             right.id = nextId_++;
             right.label = clip.label + " (2)";
@@ -111,9 +113,19 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
             right.timelineStart = frame;
             clip.sourceOutFrames = right.sourceInFrames; // left half ends here
             clips_.insert(clips_.begin() + static_cast<ptrdiff_t>(i + 1), right);
+            // M5 Phase 2: a transition on this clip's END boundary now
+            // belongs to the RIGHT half (the half that owns the cut).
+            for (Transition &t : transitions_) {
+                if (t.leftClipId == splitClipId) {
+                    t.leftClipId = right.id;
+                }
+            }
             split = true;
             break; // one split per call; caller can repeat
         }
+    }
+    if (split) {
+        pruneTransitions(); // clamps durations that no longer fit
     }
     return split;
 }
@@ -124,6 +136,7 @@ bool TimelineModel::moveClip(int64_t id, int64_t newTimelineStart) {
     }
     if (Clip *clip = clipById(id)) {
         clip->timelineStart = newTimelineStart;
+        pruneTransitions();
         return true;
     }
     return false;
@@ -162,6 +175,7 @@ bool TimelineModel::moveClipTo(int64_t id, int newTrackIndex, int64_t newTimelin
     }
     clip->trackIndex = newTrackIndex;
     clip->timelineStart = newTimelineStart;
+    pruneTransitions();
     return true;
 }
 
@@ -253,6 +267,10 @@ bool TimelineModel::trimClipStart(int64_t id, int64_t deltaFrames) {
     }
     clip->sourceInFrames = newSourceIn;
     clip->timelineStart = newStart;
+    // The clip's END (start + duration) is unchanged, so an outgoing
+    // transition survives with its boundary intact; the shrunken duration
+    // may clamp it.
+    pruneTransitions();
     return true;
 }
 
@@ -268,6 +286,7 @@ bool TimelineModel::trimClipEnd(int64_t id, int64_t deltaFrames) {
         return false;
     }
     clip->sourceOutFrames = newSourceOut;
+    pruneTransitions();
     return true;
 }
 
@@ -287,6 +306,9 @@ bool TimelineModel::rippleDelete(int64_t id) {
             other.timelineStart -= dur;
         }
     }
+    // Transitions of later pairs survive the shift (both sides move
+    // together); pruning again is idempotent.
+    pruneTransitions();
     return true;
 }
 
@@ -297,8 +319,17 @@ bool TimelineModel::rippleTrimClipEnd(int64_t id, int64_t deltaFrames) {
     }
     const int track = clip->trackIndex;
     const int64_t origEnd = clip->timelineEnd();
-    if (!trimClipEnd(id, deltaFrames)) {
-        return false;
+    {
+        // Trim WITHOUT pruning: the neighbor shift below re-attaches the
+        // right clip to the moved end, so a boundary transition must
+        // survive the intermediate state.
+        const int64_t sourceDelta =
+            static_cast<int64_t>(std::llround(static_cast<double>(deltaFrames) * clip->rate));
+        const int64_t newSourceOut = clip->sourceOutFrames + sourceDelta;
+        if (newSourceOut <= clip->sourceInFrames) {
+            return false;
+        }
+        clip->sourceOutFrames = newSourceOut;
     }
     // Shift the following clips by exactly the applied delta so they stay
     // attached to the new edge. Non-negative starts are guaranteed: a
@@ -310,6 +341,7 @@ bool TimelineModel::rippleTrimClipEnd(int64_t id, int64_t deltaFrames) {
             other.timelineStart += deltaFrames;
         }
     }
+    pruneTransitions(); // clamps the duration to the new left extent
     return true;
 }
 
@@ -346,6 +378,9 @@ bool TimelineModel::rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrame
     left->sourceOutFrames += leftSrcDelta;
     right->sourceInFrames += rightSrcDelta;
     right->timelineStart += deltaFrames;
+    // The boundary moved with BOTH clips (still adjacent); a transition on
+    // it survives, its duration clamped to the new left extent.
+    pruneTransitions();
     return true;
 }
 
@@ -409,6 +444,167 @@ int64_t TimelineModel::durationFrames() const {
 
 double TimelineModel::durationSeconds() const {
     return static_cast<double>(durationFrames()) / fps_;
+}
+
+// ---------------------------------------------------------------------------
+// M5 Phase 2: cut transitions.
+// ---------------------------------------------------------------------------
+
+int64_t TimelineModel::maxTransitionDuration(int64_t leftClipId, int64_t rightClipId) const {
+    const Clip *left = clipById(leftClipId);
+    const Clip *right = clipById(rightClipId);
+    if (!left || !right || left == right) {
+        return 0;
+    }
+    if (left->trackIndex != right->trackIndex) {
+        return 0;
+    }
+    const Track *track = trackAt(left->trackIndex);
+    if (!track || track->isAudio) {
+        return 0;
+    }
+    if (right->timelineStart != left->timelineEnd()) {
+        return 0; // not adjacent
+    }
+    if (transitionBetween(leftClipId, rightClipId) != nullptr) {
+        return 0; // boundary already carries a transition
+    }
+    return left->durationFrames();
+}
+
+int64_t TimelineModel::addTransition(int64_t leftClipId, int64_t rightClipId,
+                                     const std::string &kind, int64_t durationFrames) {
+    if (kind.empty() || findTransition(kind) == nullptr) {
+        return 0;
+    }
+    const int64_t cap = maxTransitionDuration(leftClipId, rightClipId);
+    if (cap <= 0 || durationFrames < 1 || durationFrames > cap) {
+        return 0;
+    }
+    Transition t;
+    t.id = nextId_++;
+    t.trackIndex = clipById(leftClipId)->trackIndex;
+    t.leftClipId = leftClipId;
+    t.rightClipId = rightClipId;
+    t.kind = kind;
+    t.durationFrames = durationFrames;
+    transitions_.push_back(t);
+    return t.id;
+}
+
+bool TimelineModel::removeTransition(int64_t id) {
+    for (auto it = transitions_.begin(); it != transitions_.end(); ++it) {
+        if (it->id == id) {
+            transitions_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TimelineModel::setTransitionDuration(int64_t id, int64_t durationFrames) {
+    const Transition *t = transitionById(id);
+    if (!t) {
+        return false;
+    }
+    const Clip *left = clipById(t->leftClipId);
+    if (!left) {
+        return false;
+    }
+    if (durationFrames < 1 || durationFrames > left->durationFrames()) {
+        return false;
+    }
+    // transitionById returned a pointer into the vector; re-find mutably.
+    for (Transition &tr : transitions_) {
+        if (tr.id == id) {
+            tr.durationFrames = durationFrames;
+            return true;
+        }
+    }
+    return false;
+}
+
+const Transition *TimelineModel::transitionById(int64_t id) const {
+    for (const Transition &t : transitions_) {
+        if (t.id == id) {
+            return &t;
+        }
+    }
+    return nullptr;
+}
+
+const Transition *TimelineModel::transitionBetween(int64_t leftClipId, int64_t rightClipId) const {
+    for (const Transition &t : transitions_) {
+        if (t.leftClipId == leftClipId && t.rightClipId == rightClipId) {
+            return &t;
+        }
+    }
+    return nullptr;
+}
+
+bool TimelineModel::resolveTransitionAt(int64_t frame, int trackIndex,
+                                        TransitionSample &out) const {
+    for (const Transition &t : transitions_) {
+        if (t.trackIndex != trackIndex || t.durationFrames < 1) {
+            continue;
+        }
+        const Clip *left = clipById(t.leftClipId);
+        const Clip *right = clipById(t.rightClipId);
+        if (!left || !right || left->trackIndex != trackIndex) {
+            continue;
+        }
+        // Defensive: the prune invariant guarantees duration <= left
+        // duration, but resolve must never hand out an out-of-clip window.
+        int64_t duration = t.durationFrames;
+        if (duration > left->durationFrames()) {
+            duration = left->durationFrames();
+        }
+        if (duration < 1) {
+            continue;
+        }
+        const int64_t boundary = left->timelineEnd();
+        const int64_t windowStart = boundary - duration;
+        if (frame < windowStart || frame >= boundary) {
+            continue;
+        }
+        out.transitionId = t.id;
+        out.trackIndex = trackIndex;
+        out.kind = t.kind;
+        out.leftClipId = t.leftClipId;
+        out.rightClipId = t.rightClipId;
+        out.windowStartFrame = windowStart;
+        out.windowEndFrame = boundary;
+        out.progress = static_cast<double>(frame - windowStart) / static_cast<double>(duration);
+        out.leftSourceFrame = left->sourceInFrames +
+                              static_cast<int64_t>(std::llround(
+                                  static_cast<double>(frame - left->timelineStart) * left->rate));
+        out.rightSourceFrame = right->sourceInFrames; // held first frame
+        return true;
+    }
+    return false;
+}
+
+void TimelineModel::pruneTransitions() {
+    for (auto it = transitions_.begin(); it != transitions_.end();) {
+        const Clip *left = clipById(it->leftClipId);
+        const Clip *right = clipById(it->rightClipId);
+        bool valid = left && right && left != right && left->trackIndex == right->trackIndex &&
+                     right->timelineStart == left->timelineEnd();
+        if (valid) {
+            const int64_t leftDur = left->durationFrames();
+            if (it->durationFrames > leftDur) {
+                it->durationFrames = leftDur; // clamp: window stays inside
+            }
+            if (it->durationFrames < 1) {
+                valid = false;
+            }
+        }
+        if (!valid) {
+            it = transitions_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 } // namespace fc

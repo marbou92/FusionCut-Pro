@@ -36,10 +36,20 @@ public:
 public slots:
     void setRazorMode(bool on);
     void clearSelection();
+    // M5 Phase 2: drop the transition selection (the cut marker in the
+    // lane, not a clip).
+    void clearTransitionSelection();
+    // M5 Phase 2: select a cut transition programmatically (after adding
+    // one); emits transitionSelected so the editor follows.
+    void selectTransition(int64_t transitionId);
 
 signals:
     void playheadMoved(double seconds);
     void clipSelected(int64_t clipId);
+    // M5 Phase 2: a cut transition marker was clicked (id > 0) or the
+    // selection was cleared by clicking elsewhere (-1). MainWindow routes
+    // it to the transition editor in Effect Controls.
+    void transitionSelected(int64_t transitionId);
     void splitRequested(int trackIndex, int64_t frame);
     void deleteRequested();
     // M4b:
@@ -80,6 +90,9 @@ private:
     void drawHeaderColumn(QPainter &painter) const;
     void drawRuler(QPainter &painter) const;
     void drawClips(QPainter &painter) const;
+    // M5 Phase 2: cut transition markers (the window box on the boundary
+    // between two adjacent clips, with an X cross).
+    void drawTransitions(QPainter &painter) const;
     void drawDragGhost(QPainter &painter) const;
     void drawRazorHover(QPainter &painter) const;
     QColor trackColor(int index) const;
@@ -88,6 +101,11 @@ private:
     double trackDimFactor(int index) const;
     // Hit-test the clip at a position; returns nullptr for empty space.
     const fc::Clip *clipAtPos(const QPoint &pos, int *rowOut = nullptr) const;
+    // M5 Phase 2: hit-test the transition marker at a position (its
+    // central band, so clip edge-drag trims keep working around it).
+    const fc::Transition *transitionAtPos(const QPoint &pos) const;
+    // The rect the transition marker occupies on its lane.
+    QRect transitionRect(const fc::Transition &t) const;
     // Start a drag interaction from a press inside a clip.
     void beginClipDrag(const QPoint &pos);
     void resetDrag();
@@ -101,6 +119,7 @@ private:
     double pps_ = 60.0;
     double fps_ = 24.0;
     int64_t selectedClipId_ = -1;
+    int64_t selectedTransitionId_ = -1; // M5 Phase 2
     bool razorMode_ = false;
     bool rippleEnabled_ = false;
     QSlider *zoom_ = nullptr;

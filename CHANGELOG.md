@@ -4,6 +4,163 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-09-06
+
+**M5 Phase 2: transitions ship. 36 deterministic cut transitions across
+Dissolve / Wipe / Slide / Push / Zoom, a frame-accurate transition model
+on every cut between adjacent clips, and a live cross-clip composite in
+the program monitor - the M4b topmost-clip-wins monitor now blends
+across boundaries. Green X markers on the timeline, a Transitions
+browser panel, a transition editor (duration + remove) in Effect
+Controls, and Ctrl+D for the default cross dissolve.**
+
+### Added - transitions engine (fc_core, new `transitions.{h,cpp}`)
+- `fc::TransitionDescriptor` + `transitionCatalog()`: 36 transitions in
+  5 categories. Dissolve (6): Cross Dissolve, Dip to Black, Dip to
+  White, Additive Dissolve (a screen-blend brightness hump that vanishes
+  at both endpoints), Film Dissolve (per-pixel hash-perturbed mix, same
+  integer-hash family as the film grain), Blur Dissolve (cross dissolve
+  through a progressive separable box blur). Wipe (19): Left / Right /
+  Up / Down (NLE convention: the reveal edge travels in the named
+  direction), four corner wipes, Iris Box, Iris Box Out, Iris Circle,
+  Iris Diamond, Clock Wipe + Reverse, Blinds Horizontal/Vertical (8
+  bands), Checker Wipe (hash-thresholded 8px cells), Barn Doors
+  Horizontal/Vertical. Slide (4): the incoming clip slides in over the
+  static outgoing clip, entering at the named screen edge. Push (4):
+  the incoming clip enters at the named edge and pushes the outgoing
+  clip out (both translate). Zoom (3): Zoom In (outgoing magnifies),
+  Zoom Out (outgoing shrinks into a black letterbox), Zoom Through
+  (outgoing magnifies while the incoming demagnifies).
+- `fc::applyTransition(a, b, out, w, h, kind, progress)`: composites
+  two RGBA8888 frames into a third, distinct buffer. Every transition
+  is ENDPOINT EXACT (p <= 0 returns `a` byte-for-byte, p >= 1 returns
+  `b`); pixel-CENTER geometry throughout (x + 0.5); nearest-neighbor
+  sampling for slide/push/zoom with edge clamping; unknown kinds pass
+  the outgoing frame through (a saved project from a newer catalog
+  degrades to a hard cut, never crashes). Deterministic by
+  construction: integer or explicitly-rounded double math, seeded
+  hashes, no libm-sensitive trig in any threshold (the clock wipes
+  derive their quadrant from atan2 at comfortably non-borderline
+  angles; test fixtures pin them).
+
+### Added - the transition model (`timeline_model.{h,cpp}`)
+- `fc::Transition`: one placed transition on the shared boundary of two
+  ADJACENT clips (left end == right start, same video track). WINDOW
+  SEMANTICS, chosen for the no-overlap model: the window is the LAST
+  `duration` frames of the left clip; during it the outgoing clip keeps
+  playing LIVE at its natural mapping while the incoming clip is
+  pre-rolled as a HELD image of its first source frame; at the cut the
+  incoming clip plays from its true in-point. Zero overlap, zero
+  reflow, zero content loss - no clip extent ever moves when a
+  transition is added, edited, or removed (the alternative - a
+  physically overlapping pre-roll - would require overlapping clips,
+  which the M4b model deliberately forbids).
+- API: `addTransition` (validates adjacency, same video track, catalog
+  kind, boundary free, duration in [1, left duration]),
+  `maxTransitionDuration` (the UI default clamp),
+  `removeTransition`, `setTransitionDuration` (re-validated),
+  `transitionById` / `transitionBetween`, and
+  `resolveTransitionAt(frame, track, TransitionSample&)` - the
+  compositor's resolver: window bounds, progress, the outgoing clip's
+  LIVE source frame (in-point + rate aware), and the incoming clip's
+  HELD first frame.
+- INVARIANT PRUNING: every mutating operation keeps the transition set
+  consistent - broken pairs (clip removed, moved away, trimmed apart)
+  are dropped, durations that no longer fit the shrunken left clip are
+  clamped (rolling edits and ripple trims keep their boundary and
+  survive), and `splitAt` re-targets a transition to the right half
+  (the half that owns the cut), clamping when the split lands inside
+  the window. The model battery caught a real bug here on its first
+  run: the re-target loop read the split clip through a reference
+  dangling after the vector insert (the transition was silently
+  dropped); the fix captures the id before the insert.
+
+### Added - transition preview + UI (app layer)
+- `DecodeWorker::openQuiet`: an open without the t=0 display frame, for
+  the new second decode worker (worker B) whose only job is the HELD
+  first frame of the incoming clip - fetched once per incoming clip
+  (proxy-aware), cached, and reused for every frame of the window, so
+  the outgoing clip streams at full rate through the existing worker.
+  Worker B never drives the program source; its failures degrade the
+  composite to outgoing-only with a status message.
+- `MainWindow::applyProgramFrame` now composites when the playhead sits
+  in a window and both sides are cached: each side's effect stack
+  applies to its own frame FIRST (standard order), the held frame is
+  scaled to the outgoing geometry when sources differ, then
+  `fc::applyTransition` blends at the window progress - live during
+  playback, scrubbing, and duration-slider edits.
+- `TransitionsPanel` (new, left dock tab): searchable catalog browser
+  (mirrors the Effects panel), double-click or Apply adds to the
+  selected clip's outgoing cut.
+- `TimelinePanel`: green X markers spanning each transition window on
+  the lane (white border when selected), hit-tested in the central band
+  only so clip edge-drag trims keep working around them; marker click
+  selects the transition; `selectTransition` (programmatic, after add).
+- `EffectControlsPanel`: a transition editor page (stacked with the
+  effect stack editor) - kind label, the cut's clip pair, a live
+  duration slider (1..left-clip extent, frames + seconds), and Remove.
+- Menu: "Apply Default Transition" (Ctrl+D) is live - a 1 s cross
+  dissolve on the selected clip's cut.
+- `MainWindow::syncTransitionEditor` runs after every model mutation
+  (they all funnel through `updateSequenceDuration`): a pruned selected
+  transition clears the editor; clamped durations refresh the slider.
+
+### Tests - `fc_transition_tests` (5th ctest suite, 4531 checks)
+- Catalog integrity: 36 entries (>= 30 per the M5 milestone), unique
+  ids, category census (6/19/4/4/3), lookups.
+- Endpoint exactness for EVERY kind on two fixture pairs (a luma
+  gradient vs a solid, then a per-channel-distinct pair that would
+  catch channel swaps): p = 0 / 1 / clamped outside values are
+  byte-identical to a / b.
+- Per-family reference pixels, hand-derived from the geometry
+  definitions: cross/dip/additive arithmetic (the dips hit the pure dip
+  color exactly at their midpoint), film-dissolve determinism + range
+  containment, blur-dissolve flat-pair exactness + radius-0 identity
+  with the plain cross; wipe columns/rows/diagonals including the
+  inclusive-boundary diagonal (d = 8 at p = 0.5), iris 4x4 block +
+  complement, circle/diamond thresholds, clock quadrant coverage both
+  directions, blinds alternation, checker full-pattern against the
+  documented hash + pixel binary-ness, barn-door symmetry; slide/push
+  exact source-column mappings on per-pixel-distinct fixtures; zoom
+  sampling coordinates + black letterbox corners.
+- Model battery: add/reject (adjacency, audio track, cross-track,
+  unknown kind, duplicate boundary, duration bounds), whole-clip
+  transitions, duration edits, resolve windows (edges inclusive/
+  exclusive, in-points, rate 0.5 mapping, progress fractions), and the
+  prune matrix under every M4b mutation - removeClip, moveClip,
+  moveClipTo, trimClipEnd (kills), trimClipStart (survives + clamps),
+  rollEdit (survives, boundary moves, clamps), rippleTrimClipEnd
+  (survives - the neighbor shifts with the new edge), rippleDelete
+  (both-side pairs die, later pairs shift together and survive),
+  splitAt (re-target + clamp, including a split inside the window),
+  back-to-back chains, multi-track independence, effect-stack
+  coexistence with split propagation.
+
+### Known scope (M5 Phase 2 remainder)
+- The incoming clip is HELD (a still of its first frame) during the
+  window: an animated pre-roll needs physically overlapping clips,
+  which lands with the compositor rework alongside the render/export
+  pipeline. Transitions preview only for now: project serialization
+  (transitions + effect stacks) and export-side application land
+  together, as do keyframes, audio crossfades, and the catalog
+  expansion to 50+ effects.
+
+### Verification
+- Real Qt 5.15.15 + FFmpeg 7.1.5 in-sandbox (the v0.4.13 toolchain):
+  clean configure + full compile + LINK of FusionCutPro (14 app TUs
+  incl. the new panel, AUTOMOC for the new signals/slots); ctest 5/5
+  suites (core 88 + timeline 130 + effects 1170 + transitions 4531 +
+  media 317).
+- clang-format 22.1.8 (the CI-pinned version) gate: 0 violations.
+- M5 Phase 2 symbols verified in the linked binary (nm:
+  applyTransition, transitionCatalog, addTransitionToSelectedClip,
+  ensureHeldIncomingFrame, openQuiet).
+- First-draft failures during development: 21 of 4527 - one real
+  engine-adjacent bug (the splitAt re-target dangling reference, fixed
+  in the model) and 3 test-authoring errors (a leftover transition in
+  an assertion, a rate-0.5 duration miscalculation, an impossible roll
+  delta); all re-derived or fixed before delivery.
+
 ## [0.5.0] - 2026-09-06
 
 **M5 Phase 1: the effects engine ships. A pure-C++ per-clip effect

@@ -212,6 +212,23 @@ void TimelinePanel::clearSelection() {
     update();
 }
 
+void TimelinePanel::clearTransitionSelection() {
+    if (selectedTransitionId_ != -1) {
+        selectedTransitionId_ = -1;
+        update();
+    }
+}
+
+void TimelinePanel::selectTransition(int64_t transitionId) {
+    if (!model_ || model_->transitionById(transitionId) == nullptr) {
+        return; // stale or unknown id - keep the current state
+    }
+    selectedTransitionId_ = transitionId;
+    selectedClipId_ = -1;
+    emit transitionSelected(transitionId);
+    update();
+}
+
 void TimelinePanel::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     painter.fillRect(rect(), kPanelBg);
@@ -219,6 +236,7 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
     drawHeaderColumn(painter);
     drawRuler(painter);
     drawClips(painter);
+    drawTransitions(painter);
     drawDragGhost(painter);
     drawRazorHover(painter);
 
@@ -407,6 +425,80 @@ void TimelinePanel::drawRazorHover(QPainter &painter) const {
                      areaHeight() + contentTop());
 }
 
+// ---------------------------------------------------------------------------
+// M5 Phase 2: cut transition markers.
+// ---------------------------------------------------------------------------
+
+QRect TimelinePanel::transitionRect(const fc::Transition &t) const {
+    const fc::Clip *left = model_ ? model_->clipById(t.leftClipId) : nullptr;
+    if (!left) {
+        return QRect();
+    }
+    const int64_t boundary = left->timelineEnd();
+    const int64_t duration = t.durationFrames < 1 ? 1 : t.durationFrames;
+    const int x0 = frameToX(boundary - duration);
+    const int x1 = frameToX(boundary);
+    const QRect lane = laneRect(t.trackIndex);
+    return QRect(x0, lane.top() + 4, std::max(10, x1 - x0), lane.height() - 8);
+}
+
+void TimelinePanel::drawTransitions(QPainter &painter) const {
+    if (!model_) {
+        return;
+    }
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    for (const fc::Transition &t : model_->transitions()) {
+        const fc::Clip *left = model_->clipById(t.leftClipId);
+        if (!left) {
+            continue; // pruned models never hold these; defensive only
+        }
+        const QRect rect = transitionRect(t);
+        if (rect.width() <= 0 || rect.height() <= 0) {
+            continue;
+        }
+        const double dim = trackDimFactor(t.trackIndex);
+        const bool selected = t.id == selectedTransitionId_;
+
+        QColor fill(0x2E, 0xA8, 0x4A, selected ? 150 : static_cast<int>(90 * dim));
+        QColor border(0x3C, 0xBF, 0x5F, static_cast<int>(255 * dim));
+        if (selected) {
+            border = QColor(0xFF, 0xFF, 0xFF);
+        }
+        painter.setBrush(fill);
+        painter.setPen(border);
+        painter.drawRect(rect);
+        // The X cross - the universal transition glyph.
+        painter.setPen(QColor(0x10, 0x18, 0x10, static_cast<int>(255 * dim)));
+        painter.drawLine(rect.topLeft() + QPoint(2, 2), rect.bottomRight() + QPoint(-2, -2));
+        painter.drawLine(rect.topRight() + QPoint(-2, 2), rect.bottomLeft() + QPoint(2, -2));
+    }
+}
+
+const fc::Transition *TimelinePanel::transitionAtPos(const QPoint &pos) const {
+    if (!model_) {
+        return nullptr;
+    }
+    const int row = trackRowAt(pos.y());
+    if (row < 0 || pos.x() < kHeaderWidth) {
+        return nullptr;
+    }
+    for (const fc::Transition &t : model_->transitions()) {
+        if (t.trackIndex != row) {
+            continue;
+        }
+        const QRect rect = transitionRect(t);
+        // Central band only: the top/bottom strips stay reachable for clip
+        // edge-drag trims and body moves around the marker.
+        const int cy = (rect.top() + rect.bottom()) / 2;
+        const int half = 10;
+        if (pos.x() >= rect.left() && pos.x() <= rect.right() && pos.y() >= cy - half &&
+            pos.y() <= cy + half) {
+            return &t;
+        }
+    }
+    return nullptr;
+}
+
 const fc::Clip *TimelinePanel::clipAtPos(const QPoint &pos, int *rowOut) const {
     if (!model_) {
         return nullptr;
@@ -542,6 +634,19 @@ void TimelinePanel::mousePressEvent(QMouseEvent *event) {
     }
 
     if (event->button() == Qt::LeftButton && model_) {
+        // M5 Phase 2: clicking a transition marker selects it (the clip
+        // selection yields to the editor's transition page).
+        if (const fc::Transition *t = transitionAtPos(event->pos())) {
+            selectedTransitionId_ = t->id;
+            selectedClipId_ = -1;
+            emit transitionSelected(t->id);
+            update();
+            return;
+        }
+        if (selectedTransitionId_ != -1) {
+            selectedTransitionId_ = -1;
+            emit transitionSelected(-1);
+        }
         beginClipDrag(event->pos());
         if (dragClipId_ > 0) {
             selectedClipId_ = dragClipId_;

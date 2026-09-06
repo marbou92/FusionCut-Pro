@@ -55,6 +55,24 @@ void DecodeWorker::open(const QString &path) {
     requestFrame(0.0);
 }
 
+void DecodeWorker::openQuiet(const QString &path) {
+    std::string error;
+    if (!d->decoder.open(path.toStdString(), error)) {
+        d->openPath.clear();
+        emit failed(QString::fromStdString(error));
+        return;
+    }
+    d->openPath = path;
+    d->lastPts = -1.0;
+    d->fps = d->decoder.info().video.frameRate.toDouble();
+    if (d->fps <= 0.0) {
+        d->fps = 24.0;
+    }
+
+    const fc::MediaInfo &info = d->decoder.info();
+    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount);
+}
+
 void DecodeWorker::requestFrame(double seconds) {
     if (d->openPath.isEmpty()) {
         return;

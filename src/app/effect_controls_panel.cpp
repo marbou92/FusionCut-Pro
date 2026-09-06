@@ -6,6 +6,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QVBoxLayout>
 
 #include "effects.h"
@@ -27,17 +28,19 @@ QString formatValue(const fc::EffectParamDescriptor &p, double v) {
 } // namespace
 
 EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
-    clipLabel_ = new QLabel(tr("No clip selected"), this);
+    // ---- Stack editor page (M5 Phase 1) ----
+    stackPage_ = new QWidget(this);
+    clipLabel_ = new QLabel(tr("No clip selected"), stackPage_);
     clipLabel_->setWordWrap(true);
 
-    list_ = new QListWidget(this);
+    list_ = new QListWidget(stackPage_);
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
 
-    upButton_ = new QPushButton(tr("Up"), this);
-    downButton_ = new QPushButton(tr("Down"), this);
-    toggleButton_ = new QPushButton(tr("On/Off"), this);
-    removeButton_ = new QPushButton(tr("Remove"), this);
-    auto *buttonRow = new QWidget(this);
+    upButton_ = new QPushButton(tr("Up"), stackPage_);
+    downButton_ = new QPushButton(tr("Down"), stackPage_);
+    toggleButton_ = new QPushButton(tr("On/Off"), stackPage_);
+    removeButton_ = new QPushButton(tr("Remove"), stackPage_);
+    auto *buttonRow = new QWidget(stackPage_);
     auto *buttonLayout = new QHBoxLayout(buttonRow);
     buttonLayout->setContentsMargins(0, 0, 0, 0);
     buttonLayout->addWidget(upButton_);
@@ -45,17 +48,53 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
     buttonLayout->addWidget(toggleButton_);
     buttonLayout->addWidget(removeButton_);
 
-    paramsHost_ = new QWidget(this);
-    paramsScroll_ = new QScrollArea(this);
+    paramsHost_ = new QWidget(stackPage_);
+    paramsScroll_ = new QScrollArea(stackPage_);
     paramsScroll_->setWidgetResizable(true);
     paramsScroll_->setWidget(paramsHost_);
 
+    auto *stackLayout = new QVBoxLayout(stackPage_);
+    stackLayout->setContentsMargins(0, 0, 0, 0);
+    stackLayout->addWidget(clipLabel_);
+    stackLayout->addWidget(list_, 1);
+    stackLayout->addWidget(buttonRow);
+    stackLayout->addWidget(paramsScroll_, 2);
+
+    // ---- Transition editor page (M5 Phase 2) ----
+    transitionPage_ = new QWidget(this);
+    transitionLabel_ = new QLabel(tr("No transition selected"), transitionPage_);
+    transitionLabel_->setWordWrap(true);
+    transitionPair_ = new QLabel(QString(), transitionPage_);
+    transitionPair_->setWordWrap(true);
+    durationSlider_ = new QSlider(Qt::Horizontal, transitionPage_);
+    durationSlider_->setRange(1, 1);
+    durationValue_ = new QLabel(QString(), transitionPage_);
+    transitionRemove_ = new QPushButton(tr("Remove Transition"), transitionPage_);
+
+    auto *durRow = new QWidget(transitionPage_);
+    auto *durLayout = new QHBoxLayout(durRow);
+    durLayout->setContentsMargins(0, 0, 0, 0);
+    auto *durName = new QLabel(tr("Duration:"), durRow);
+    durName->setMinimumWidth(90);
+    durLayout->addWidget(durName);
+    durLayout->addWidget(durationSlider_, 1);
+    durLayout->addWidget(durationValue_);
+
+    auto *transLayout = new QVBoxLayout(transitionPage_);
+    transLayout->setContentsMargins(0, 0, 0, 0);
+    transLayout->addWidget(transitionLabel_);
+    transLayout->addWidget(transitionPair_);
+    transLayout->addWidget(durRow);
+    transLayout->addStretch(1);
+    transLayout->addWidget(transitionRemove_);
+
+    pages_ = new QStackedWidget(this);
+    pages_->addWidget(stackPage_);
+    pages_->addWidget(transitionPage_);
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6, 6, 6, 6);
-    layout->addWidget(clipLabel_);
-    layout->addWidget(list_, 1);
-    layout->addWidget(buttonRow);
-    layout->addWidget(paramsScroll_, 2);
+    layout->addWidget(pages_);
 
     connect(list_, &QListWidget::currentRowChanged, this, [this](int) { rebuildParams(); });
 
@@ -107,6 +146,20 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
         rebuildParams();
         emitStack();
     });
+
+    // ---- Transition editor wiring ----
+    connect(durationSlider_, &QSlider::valueChanged, this, [this](int frames) {
+        if (transitionId_ < 0) {
+            return;
+        }
+        updateDurationLabel();
+        emit transitionDurationChanged(transitionId_, frames);
+    });
+    connect(transitionRemove_, &QPushButton::clicked, this, [this] {
+        if (transitionId_ >= 0) {
+            emit transitionRemoveRequested(transitionId_);
+        }
+    });
 }
 
 void EffectControlsPanel::setStack(int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
@@ -119,6 +172,48 @@ void EffectControlsPanel::setStack(int64_t clipId, const std::vector<fc::EffectI
         list_->setCurrentRow(0);
     }
     rebuildParams();
+    pages_->setCurrentWidget(stackPage_);
+}
+
+void EffectControlsPanel::setTransition(int64_t transitionId, const QString &kindLabel,
+                                        int64_t durationFrames, int64_t maxDurationFrames,
+                                        const QString &pairLabel, double fps) {
+    transitionId_ = transitionId;
+    transitionFps_ = fps > 1.0 ? fps : 24.0;
+    if (transitionId < 0) {
+        transitionLabel_->setText(tr("No transition selected"));
+        transitionPair_->clear();
+        durationSlider_->setRange(1, 1);
+        durationSlider_->setValue(1);
+        durationValue_->clear();
+        pages_->setCurrentWidget(transitionPage_);
+        return;
+    }
+    transitionMaxFrames_ = maxDurationFrames < 1 ? 1 : maxDurationFrames;
+    transitionLabel_->setText(tr("Transition: %1").arg(kindLabel));
+    transitionPair_->setText(tr("Cut: %1").arg(pairLabel));
+    durationSlider_->blockSignals(true);
+    durationSlider_->setRange(1, static_cast<int>(transitionMaxFrames_));
+    const int clamped = static_cast<int>(
+        durationFrames < 1
+            ? 1
+            : (durationFrames > transitionMaxFrames_ ? transitionMaxFrames_ : durationFrames));
+    durationSlider_->setValue(clamped);
+    durationSlider_->blockSignals(false);
+    updateDurationLabel();
+    pages_->setCurrentWidget(transitionPage_);
+}
+
+void EffectControlsPanel::updateDurationLabel() {
+    if (transitionId_ < 0) {
+        durationValue_->clear();
+        return;
+    }
+    const int64_t frames = durationSlider_->value();
+    durationValue_->setText(
+        tr("%1 f (%2 s)")
+            .arg(qlonglong(frames))
+            .arg(QString::number(static_cast<double>(frames) / transitionFps_, 'f', 2)));
 }
 
 void EffectControlsPanel::rebuildList() {

@@ -10,6 +10,10 @@ add_executable(fc_effect_tests effect_tests.cpp)
 target_link_libraries(fc_effect_tests PRIVATE fc_core)
 add_test(NAME effects COMMAND fc_effect_tests)
 
+add_executable(fc_transition_tests transition_tests.cpp)
+target_link_libraries(fc_transition_tests PRIVATE fc_core)
+add_test(NAME transitions COMMAND fc_transition_tests)
+
 if(TARGET fc_media)
     add_executable(fc_media_tests
         media_tests.cpp

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "effects.h"
+#include "transitions.h"
 
 namespace fc {
 
@@ -39,13 +40,55 @@ struct Track {
     bool solo = false;
 };
 
+// M5 Phase 2: one transition placed on the shared boundary of two ADJACENT
+// clips (left.timelineEnd() == right.timelineStart(), same video track).
+//
+// Window semantics (frame-accurate, zero overlap, zero reflow):
+//   * The transition window is the LAST durationFrames frames of the LEFT
+//     clip: [boundary - duration, boundary) where boundary = left end.
+//   * During the window the outgoing (left) clip keeps playing LIVE at its
+//     natural mapping; the incoming (right) clip is PRE-ROLLED as a HELD
+//     image of its first source frame (sourceIn). At the cut the right
+//     clip plays from its true in-point - no content is skipped, frozen
+//     after the cut, or lost, and no clip extent ever moves.
+//   * Constraints: 1 <= duration <= left.durationFrames(). Chains are free
+//     (W->X and X->Y coexist: their windows live in W's and X's tails).
+struct Transition {
+    int64_t id = 0;
+    int trackIndex = 0;
+    int64_t leftClipId = 0;  // the clip whose END is the cut
+    int64_t rightClipId = 0; // the clip whose START is the cut
+    std::string kind;        // transitions.h catalog id ("dissolve.cross")
+    int64_t durationFrames = 0;
+};
+
+// One resolvable sample of a transition at a timeline frame (what the
+// cross-clip compositor renders: blend frame A at leftSourceFrame with the
+// held frame B at rightSourceFrame, at `progress`).
+struct TransitionSample {
+    int64_t transitionId = 0;
+    int trackIndex = 0;
+    std::string kind;
+    int64_t leftClipId = 0;
+    int64_t rightClipId = 0;
+    int64_t windowStartFrame = 0; // inclusive
+    int64_t windowEndFrame = 0;   // exclusive: the cut == left clip end
+    int64_t leftSourceFrame = 0;  // the outgoing clip's LIVE source position
+    int64_t rightSourceFrame = 0; // the incoming clip's HELD first frame
+    double progress = 0.0;        // (frame - windowStart) / duration, [0, 1)
+};
+
 // Frame-accurate timeline model (Module 6.2 / Module 4 editing core).
 // Pure data + operations, no Qt, no FFmpeg - unit tested in fc_timeline_tests.
 // M4a owned placement, split, trim, and move; M4b adds cross-track moves
 // with overlap rejection, magnetic drop resolution, ripple delete/trim,
 // rolling boundary edits, and topmost-clip lookup for the program monitor.
-// Multi-source compositing beyond topmost-wins and audio mixing arrive in
-// later M4/M5 phases.
+// M5 Phase 2 adds cut transitions: every mutating operation preserves the
+// transition invariants (adjacent pair, duration within the left clip) -
+// broken pairs are dropped, shrunk left clips clamp the duration, and
+// splitting the left clip re-targets the transition to the half that owns
+// the cut. Multi-source compositing beyond topmost-wins and audio mixing
+// arrive in later M5/M6 phases.
 class TimelineModel {
 public:
     TimelineModel() = default;
@@ -135,13 +178,54 @@ public:
     // the scan runs from index 0 downward). Returns nullptr in gaps.
     const Clip *activeVideoClipAt(int64_t frame) const;
 
+    // ---- M5 Phase 2: cut transitions ----
+
+    const std::vector<Transition> &transitions() const { return transitions_; }
+
+    // Largest legal duration for a transition between the two clips (their
+    // boundary must be adjacent, same video track, and free of an existing
+    // transition); 0 when the pair cannot host one. Callers use this to
+    // clamp UI defaults.
+    int64_t maxTransitionDuration(int64_t leftClipId, int64_t rightClipId) const;
+
+    // Places a transition on the shared boundary of the two clips. Returns
+    // the transition id (> 0) or 0 when rejected: unknown clips, different
+    // tracks, audio track, non-adjacent pair, unknown kind (the transitions
+    // catalog must know it), an existing transition on that boundary, or
+    // duration outside [1, maxTransitionDuration].
+    int64_t addTransition(int64_t leftClipId, int64_t rightClipId, const std::string &kind,
+                          int64_t durationFrames);
+
+    bool removeTransition(int64_t id);
+
+    // Re-validates the duration against the left clip's current extent;
+    // rejects out-of-range values (the UI clamps before calling).
+    bool setTransitionDuration(int64_t id, int64_t durationFrames);
+
+    const Transition *transitionById(int64_t id) const;
+
+    // The transition on the boundary of exactly these two clips, if any.
+    const Transition *transitionBetween(int64_t leftClipId, int64_t rightClipId) const;
+
+    // Resolves the transition sample covering `frame` on `trackIndex`
+    // (the window [left end - duration, left end)); returns false when no
+    // window covers the frame. The sample carries both source positions
+    // the compositor needs (left LIVE, right HELD at its in-point).
+    bool resolveTransitionAt(int64_t frame, int trackIndex, TransitionSample &out) const;
+
     int64_t durationFrames() const;
     double durationSeconds() const;
 
 private:
+    // Drops transitions whose pair broke (adjacency lost, clip removed,
+    // moved away) and clamps durations that no longer fit the left clip.
+    // Called at the end of every mutating operation.
+    void pruneTransitions();
+
     double fps_ = 24.0;
     std::vector<Track> tracks_;
     std::vector<Clip> clips_;
+    std::vector<Transition> transitions_;
     int64_t nextId_ = 1;
 };
 

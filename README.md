@@ -33,7 +33,7 @@ arrive milestone by milestone.
 | M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
 | M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
 | M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 2 shipped (v0.4.13) |
-| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Phase 1 shipped (v0.5.0) |
+| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Phase 2 (transitions) shipped (v0.5.1) |
 | M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
@@ -90,9 +90,25 @@ arrive milestone by milestone.
 > instantly from the cached raw frame, and clips with effects show an
 > amber `fx` badge in the timeline. Effects are deterministic
 > (fixed-width integer math, seeded hash noise) and unit-tested with
-> reference pixels (the `effects` ctest suite). Preview-path only for
-> now: transitions, keyframes, project persistence, and export-side
-> application land in M5 Phase 2+.
+> reference pixels (the `effects` ctest suite).
+>
+> **Transitions (v0.5.1, M5 Phase 2):** every cut between two adjacent
+> clips can carry a transition - 36 of them across Dissolve (cross, dip
+> to black/white, additive, film-grain, blur), Wipe (directional,
+> corners, iris box/circle/diamond, clock, blinds, checker, barn
+> doors), Slide, Push, and Zoom (in/out/through). Browse them in the
+> new Transitions panel and double-click to drop one on the selected
+> clip's cut (or press Ctrl+D for the default cross dissolve); the
+> timeline shows each transition as a green X marker spanning its
+> window - click it to edit the duration or remove it in Effect
+> Controls. The program monitor composites the cut LIVE: the outgoing
+> clip keeps playing while the incoming clip's first frame blends in
+> (the no-overlap window model - nothing reflows, no content is lost,
+> every transition is endpoint-exact and deterministic). The
+> transitions engine + model semantics are unit-tested in the
+> `transitions` ctest suite. Keyframes, project persistence,
+> export-side application, and the catalog expansion to 50+ effects
+> follow in the next M5 phase.
 
 ## System requirements (target)
 
@@ -180,7 +196,7 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Three suites run in the core-only configuration: **core** (88 checks:
+Four suites run in the core-only configuration: **core** (88 checks:
 rational frame rates, timecode parse/format/math, LRU eviction,
 memory-pool ownership/alignment) and **timeline** (130 checks: clip
 placement/split/trim/move semantics, cross-track moves with overlap
@@ -188,7 +204,11 @@ rejection, magnetic drop resolution, ripple delete/trim, rolling
 boundary edits, topmost-clip lookup) plus **effects** (1100+ checks:
 catalog integrity, parameter clamping, neutral-parameter identities,
 per-effect reference pixels, stack order/disable/unknown semantics,
-split propagation) and **media** (317 checks:
+split propagation) and **transitions** (4500+ checks: catalog
+integrity, endpoint exactness for every kind, per-family reference
+pixels, and the transition model battery - placement validation,
+window resolution, and invariant pruning under every timeline
+mutation) and **media** (317 checks:
 synthetic media is generated at runtime - no binary
 assets in the repo - then probed, decoded frame-accurately with color-order
 assertions, seeked, and transcoded to 360p proxies with geometry, audio,

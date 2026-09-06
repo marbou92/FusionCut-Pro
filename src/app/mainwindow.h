@@ -18,6 +18,7 @@ class PreviewCanvas;
 class ProjectPanel;
 class QuickModeView;
 class TimelinePanel;
+class TransitionsPanel;
 class TransportBar;
 
 namespace fc {
@@ -74,17 +75,34 @@ private:
     void applyProgramFrame();
     void addEffectToSelectedClip(const QString &effectId);
 
+    // M5 Phase 2: cut transitions - add/remove/duration routing for the
+    // panels, the held-frame fetch for the incoming clip, and the
+    // cross-clip composite in applyProgramFrame.
+    void addTransitionToSelectedClip(const QString &kind);
+    void ensureHeldIncomingFrame(const fc::TransitionSample &sample);
+    void pushTransitionToEditor(const fc::Transition &t);
+    // After model mutations: drop the editor when the selected transition
+    // was pruned, refresh its bounds when durations clamped.
+    void syncTransitionEditor();
+
     // Restore/save panel layout.
     void restoreLayout();
     void saveLayout() const;
 
     DecodeWorker *worker_ = nullptr;
     QThread *decodeThread_ = nullptr;
+    // M5 Phase 2: second decode context dedicated to the HELD first frame
+    // of the incoming clip during a transition window. It never drives
+    // the program source (worker_ owns that), so its mediaInfo is ignored
+    // except to trigger the held-frame request.
+    DecodeWorker *workerB_ = nullptr;
+    QThread *decodeThreadB_ = nullptr;
     QTimer *playClock_;
 
     // Pro Mode widgets.
     ProjectPanel *projectPanel_ = nullptr;
     EffectsPanel *effectsPanel_ = nullptr;
+    TransitionsPanel *transitionsPanel_ = nullptr; // M5 Phase 2
     TimelinePanel *timeline_ = nullptr;
     MixerPanel *mixer_ = nullptr;
     EffectControlsPanel *effectControls_ = nullptr;
@@ -117,6 +135,19 @@ private:
     QImage rawProgramFrame_;
     double rawFramePts_ = 0.0;
     int64_t frameClipId_ = -1;
+
+    // M5 Phase 2 transition preview state: the HELD (incoming) frame and
+    // the clip it belongs to, plus the worker-B source bookkeeping. The
+    // held frame is decoded once per incoming clip and reused for every
+    // frame of the window (see the model's window semantics).
+    QImage heldIncomingFrame_;
+    int64_t heldIncomingClipId_ = -1;
+    int64_t pendingBFirstClipId_ = -1; // clip whose held frame is being fetched
+    int64_t bFailedClipId_ = -1;       // clip whose fetch already failed
+    bool pendingBFirst_ = false;       // waiting for openQuiet -> mediaInfo
+    bool bRequestInFlight_ = false;    // an open or decode is queued on worker B
+    QString bLoadedPath_;
+    int64_t selectedTransitionId_ = -1;
 };
 
 } // namespace fc
