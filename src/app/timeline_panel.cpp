@@ -1,6 +1,7 @@
 #include "timeline_panel.h"
 
 #include <QEvent>
+#include <QFont>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeySequence>
@@ -337,6 +338,15 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         painter.setPen(text);
         painter.drawText(rect.adjusted(6, 0, -6, 0), Qt::AlignLeft | Qt::AlignVCenter,
                          QString::fromStdString(clip.label));
+        // M5: amber "fx" badge on clips carrying an effect stack.
+        if (!clip.effectStack.empty()) {
+            QColor fxColor(0xE0, 0xA8, 0x30, int(255 * dim));
+            painter.setPen(fxColor);
+            painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 8, QFont::Bold));
+            painter.drawText(QRect(rect.right() - 30, rect.top(), 26, rect.height()),
+                             Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("fx"));
+            painter.setFont(QFont()); // restore default for the next clip
+        }
     }
 }
 

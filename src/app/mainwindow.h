@@ -65,6 +65,15 @@ private:
     // media duration for an empty timeline); refreshes panel + transport.
     void updateSequenceDuration();
 
+    // M5: effects pipeline - raw-frame cache + live stack application.
+    // frameReady stores the decoded frame (pre-effects) and the clip it
+    // belongs to; applyProgramFrame copies it, runs the clip's effect
+    // stack in place, and pushes the result to the program monitor.
+    // Parameter edits re-run it instantly from the cache - no decode
+    // round-trip.
+    void applyProgramFrame();
+    void addEffectToSelectedClip(const QString &effectId);
+
     // Restore/save panel layout.
     void restoreLayout();
     void saveLayout() const;
@@ -102,6 +111,12 @@ private:
     bool playing_ = false;
     bool captureThumbnail_ = false;
     bool pendingProgramSeek_ = false; // M4b: apply seek after a program source switch
+
+    // M5: the last decoded program frame BEFORE effects (plus the clip it
+    // was decoded for) - the instant-preview source for effect edits.
+    QImage rawProgramFrame_;
+    double rawFramePts_ = 0.0;
+    int64_t frameClipId_ = -1;
 };
 
 } // namespace fc

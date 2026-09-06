@@ -4,6 +4,98 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-09-06
+
+**M5 Phase 1: the effects engine ships. A pure-C++ per-clip effect
+stack (25 effects across Color / Tone / Filter / Blur & Sharpen /
+Stylize), applied live to the program monitor from the raw decoded
+frame - parameter edits re-render instantly, no decode round-trip. The
+M3 placeholder panels become real: the Effects browser is built from
+the engine catalog (searchable, double-click to apply), and Effect
+Controls edits the selected clip's stack (enable / remove / reorder /
+live sliders). This is the first milestone verified end-to-end
+in-sandbox against the real Qt 5.15.15 toolchain introduced with
+v0.4.13 - including the full UI layer.**
+
+### Added - M5 Phase 1 effects engine (fc_core, new `effects.{h,cpp}`)
+- `fc::EffectDescriptor` / `EffectParamDescriptor` / `EffectInstance`:
+  effect kinds with typed parameters (Number with range+default,
+  Boolean), and per-clip applied instances (`Clip::effectStack`,
+  copied to both halves when a clip is split). `setParam` clamps to
+  the descriptor range; instances from a newer catalog survive
+  round-trips and are skipped, never crash.
+- `fc::effectCatalog()`: 25 effects. Color: Brightness, Contrast,
+  Saturation, Vibrance, Hue (SVG hueRotate matrix), Color Temperature,
+  Tint, Exposure, Gamma. Tone: Levels (in/out black/white), Posterize,
+  Threshold, Solarize, Invert. Filter: Black & White, Sepia, Vignette,
+  Film Grain (deterministic integer hash + seed param, monochrome or
+  per-channel noise), Pixelate, Chromatic Aberration. Blur & Sharpen:
+  Box Blur, Gaussian Blur (separable, normalized kernel), Sharpen
+  (unsharp mask vs a 3x3 box). Stylize: Find Edges (Sobel on luma),
+  Emboss.
+- `fc::applyEffectStack(uint8_t* rgba, w, h, stack)`: in-place RGBA8888
+  processing (the exact QImage::Format_RGBA8888 byte layout the decoder
+  produces), top-to-bottom, skipping disabled/unknown instances,
+  preserving alpha, no-op on degenerate sizes. Every effect is
+  deterministic by construction (integer or explicitly rounded math;
+  the grain hash is fixed-width arithmetic, not rand()).
+- New test binary `fc_effect_tests` (4th ctest suite): catalog
+  integrity (unique ids, valid ranges/defaults), instance semantics
+  (clamping, legacy resize, defaults), neutral-parameter identities,
+  per-effect reference pixels (Rec.601 luma weights 76/150/29, sepia
+  matrix, Gaussian kernel weights, Sobel magnitudes, unsharp
+  references...), stack order/disabled/unknown semantics, and
+  Clip::effectStack integration incl. split propagation.
+
+### Changed - UI: the M3 placeholder panels become the real M5 panels
+- **EffectsPanel** (left, tabbed with Project): built from
+  `fc::effectCatalog()` (no static seed list), grouped by category,
+  with a search box filtering label/id/category, and double-click or
+  "Apply to Selected Clip" emitting `effectAddRequested` - MainWindow
+  appends a default-parameter instance to the selected clip (with a
+  status-bar hint when nothing is selected).
+- **EffectControlsPanel** (right dock): the stack editor for the
+  clip selected in the timeline. Instance list with Up/Down/On-Off/
+  Remove buttons; parameter controls for the selected instance (one
+  slider + value label per Number param, checkbox for Boolean).
+  Every edit emits the full new stack (`stackChanged`) - the panel
+  owns a working copy, MainWindow owns the truth in the model.
+- **MainWindow**: the program-monitor frame path now caches the RAW
+  decoded frame + the clip it belongs to (`applyProgramFrame()`), then
+  applies that clip's effect stack in place before pushing the frame
+  to the program canvas and the Quick Mode canvas. Parameter edits
+  and stack changes re-render from the cached raw frame instantly
+  (360p proxy frames: CPU cost is a few ms). Thumbnails stay raw
+  (pre-effects). Clip selection feeds the stack editor; deleting the
+  clip clears it.
+- **TimelinePanel**: clips carrying an effect stack get an amber "fx"
+  badge (right edge of the clip rect), dimmed with the track like all
+  clip chrome.
+
+### Known scope (M5 Phase 2+)
+- Transitions (30+) need the cross-clip compositor - the program
+  monitor is still topmost-clip-wins (M4b semantics), so effects
+  preview per clip, not across boundaries. Effects apply to the
+  PREVIEW path only for now (export arrives with the M4+/M5 render
+  pipeline); effects are not yet persisted with the project file (no
+  project serialization exists yet - both land together). No
+  keyframes yet (parameters are static per clip). Audio effects and
+  the remaining ~25 catalog effects follow in Phase 2.
+
+### Verification
+- Real Qt 5.15.15 + FFmpeg 7.1.5 in-sandbox (the v0.4.13 toolchain):
+  configure + full compile + LINK of FusionCutPro, all 13 app TUs
+  incl. the rewritten panels; ctest 4/4 suites (core 88 + timeline 130
+  + effects 1100+ + media 317).
+- clang-format 22.1.8 gate: 0 violations. wfmock battery: 38/38 with
+  v0.5.0 PORTABLE.txt gates (73 lines, 0 apostrophes, v0.5.0 x3).
+- The six first-draft test expectations that failed were all
+  test-construction or reference-derivation errors (hue-180 matrix
+  misread, solarize cutoff rounding, pixel-center vignette geometry,
+  two ramp fixtures that filled every pixel with the constructor
+  triple) - the ENGINE was correct in every case; each expectation
+  was re-derived from the actual definitions.
+
 ## [0.4.13] - 2026-09-06
 
 **v0.4.12 never compiled — the first CI run of its Qt layer died in

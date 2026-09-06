@@ -33,12 +33,12 @@ arrive milestone by milestone.
 | M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
 | M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
 | M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 2 shipped (v0.4.13) |
-| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Planned |
+| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Phase 1 shipped (v0.5.0) |
 | M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
-> **Runtime crash reporting (v0.4.1+, attribution upgrade v0.4.13):** a
+> **Runtime crash reporting (v0.4.1+, attribution upgrade v0.5.0):** a
 > built-in crash handler captures access violations, uncaught C++
 > exceptions, CRT misuses, pure-virtual calls, and POSIX signals, then
 > writes a structured report (`crash-logs/FusionCutPro-crash-<timestamp>.log`
@@ -55,7 +55,7 @@ arrive milestone by milestone.
 > dialog is the loader's own failure, shown before any user code
 > runs).
 >
-> **Loader-phase diagnostic, baked in (v0.4.13):** the separate
+> **Loader-phase diagnostic, baked in (v0.5.0):** the separate
 > `fcp-loader-check.exe` of v0.4.4-v0.4.11 is RETIRED - its
 > two-phase diagnostic now runs from the exe itself. Run
 > `FusionCutPro.exe --diag` if the app will not start: phase 1 maps
@@ -76,6 +76,23 @@ arrive milestone by milestone.
 > v0.4.11 is CONFIRMED BOOTING end-to-end on the user's Windows 7
 > machine (full seven-stage boot trace + workspace rendering), so
 > `--diag` is the safety net rather than the daily driver.
+>
+> **Effects (v0.5.0, M5 Phase 1):** every timeline clip carries an
+> effect stack processed in place on the decoded RGBA frame. 25 CPU
+> effects ship in Phase 1 across Color (brightness, contrast,
+> saturation, vibrance, hue, temperature, tint, exposure, gamma), Tone
+> (levels, posterize, threshold, solarize, invert), Filter (black &
+> white, sepia, vignette, deterministic film grain, pixelate, chromatic
+> aberration), Blur & Sharpen (box, gaussian, unsharp sharpen) and
+> Stylize (find edges, emboss). Browse them in the Effects panel
+> (searchable), double-click to add to the selected clip, edit
+> parameters live in Effect Controls - the program monitor re-renders
+> instantly from the cached raw frame, and clips with effects show an
+> amber `fx` badge in the timeline. Effects are deterministic
+> (fixed-width integer math, seeded hash noise) and unit-tested with
+> reference pixels (the `effects` ctest suite). Preview-path only for
+> now: transitions, keyframes, project persistence, and export-side
+> application land in M5 Phase 2+.
 
 ## System requirements (target)
 
@@ -163,12 +180,15 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Two suites run in the core-only configuration: **core** (88 checks:
+Three suites run in the core-only configuration: **core** (88 checks:
 rational frame rates, timecode parse/format/math, LRU eviction,
 memory-pool ownership/alignment) and **timeline** (130 checks: clip
 placement/split/trim/move semantics, cross-track moves with overlap
 rejection, magnetic drop resolution, ripple delete/trim, rolling
-boundary edits, topmost-clip lookup) plus **media** (317 checks:
+boundary edits, topmost-clip lookup) plus **effects** (1100+ checks:
+catalog integrity, parameter clamping, neutral-parameter identities,
+per-effect reference pixels, stack order/disable/unknown semantics,
+split propagation) and **media** (317 checks:
 synthetic media is generated at runtime - no binary
 assets in the repo - then probed, decoded frame-accurately with color-order
 assertions, seeked, and transcoded to 360p proxies with geometry, audio,

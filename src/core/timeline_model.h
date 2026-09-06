@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "effects.h"
+
 namespace fc {
 
 // One placed media segment on the timeline. Source frames [sourceIn,
@@ -18,6 +20,11 @@ struct Clip {
     int64_t timelineStart = 0;   // position on the timeline (frames)
     double rate = 1.0;           // playback rate (1.0 = normal)
     int trackIndex = 0;
+
+    // M5 Phase 1: per-clip effect stack, applied top-to-bottom when the
+    // program monitor displays a frame of this clip. Value type: copied
+    // with the clip (splitting a clip copies the stack to BOTH halves).
+    std::vector<EffectInstance> effectStack;
 
     int64_t durationFrames() const;
     int64_t timelineEnd() const { return timelineStart + durationFrames(); }

@@ -6,6 +6,10 @@ add_executable(fc_timeline_tests timeline_tests.cpp)
 target_link_libraries(fc_timeline_tests PRIVATE fc_core)
 add_test(NAME timeline COMMAND fc_timeline_tests)
 
+add_executable(fc_effect_tests effect_tests.cpp)
+target_link_libraries(fc_effect_tests PRIVATE fc_core)
+add_test(NAME effects COMMAND fc_effect_tests)
+
 if(TARGET fc_media)
     add_executable(fc_media_tests
         media_tests.cpp

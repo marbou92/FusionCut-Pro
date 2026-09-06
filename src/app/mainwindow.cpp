@@ -30,6 +30,7 @@
 
 #include "decode_worker.h"
 #include "effect_controls_panel.h"
+#include "effects.h"
 #include "effects_panel.h"
 #include "ffmpeg_wrappers.h"
 #include "mixer_panel.h"
@@ -182,8 +183,13 @@ void MainWindow::buildDecodeThread() {
                 }
             });
     connect(worker_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double pts) {
-        programCanvas_->setFrame(frame, pts);
-        quickView_->canvas()->setFrame(frame, pts);
+        // M5: cache the RAW (pre-effects) frame + the clip it belongs to;
+        // the program monitor render path (applyProgramFrame) applies
+        // that clip's effect stack on the way to the canvas. Effect
+        // parameter edits re-render instantly from this cache.
+        rawProgramFrame_ = frame;
+        rawFramePts_ = pts;
+        frameClipId_ = lastProgramClipId_;
         // The timeline playhead + transport show the TIMELINE position
         // (playhead_), not the source-relative pts of the arriving
         // frame - with M4b in-point offsets the two differ, and the
@@ -191,10 +197,12 @@ void MainWindow::buildDecodeThread() {
         timeline_->setPlayhead(playhead_);
         transport_->setPosition(playhead_);
         if (captureThumbnail_) {
+            // Thumbnails stay raw (pre-effects): they represent the source.
             sourceCanvas_->setFrame(frame, pts);
             projectPanel_->setThumbnail(loadedPath_, frame);
             captureThumbnail_ = false;
         }
+        applyProgramFrame();
     });
     connect(worker_, &DecodeWorker::failed, this, [this](const QString &error) {
         statusBar()->showMessage(tr("Error: %1").arg(error), 8000);
@@ -297,8 +305,28 @@ void MainWindow::buildProWorkspace() {
         startPlayback(false);
         requestFrameAt(seconds);
     });
-    connect(timeline_, &TimelinePanel::clipSelected, this,
-            [this](int64_t id) { selectedClipId_ = id; });
+    connect(timeline_, &TimelinePanel::clipSelected, this, [this](int64_t id) {
+        selectedClipId_ = id;
+        // M5: the Effect Controls panel edits the SELECTED clip's stack.
+        const fc::Clip *clip = id > 0 ? model_.clipById(id) : nullptr;
+        effectControls_->setStack(id, clip ? clip->effectStack : std::vector<fc::EffectInstance>());
+    });
+
+    // ---- M5 effects wiring ----
+    connect(effectsPanel_, &EffectsPanel::effectAddRequested, this,
+            [this](const QString &effectId) { addEffectToSelectedClip(effectId); });
+    connect(effectControls_, &EffectControlsPanel::stackChanged, this,
+            [this](int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
+                fc::Clip *clip = model_.clipById(clipId);
+                if (!clip) {
+                    return;
+                }
+                clip->effectStack = stack;
+                timeline_->update(); // fx badge visibility
+                if (frameClipId_ == clipId) {
+                    applyProgramFrame(); // instant re-render from the raw cache
+                }
+            });
     connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
         if (const fc::Track *track = model_.trackAt(trackIndex); track && track->locked) {
             statusBar()->showMessage(tr("Track %1 is locked - unlock it (header L) to split.")
@@ -526,6 +554,7 @@ void MainWindow::deleteSelectedClip() {
     selectedClipId_ = -1;
     lastProgramClipId_ = -1;
     timeline_->clearSelection();
+    effectControls_->setStack(-1, {}); // M5: the deleted clip's editor clears
     updateSequenceDuration();
 }
 
@@ -706,6 +735,42 @@ void MainWindow::requestFrameAt(double seconds) {
         statusBar()->showMessage(tr("Program: %1").arg(QString::fromStdString(clip->label)));
     }
     QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, srcSeconds));
+}
+
+void MainWindow::applyProgramFrame() {
+    if (rawProgramFrame_.isNull()) {
+        return;
+    }
+    const fc::Clip *clip = model_.clipById(frameClipId_);
+    QImage out = rawProgramFrame_; // shallow copy; bits() detaches below
+    if (clip && !clip->effectStack.empty()) {
+        if (out.format() != QImage::Format_RGBA8888) {
+            out = out.convertToFormat(QImage::Format_RGBA8888);
+        }
+        fc::applyEffectStack(out.bits(), out.width(), out.height(), clip->effectStack);
+    }
+    programCanvas_->setFrame(out, rawFramePts_);
+    quickView_->canvas()->setFrame(out, rawFramePts_);
+}
+
+void MainWindow::addEffectToSelectedClip(const QString &effectId) {
+    fc::Clip *clip = selectedClipId_ > 0 ? model_.clipById(selectedClipId_) : nullptr;
+    if (!clip) {
+        statusBar()->showMessage(
+            tr("Select a timeline clip first (click a clip, then add the effect)."), 6000);
+        return;
+    }
+    clip->effectStack.push_back(fc::makeEffectInstance(effectId.toStdString()));
+    const fc::EffectDescriptor *d = fc::findEffect(effectId.toStdString());
+    statusBar()->showMessage(tr("Added %1 to %2 (edit it in Effect Controls)")
+                                 .arg(d ? QString::fromStdString(d->label) : effectId,
+                                      QString::fromStdString(clip->label)),
+                             6000);
+    effectControls_->setStack(selectedClipId_, clip->effectStack);
+    timeline_->update(); // fx badge
+    if (frameClipId_ == selectedClipId_) {
+        applyProgramFrame();
+    }
 }
 
 void MainWindow::restoreLayout() {
