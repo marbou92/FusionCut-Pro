@@ -32,8 +32,8 @@ arrive milestone by milestone.
 | M1 - Engineering foundation | Build system, CI, portable pipeline, core primitives | Shipped (v0.1.0) |
 | M2 - Media I/O | FFmpeg wrapper, decode pipeline, proxy generation | Shipped (v0.2.0) |
 | M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
-| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Phase 2 shipped (v0.4.13) |
-| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Phase 2 (transitions) shipped (v0.5.1) |
+| M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Shipped (v0.4.13) |
+| M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Shipped (v0.5.2) |
 | M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
@@ -92,6 +92,27 @@ arrive milestone by milestone.
 > (fixed-width integer math, seeded hash noise) and unit-tested with
 > reference pixels (the `effects` ctest suite).
 >
+> **Effects catalog (v0.5.2, M5 Phase 3): 52 effects across 7
+> categories.** 27 additions: Color Correction (the 9-knob combined
+> grade), Channel Gain, Colorize, Duotone, Faded Film (Color);
+> Highlights, Shadows, Gain, Bayer Dither (Tone); Mirror, Flip, Glow,
+> Scanlines, Halftone (Filter); Motion Blur H/V, Radial Blur (Blur);
+> Wave, Ripple, Fisheye, Tile (Distort, new category); Color Bars,
+> Gradient, Grid, Noise (Generate, new category); Thermal, Glitch
+> (Stylize).
+>
+> **Keyframes (v0.5.2, M5 Phase 3):** every Number parameter can carry
+> a keyframe track in CLIP-RELATIVE frames. `paramAt` resolves linear
+> interpolation inside the bracketing pair and clamps outside it; the
+> program monitor, the export, and the panels all evaluate parameters
+> at the same clip-relative position, so the value you scrub is the
+> value that renders. Effect Controls shows a keyframe diamond on every
+> Number param - click it at the playhead to toggle a keyframe; when a
+> param is keyframed, sliders display the resolved value and edits
+> write the keyframe at the playhead. Splitting a clip re-bases the
+> right half's tracks with its new in-point (the left half keeps its
+> full track non-destructively).
+>
 > **Transitions (v0.5.1, M5 Phase 2):** every cut between two adjacent
 > clips can carry a transition - 36 of them across Dissolve (cross, dip
 > to black/white, additive, film-grain, blur), Wipe (directional,
@@ -106,9 +127,40 @@ arrive milestone by milestone.
 > (the no-overlap window model - nothing reflows, no content is lost,
 > every transition is endpoint-exact and deterministic). The
 > transitions engine + model semantics are unit-tested in the
-> `transitions` ctest suite. Keyframes, project persistence,
-> export-side application, and the catalog expansion to 50+ effects
-> follow in the next M5 phase.
+> `transitions` ctest suite. The Phase 3 completions - keyframes,
+> project persistence, export-side application, and the catalog
+> expansion to 50+ effects - all shipped in v0.5.2 (see the callouts
+> above and below).
+>
+> **Color panel (v0.5.2, M5 Phase 3):** a fourth left-dock tab - the
+> colorist's grade view. Nine sliders (exposure, contrast, highlights,
+> shadows, saturation, vibrance, temperature, tint, hue) edit the
+> selected clip's combined Color Correction instance, auto-created on
+> the first touch and re-rendered live from the cached raw frame.
+> Reset Grade removes it. Keyframed corrector params display and edit
+> at the playhead like every other effect.
+>
+> **Project persistence (v0.5.2, M5 Phase 3):** File > Open Project
+> (Ctrl+O) / Save Project (Ctrl+S) / Save Project As (Ctrl+Shift+S).
+> Projects are deterministic JSON (`.fcp`): tracks, clips with in/out
+> points and effect stacks (parameters AND keyframes), cut transitions,
+> the fps - media stays referenced by path (nothing is embedded, 1 GB
+> budget). The parser is strict: a malformed or schema-violating file
+> fails whole, never partially; ids, stacks, and transitions load back
+> exactly; effects or transitions from a NEWER catalog round-trip
+> untouched (they never process, they never crash). The window title
+> tracks the dirty state; closing with unsaved changes prompts
+> Save/Discard/Cancel.
+>
+> **Export (v0.5.2, M5 Phase 3):** File > Export Media (Ctrl+M) renders
+> the timeline through the EXACT program-monitor pipeline - every
+> effect (keyframes interpolating per frame) and every cut transition
+> composited live - to an H.264 MP4 (MPEG-4 fallback encoder) at the
+> project fps with CRF quality control and your choice of resolution.
+> The job runs on a background thread with a progress dialog and
+> Cancel; partial files are cleaned up on failure or cancellation.
+> Video only in this phase: timeline audio mixing (multi-track summing,
+> crossfades) ships with the audio milestone.
 
 ## System requirements (target)
 
@@ -196,23 +248,29 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Four suites run in the core-only configuration: **core** (88 checks:
+Five suites run in the core-only configuration: **core** (88 checks:
 rational frame rates, timecode parse/format/math, LRU eviction,
 memory-pool ownership/alignment) and **timeline** (130 checks: clip
 placement/split/trim/move semantics, cross-track moves with overlap
 rejection, magnetic drop resolution, ripple delete/trim, rolling
-boundary edits, topmost-clip lookup) plus **effects** (1100+ checks:
-catalog integrity, parameter clamping, neutral-parameter identities,
-per-effect reference pixels, stack order/disable/unknown semantics,
-split propagation) and **transitions** (4500+ checks: catalog
-integrity, endpoint exactness for every kind, per-family reference
-pixels, and the transition model battery - placement validation,
-window resolution, and invariant pruning under every timeline
-mutation) and **media** (317 checks:
+boundary edits, topmost-clip lookup) plus **effects** (2600+ checks:
+catalog integrity across the 52 entries, parameter clamping,
+neutral-parameter identities, per-effect reference pixels, stack
+order/disable/unknown semantics, split propagation, and the keyframe
+battery - resolution, editing, rebase, time-aware application) and
+**transitions** (4500+ checks: catalog integrity, endpoint exactness
+for every kind, per-family reference pixels, and the transition model
+battery - placement validation, window resolution, and invariant
+pruning under every timeline mutation) and **project** (79 checks:
+JSON codec strictness, full model round-trip with id/keyframe/stack
+fidelity, byte-identical deterministic serialization, malformed-input
+rejection, parse atomicity) and **media** (400 checks:
 synthetic media is generated at runtime - no binary
 assets in the repo - then probed, decoded frame-accurately with color-order
 assertions, seeked, and transcoded to 360p proxies with geometry, audio,
-progress, cancellation, and no-upscale verification) when the media layer
+progress, cancellation, and no-upscale verification, plus the export
+pipeline: encode/probe/decode round-trips, per-frame progress, both
+cancellation paths) when the media layer
 is enabled.
 
 ## Project layout

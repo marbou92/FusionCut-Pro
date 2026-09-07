@@ -114,6 +114,14 @@ public:
                     int64_t sourceInFrames, int64_t sourceOutFrames, int64_t timelineStart,
                     double rate = 1.0);
 
+    // M5 Phase 3 (project loading): the whole model is replaced in one
+    // step by the project parser - tracks, clips (with PRESERVED ids +
+    // effect stacks), transitions, and the fps; the id counter re-seeds
+    // above the largest id seen. Used by fc::parseProject only; every
+    // field is validated there before anything is moved in.
+    void replaceAll(double fps, std::vector<Track> tracks, std::vector<Clip> clips,
+                    std::vector<Transition> transitions);
+
     bool removeClip(int64_t id);
 
     // Splits every clip on `trackIndex` whose range contains `frame` (not at

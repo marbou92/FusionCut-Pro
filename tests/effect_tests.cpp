@@ -71,7 +71,7 @@ bool unchanged(const TestImg &a, const TestImg &b) {
 
 void testCatalog() {
     const auto &cat = effectCatalog();
-    CHECK(cat.size() == 25);
+    CHECK(cat.size() == 52);
 
     // Unique ids, non-empty metadata, valid param ranges/defaults.
     for (const EffectDescriptor &d : cat) {
@@ -112,14 +112,31 @@ void testCatalog() {
     CHECK(hasBool);
     CHECK(findEffect("nope.nope") == nullptr);
 
-    // Categories present.
+    // Categories present (14 Color after Phase 3, plus the new Distort
+    // and Generate categories).
     size_t colorCount = 0;
+    size_t distortCount = 0;
+    size_t generateCount = 0;
     for (const EffectDescriptor &d : cat) {
         if (d.category == "Color") {
             ++colorCount;
         }
+        if (d.category == "Distort") {
+            ++distortCount;
+        }
+        if (d.category == "Generate") {
+            ++generateCount;
+        }
     }
-    CHECK(colorCount == 9);
+    CHECK(colorCount == 14);
+    CHECK(distortCount == 4);
+    CHECK(generateCount == 4);
+
+    // Spot descriptors (Phase 3).
+    CHECK(findEffect("color.corrector") != nullptr);
+    CHECK(findEffect("color.corrector")->params.size() == 9);
+    CHECK(findEffect("stylize.glitch") != nullptr);
+    CHECK(findEffect("stylize.glitch")->params.size() == 4);
 }
 
 void testInstance() {
@@ -673,6 +690,459 @@ void testStackSemantics() {
     }
 }
 
+// ---- M5 Phase 3: the 27 new effects ------------------------------------
+
+void testPhase3IdentityAtNeutral() {
+    // Neutral defaults are exact identities.
+    const char *neutral[] = {
+        "color.corrector", "color.channelgain", "tone.highlights",
+        "tone.shadows",    "tone.gain",         "distort.tile",
+    };
+    for (const char *id : neutral) {
+        TestImg a = gradient16();
+        TestImg b = gradient16();
+        run(id, b, {});
+        CHECK(unchanged(a, b));
+    }
+    // Zero-strength variants of the effects with expressive defaults.
+    struct ZeroCase {
+        const char *id;
+        std::vector<std::pair<std::string, double>> params;
+    };
+    const ZeroCase zeros[] = {
+        {"color.fade", {{"amount", 0.0}}},        {"blur.radial", {{"amount", 0.0}}},
+        {"distort.wave", {{"amplitude", 0.0}}},   {"distort.ripple", {{"amplitude", 0.0}}},
+        {"distort.fisheye", {{"amount", 0.0}}},   {"generate.bars", {{"amount", 0.0}}},
+        {"generate.gradient", {{"amount", 0.0}}}, {"generate.grid", {{"amount", 0.0}}},
+        {"generate.noise", {{"amount", 0.0}}},    {"stylize.thermal", {{"amount", 0.0}}},
+        {"stylize.glitch", {{"amount", 0.0}}},
+    };
+    for (const ZeroCase &z : zeros) {
+        TestImg a = gradient16();
+        TestImg b = gradient16();
+        run(z.id, b, z.params);
+        CHECK(unchanged(a, b));
+    }
+    // Zero-amount variants of the blending effects.
+    TestImg a = gradient16();
+    TestImg b = gradient16();
+    run("color.colorize", b, {{"amount", 0.0}});
+    CHECK(unchanged(a, b));
+    b = gradient16();
+    run("color.duotone", b, {{"amount", 0.0}});
+    CHECK(unchanged(a, b));
+}
+
+void testPhase3Color() {
+    // Corrector: exposure, contrast, temperature, shadows - each alone.
+    {
+        TestImg img(8, 8, 100, 100, 100);
+        run("color.corrector", img, {{"exposure", 1.0}});
+        CHECK(img.at(3, 3, 0) == 200 && img.at(3, 3, 1) == 200 && img.at(3, 3, 2) == 200);
+    }
+    {
+        TestImg img(8, 8, 100, 100, 100);
+        run("color.corrector", img, {{"contrast", -0.5}});
+        CHECK(img.at(3, 3, 0) == 114 && img.at(3, 3, 1) == 114 && img.at(3, 3, 2) == 114);
+    }
+    {
+        TestImg img(8, 8, 100, 100, 100);
+        run("color.corrector", img, {{"temperature", 1.0}});
+        CHECK(img.at(3, 3, 0) == 140);
+        CHECK(img.at(3, 3, 1) == 100);
+        CHECK(img.at(3, 3, 2) == 60);
+    }
+    {
+        TestImg img(8, 8, 50, 50, 50);
+        run("color.corrector", img, {{"shadows", 0.5}});
+        // w = (128-50)/128 = 0.609375; d = lround(0.5*90*w) = 27.
+        CHECK(img.at(3, 3, 0) == 77 && img.at(3, 3, 1) == 77 && img.at(3, 3, 2) == 77);
+    }
+
+    // Channel gain: 100/150/200 with 0.5/1.0/0.5.
+    {
+        TestImg img(8, 8, 100, 150, 200);
+        run("color.channelgain", img, {{"rGain", 0.5}, {"gGain", 1.0}, {"bGain", 0.5}});
+        CHECK(img.at(3, 3, 0) == 50);
+        CHECK(img.at(3, 3, 1) == 150);
+        CHECK(img.at(3, 3, 2) == 100);
+    }
+
+    // Colorize: luma 124 toward pure red (hue 0).
+    {
+        TestImg img(8, 8, 200, 100, 50);
+        run("color.colorize", img, {{"hue", 0.0}, {"amount", 1.0}});
+        CHECK(img.at(3, 3, 0) == 124);
+        CHECK(img.at(3, 3, 1) == 0);
+        CHECK(img.at(3, 3, 2) == 0);
+    }
+    {
+        TestImg img(8, 8, 200, 100, 50);
+        run("color.colorize", img, {{"hue", 240.0}, {"amount", 1.0}});
+        CHECK(img.at(3, 3, 0) == 0);
+        CHECK(img.at(3, 3, 1) == 0);
+        CHECK(img.at(3, 3, 2) == 124);
+    }
+
+    // Duotone: black maps to the shadow hue, white to the highlight hue.
+    {
+        TestImg img = gradient16(); // (0,0) is 0, (15,15) is 255
+        run("color.duotone", img, {{"shadowHue", 240.0}, {"highlightHue", 60.0}, {"amount", 1.0}});
+        CHECK(img.at(0, 0, 0) == 0 && img.at(0, 0, 1) == 0 && img.at(0, 0, 2) == 255);
+        CHECK(img.at(15, 15, 0) == 255 && img.at(15, 15, 1) == 255 && img.at(15, 15, 2) == 0);
+    }
+
+    // Faded film: luma 124, k = 0.88, lift 12.
+    {
+        TestImg img(8, 8, 200, 100, 50);
+        run("color.fade", img, {{"amount", 0.4}});
+        CHECK(img.at(3, 3, 0) == 203);
+        CHECK(img.at(3, 3, 1) == 115);
+        CHECK(img.at(3, 3, 2) == 71);
+    }
+}
+
+void testPhase3Tone() {
+    // Highlights: solid 160, amount 0.5 -> +11 (w = 32/127).
+    {
+        TestImg img(8, 8, 160, 160, 160);
+        run("tone.highlights", img, {{"amount", 0.5}});
+        CHECK(img.at(3, 3, 0) == 171);
+    }
+    {
+        TestImg img(8, 8, 50, 50, 50);
+        run("tone.highlights", img, {{"amount", 0.5}}); // below 128: untouched
+        CHECK(img.at(3, 3, 0) == 50);
+    }
+    // Shadows: solid 64, amount 0.4 -> +18 (w = 0.5).
+    {
+        TestImg img(8, 8, 64, 64, 64);
+        run("tone.shadows", img, {{"amount", 0.4}});
+        CHECK(img.at(3, 3, 0) == 82);
+    }
+    // Gain: 100 * 1.5.
+    {
+        TestImg img(8, 8, 100, 100, 100);
+        run("tone.gain", img, {{"gain", 1.5}});
+        CHECK(img.at(3, 3, 0) == 150);
+    }
+    // Bayer dither, levels 2 (step 255): 128 dithers to 0 or 255 by the
+    // 4x4 matrix threshold.
+    {
+        TestImg img(16, 16, 128, 128, 128);
+        run("tone.bayer", img, {{"levels", 2.0}});
+        // (0,0): matrix 0 -> thresh -127.5 -> 0.5/255 -> 0.
+        CHECK(img.at(0, 0, 0) == 0);
+        // (1,0): matrix 12 -> thresh +63.75 -> 191.75/255 -> 1 -> 255.
+        CHECK(img.at(1, 0, 0) == 255);
+        CHECK(img.at(2, 0, 0) == 0); // matrix 3 -> 48.31/255 -> 0
+    }
+}
+
+void testPhase3Filter() {
+    // Mirror (vertical axis, default axis 0.5): on the 16-wide gradient,
+    // x >= 8 mirrors from 2*8-1-x.
+    {
+        TestImg img = gradient16();
+        run("filter.mirror", img, {{"axis", 0.5}, {"vertical", 1.0}});
+        CHECK(img.at(15, 3, 0) == 3); // from (0,3)
+        CHECK(img.at(9, 3, 0) == 99); // from (6,3)
+        CHECK(img.at(3, 4, 0) == 52); // left half untouched
+    }
+    // Flip (horizontal): (x,y) <- (15-x, y).
+    {
+        TestImg img = gradient16();
+        run("filter.flip", img, {{"vertical", 0.0}});
+        CHECK(img.at(0, 0, 0) == 240);
+        CHECK(img.at(15, 0, 0) == 0);
+        CHECK(img.at(0, 0, 2) == 240);
+    }
+    // Glow: uniform 128, blurred = 128, screen = 192, mix 0.5 -> 160.
+    {
+        TestImg img(16, 16, 128, 128, 128);
+        run("filter.glow", img, {{"radius", 2.0}, {"intensity", 0.5}});
+        CHECK(img.at(7, 7, 0) == 160);
+    }
+    // Scanlines: rows y % period == 0 darken by amount.
+    {
+        TestImg img(16, 16, 200, 200, 200);
+        run("filter.scanlines", img, {{"amount", 0.5}, {"period", 3.0}});
+        CHECK(img.at(5, 0, 0) == 100);
+        CHECK(img.at(5, 1, 0) == 200);
+        CHECK(img.at(5, 3, 0) == 100);
+    }
+    // Halftone: solid white, cell 8 - dot radius 4 around cell centers.
+    {
+        TestImg img(16, 16, 255, 255, 255);
+        run("filter.halftone", img, {{"cell", 8.0}, {"amount", 1.0}});
+        CHECK(img.at(0, 0, 0) == 0);   // corner: dist 4.95 > 4
+        CHECK(img.at(4, 4, 0) == 255); // near center: 0.707 <= 4
+        CHECK(img.at(15, 15, 0) == 0); // corner of the (8,8) cell
+    }
+}
+
+void testPhase3BlurDistortGenerate() {
+    // Motion blur H, radius 2 on the gradient (v = x*16 + y).
+    {
+        TestImg img = gradient16();
+        run("blur.motionH", img, {{"radius", 2.0}});
+        CHECK(img.at(5, 5, 0) == 85); // interior: exact average
+        CHECK(img.at(0, 0, 0) == 10); // {0,0,0,16,32} -> 9.6 -> 10
+        CHECK(img.at(2, 0, 0) == 32); // {0,16,32,48,64} -> 32
+    }
+    // Motion blur V, radius 2: the x=0 column holds 0,1,2,3,...
+    {
+        TestImg img = gradient16();
+        run("blur.motionV", img, {{"radius", 2.0}});
+        CHECK(img.at(5, 5, 0) == 85);
+        CHECK(img.at(0, 0, 0) == 1);  // {0,0,0,1,2} -> 0.6 -> 1
+        CHECK(img.at(2, 0, 0) == 33); // {32,32,32,33,34} -> 32.8 -> 33
+    }
+    // Radial blur: center pixel is an exact identity for any amount.
+    {
+        TestImg img = gradient16();
+        run("blur.radial", img, {{"amount", 1.0}});
+        CHECK(img.at(8, 8, 0) == 136);
+    }
+    // Wave: y=8 has sin(pi/2)=1 -> x shifts by exactly amplitude 4.
+    {
+        TestImg img = gradient16();
+        run("distort.wave", img, {{"amplitude", 4.0}, {"wavelength", 32.0}});
+        CHECK(img.at(4, 8, 0) == 136); // from (8,8)
+        CHECK(img.at(4, 0, 0) == 64);  // y=0: sin(0)=0 -> identity
+    }
+    // Tile: 16x16 with 8x8 blocks wraps.
+    {
+        TestImg img = gradient16();
+        run("distort.tile", img, {{"blockW", 8.0}, {"blockH", 8.0}});
+        CHECK(img.at(9, 9, 0) == 17);    // from (1,1)
+        CHECK(img.at(15, 15, 0) == 119); // from (7,7)
+    }
+    // Bars: 7 columns across 16 pixels (col = x*7/16).
+    {
+        TestImg img = gradient16();
+        run("generate.bars", img, {{"amount", 1.0}});
+        CHECK(img.at(0, 0, 0) == 255 && img.at(0, 0, 1) == 255 && img.at(0, 0, 2) == 255);
+        CHECK(img.at(3, 3, 0) == 255 && img.at(3, 3, 1) == 255 && img.at(3, 3, 2) == 0);
+        CHECK(img.at(5, 3, 0) == 0 && img.at(5, 3, 1) == 255 && img.at(5, 3, 2) == 255);
+        CHECK(img.at(15, 15, 0) == 0 && img.at(15, 15, 1) == 0 && img.at(15, 15, 2) == 255);
+    }
+    // Gradient ramp: x*255/15.
+    {
+        TestImg img(16, 16, 90, 90, 90);
+        run("generate.gradient", img, {{"amount", 1.0}});
+        CHECK(img.at(0, 5, 0) == 0);
+        CHECK(img.at(8, 5, 0) == 136);
+        CHECK(img.at(15, 5, 0) == 255);
+    }
+    // Grid: spacing 8, thickness 1.
+    {
+        TestImg img = gradient16();
+        run("generate.grid", img, {{"spacing", 8.0}, {"thickness", 1.0}, {"amount", 1.0}});
+        CHECK(img.at(0, 0, 0) == 0);
+        CHECK(img.at(8, 4, 0) == 0);
+        CHECK(img.at(4, 4, 0) == 68);
+    }
+    // Noise: same seed -> identical, different seed -> different.
+    {
+        TestImg a = gradient16();
+        TestImg b = gradient16();
+        TestImg c = gradient16();
+        run("generate.noise", a, {{"amount", 1.0}, {"seed", 0.3}});
+        run("generate.noise", b, {{"amount", 1.0}, {"seed", 0.3}});
+        run("generate.noise", c, {{"amount", 1.0}, {"seed", 0.7}});
+        CHECK(a.px == b.px);
+        CHECK(a.px != c.px);
+    }
+}
+
+void testPhase3Stylize() {
+    // Thermal palette: exact stop math on 0 / 128 / 255 luma.
+    {
+        TestImg img(4, 4, 0, 0, 0);
+        run("stylize.thermal", img, {{"amount", 1.0}});
+        CHECK(img.at(1, 1, 0) == 0 && img.at(1, 1, 1) == 0 && img.at(1, 1, 2) == 0);
+    }
+    {
+        TestImg img(4, 4, 128, 128, 128);
+        run("stylize.thermal", img, {{"amount", 1.0}});
+        CHECK(img.at(1, 1, 0) == 160);
+        CHECK(img.at(1, 1, 1) == 16);
+        CHECK(img.at(1, 1, 2) == 80);
+    }
+    {
+        TestImg img(4, 4, 255, 255, 255);
+        run("stylize.thermal", img, {{"amount", 1.0}});
+        CHECK(img.at(1, 1, 0) == 255);
+        CHECK(img.at(1, 1, 1) == 255);
+        CHECK(img.at(1, 1, 2) == 224);
+    }
+    // Glitch: deterministic per seed; some block row must shift.
+    {
+        TestImg a = gradient16();
+        TestImg b = gradient16();
+        run("stylize.glitch", a,
+            {{"amount", 1.0}, {"seed", 0.5}, {"blockH", 8.0}, {"maxShift", 24.0}});
+        run("stylize.glitch", b,
+            {{"amount", 1.0}, {"seed", 0.5}, {"blockH", 8.0}, {"maxShift", 24.0}});
+        CHECK(a.px == b.px);
+        bool row0Shifted = false;
+        bool row1Shifted = false;
+        for (int x = 0; x < 16; ++x) {
+            if (a.at(x, 0, 0) != b.at(x, 0, 0) || a.at(x, 0, 0) != gradient16().at(x, 0, 0)) {
+                row0Shifted = true;
+            }
+            if (a.at(x, 8, 0) != gradient16().at(x, 8, 0)) {
+                row1Shifted = true;
+            }
+        }
+        CHECK(row0Shifted || row1Shifted);
+    }
+}
+
+// ---- M5 Phase 3: keyframes ----------------------------------------------
+
+void testKeyframes() {
+    EffectInstance fx = makeEffectInstance("color.brightness");
+    CHECK(!fx.hasKeyframes());
+
+    fx.setKeyframe("amount", 0, 0.0);
+    fx.setKeyframe("amount", 60, 0.5);
+    fx.setKeyframe("amount", 120, 1.0);
+    CHECK(fx.hasKeyframes());
+
+    const std::vector<EffectKeyframe> *track = fx.keyframeTrack("amount");
+    CHECK(track != nullptr);
+    CHECK(track->size() == 3);
+    CHECK((*track)[0].frame == 0 && (*track)[0].value == 0.0);
+    CHECK((*track)[1].frame == 60 && (*track)[1].value == 0.5);
+    CHECK((*track)[2].frame == 120 && (*track)[2].value == 1.0);
+
+    // Resolution: clamped ends, linear interior.
+    CHECK(fx.paramAt("amount", 0) == 0.0);
+    CHECK(fx.paramAt("amount", 60) == 0.5);
+    CHECK(fx.paramAt("amount", 120) == 1.0);
+    CHECK(fx.paramAt("amount", 30) == 0.25);
+    CHECK(fx.paramAt("amount", 90) == 0.75);
+    CHECK(fx.paramAt("amount", -5) == 0.0);
+    CHECK(fx.paramAt("amount", 500) == 1.0);
+
+    // The static value is untouched by keyframing (and paramAt without a
+    // time context reads it).
+    CHECK(fx.param("amount") == 0.0);
+    CHECK(fx.paramAt("amount", kNoKeyframeTime) == 0.0);
+
+    // Out-of-range values clamp to the descriptor range on store.
+    fx.setKeyframe("amount", 10, 5.0);
+    CHECK(fx.keyframeAt("amount", 10)->value == 1.0);
+
+    // Overwrite: same frame, new value; the track never grows duplicates.
+    fx.setKeyframe("amount", 10, 0.2);
+    CHECK(fx.keyframeTrack("amount")->size() == 4);
+    fx.setKeyframe("amount", 10, 0.4);
+    CHECK(fx.keyframeTrack("amount")->size() == 4);
+    CHECK(fx.keyframeAt("amount", 10)->value == 0.4);
+
+    // Unsorted inserts stay sorted.
+    EffectInstance fx2 = makeEffectInstance("color.brightness");
+    fx2.setKeyframe("amount", 60, 0.5);
+    fx2.setKeyframe("amount", 0, 0.0);
+    fx2.setKeyframe("amount", 120, 1.0);
+    CHECK(fx2.keyframeTrack("amount")->size() == 3);
+    CHECK((*fx2.keyframeTrack("amount"))[0].frame == 0);
+    CHECK((*fx2.keyframeTrack("amount"))[2].frame == 120);
+
+    // Removal.
+    CHECK(fx.removeKeyframe("amount", 10));
+    CHECK(!fx.removeKeyframe("amount", 10));
+    CHECK(fx.keyframeTrack("amount")->size() == 3);
+    // Removing every point drops the track entirely.
+    CHECK(fx.removeKeyframe("amount", 0));
+    CHECK(fx.removeKeyframe("amount", 60));
+    CHECK(fx.removeKeyframe("amount", 120));
+    CHECK(fx.keyframeTrack("amount") == nullptr);
+    CHECK(!fx.hasKeyframes());
+
+    // Boolean params and unknown keys never keyframe.
+    EffectInstance grain = makeEffectInstance("filter.grain");
+    grain.setKeyframe("monochrome", 0, 1.0);
+    grain.setKeyframe("nope", 0, 1.0);
+    CHECK(!grain.hasKeyframes());
+
+    // clearKeyframes.
+    EffectInstance fx3 = makeEffectInstance("color.brightness");
+    fx3.setKeyframe("amount", 0, 0.0);
+    fx3.setKeyframe("amount", 60, 1.0);
+    fx3.clearKeyframes("amount");
+    CHECK(!fx3.hasKeyframes());
+    CHECK(fx3.paramAt("amount", 30) == fx3.param("amount"));
+
+    // Time-aware application: brightness 0 -> 1 across frames 0..8.
+    {
+        EffectInstance b = makeEffectInstance("color.brightness");
+        b.setKeyframe("amount", 0, 0.0);
+        b.setKeyframe("amount", 8, 1.0);
+        TestImg img(8, 8, 100, 100, 100);
+        runStack(img, {b}); // no time context -> static 0 -> unchanged
+        CHECK(img.at(3, 3, 0) == 100);
+
+        TestImg zero(8, 8, 100, 100, 100);
+        applyEffectStack(zero.px.data(), zero.w, zero.h, {b}, 0);
+        CHECK(zero.at(3, 3, 0) == 100); // amount 0
+
+        TestImg half(8, 8, 100, 100, 100);
+        applyEffectStack(half.px.data(), half.w, half.h, {b}, 4);
+        CHECK(half.at(3, 3, 0) == 228); // amount 0.5 -> +128
+
+        TestImg one(8, 8, 100, 100, 100);
+        applyEffectStack(one.px.data(), one.w, one.h, {b}, 8);
+        CHECK(one.at(3, 3, 0) == 255); // amount 1 -> +255 -> clamped
+        CHECK(one.at(3, 3, 2) == 255);
+    }
+
+    // Rebase: shift by 40 drops the two early points.
+    EffectInstance fx4 = makeEffectInstance("color.brightness");
+    fx4.setKeyframe("amount", 0, 0.0);
+    fx4.setKeyframe("amount", 30, 0.25);
+    fx4.setKeyframe("amount", 60, 0.5);
+    fx4.setKeyframe("amount", 90, 0.75);
+    fx4.rebaseKeyframes(40);
+    const std::vector<EffectKeyframe> *t4 = fx4.keyframeTrack("amount");
+    CHECK(t4 != nullptr);
+    if (t4) {
+        CHECK(t4->size() == 2);
+        CHECK((*t4)[0].frame == 20 && (*t4)[0].value == 0.5);
+        CHECK((*t4)[1].frame == 50 && (*t4)[1].value == 0.75);
+    }
+
+    // Split integration: the right half's keyframes shift with its
+    // in-point; the left half keeps its full track.
+    {
+        TimelineModel model;
+        model.setFps(24.0);
+        model.addTrack("V1", false);
+        const int64_t id = model.addClip(0, "a", "a", 0, 120, 0);
+        if (Clip *clip = model.clipById(id)) {
+            EffectInstance b = makeEffectInstance("color.brightness");
+            b.setKeyframe("amount", 0, 0.0);
+            b.setKeyframe("amount", 60, 0.5);
+            clip->effectStack.push_back(b);
+        }
+        CHECK(model.splitAt(40, 0));
+        const std::vector<EffectKeyframe> *left =
+            model.clips()[0].effectStack[0].keyframeTrack("amount");
+        const std::vector<EffectKeyframe> *right =
+            model.clips()[1].effectStack[0].keyframeTrack("amount");
+        CHECK(left != nullptr);
+        CHECK(right != nullptr);
+        if (left && right) {
+            CHECK(left->size() == 2);  // non-destructive: left keeps both
+            CHECK(right->size() == 1); // 60 - 40 = 20
+            CHECK((*right)[0].frame == 20 && (*right)[0].value == 0.5);
+        }
+    }
+}
+
 void testClipStackIntegration() {
     TimelineModel model;
     model.addTrack("V1", false);
@@ -710,5 +1180,12 @@ int main() {
     testStylizeEffects();
     testStackSemantics();
     testClipStackIntegration();
+    testPhase3IdentityAtNeutral();
+    testPhase3Color();
+    testPhase3Tone();
+    testPhase3Filter();
+    testPhase3BlurDistortGenerate();
+    testPhase3Stylize();
+    testKeyframes();
     return testExitCode("effects");
 }

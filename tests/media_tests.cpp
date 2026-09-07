@@ -10,6 +10,7 @@
 
 #include "test_harness.h"
 
+#include "exporter.h"
 #include "media_probe.h"
 #include "proxy_generator.h"
 #include "video_decoder.h"
@@ -222,6 +223,176 @@ void testProxyNeverUpscales() {
     CHECK(info.video.width == 320);
 }
 
+// ---- M5 Phase 3: the export pipeline ------------------------------------
+
+// Deterministic 64x36 pattern: per-frame blue ramp + moving white column.
+void fillExportFrame(int64_t frame, uint8_t *rgba, int w, int h) {
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint8_t *p = rgba + (static_cast<size_t>(y) * w + x) * 4;
+            p[0] = static_cast<uint8_t>((x * 4) & 0xFF);
+            p[1] = static_cast<uint8_t>((y * 7) & 0xFF);
+            p[2] = static_cast<uint8_t>((frame * 8) & 0xFF);
+            p[3] = 255;
+        }
+    }
+    const int marker = static_cast<int>(frame % 64);
+    for (int y = 0; y < h; ++y) {
+        uint8_t *p = rgba + (static_cast<size_t>(y) * 64 + marker) * 4;
+        p[0] = p[1] = p[2] = 255;
+    }
+}
+
+void testExport() {
+    const std::string dst = pathOf("export_out.mp4");
+    std::string error;
+
+    fc::ExportConfig config;
+    config.width = 64;
+    config.height = 36;
+    config.fps = 12.0;
+    config.totalFrames = 30;
+    config.crf = 18; // high quality: the pixel assertions stay tight
+
+    double lastProgress = -1.0;
+    int progressCalls = 0;
+    const bool ok = fc::Exporter::run(
+        dst, config,
+        [](int64_t frame, uint8_t *rgba) {
+            fillExportFrame(frame, rgba, 64, 36);
+            return true;
+        },
+        [&](double fraction) {
+            ++progressCalls;
+            CHECK(fraction >= lastProgress - 1e-9);
+            CHECK(fraction > 0.0 && fraction <= 1.0);
+            lastProgress = fraction;
+            return true;
+        },
+        error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("export failed: %s\n", error.c_str());
+        return;
+    }
+    CHECK(progressCalls == 30);
+
+    // Geometry + duration via the probe.
+    fc::MediaInfo info;
+    CHECK(fc::MediaProbe::probe(dst, info, error));
+    CHECK(info.hasVideo);
+    CHECK(info.video.width == 64);
+    CHECK(info.video.height == 36);
+    CHECK(std::fabs(info.durationSeconds() - 2.5) < 0.3);
+
+    // Frame count + content round-trip through the decoder.
+    fc::VideoDecoder decoder;
+    CHECK(decoder.open(dst, error));
+    fc::DecodedFrame frame;
+    int frames = 0;
+    bool sawMarker = false;
+    while (decoder.readFrame(frame, error)) {
+        if (frames == 0) {
+            // First frame: red channel follows x*4 (luma-dominant, tight
+            // tolerance after the yuv420p round-trip).
+            const size_t idx = (static_cast<size_t>(18) * frame.width + 16) * 4;
+            CHECK(std::abs(static_cast<int>(frame.rgba[idx]) - 64) <= 25);
+        }
+        // The moving marker column is white in frame 0 at x = 0.
+        if (frames == 0) {
+            const size_t idx = (static_cast<size_t>(18) * frame.width) * 4;
+            const int r = frame.rgba[idx];
+            const int g = frame.rgba[idx + 1];
+            const int b = frame.rgba[idx + 2];
+            if (r > 200 && g > 200 && b > 200) {
+                sawMarker = true;
+            }
+        }
+        ++frames;
+    }
+    CHECK(frames == 30);
+    CHECK(sawMarker);
+}
+
+void testExportOddDimsAndCancellation() {
+    std::string error;
+
+    // Odd dimensions are evened down (yuv420p needs even geometry); the
+    // provider renders at the evened size.
+    {
+        const std::string dst = pathOf("export_odd.mp4");
+        fc::ExportConfig config;
+        config.width = 65;
+        config.height = 37;
+        config.fps = 10.0;
+        config.totalFrames = 4;
+        CHECK(fc::Exporter::run(
+            dst, config,
+            [](int64_t, uint8_t *rgba) {
+                for (int y = 0; y < 36; ++y) {
+                    for (int x = 0; x < 64; ++x) {
+                        uint8_t *p = rgba + (static_cast<size_t>(y) * 64 + x) * 4;
+                        p[0] = p[1] = p[2] = 90;
+                        p[3] = 255;
+                    }
+                }
+                return true;
+            },
+            nullptr, error));
+        fc::MediaInfo info;
+        CHECK(fc::MediaProbe::probe(dst, info, error));
+        CHECK(info.video.width == 64);
+        CHECK(info.video.height == 36);
+    }
+
+    // Provider cancellation: no error text, partial file removed.
+    {
+        const std::string dst = pathOf("export_cancel.mp4");
+        fc::ExportConfig config;
+        config.width = 64;
+        config.height = 36;
+        config.fps = 12.0;
+        config.totalFrames = 30;
+        int provided = 0;
+        const bool ok = fc::Exporter::run(
+            dst, config,
+            [&](int64_t, uint8_t *rgba) {
+                ++provided;
+                fillExportFrame(0, rgba, 64, 36);
+                return provided < 6;
+            },
+            nullptr, error);
+        CHECK(!ok);
+        CHECK(error.empty());
+        CHECK(provided == 6);
+        std::error_code ec;
+        CHECK(!fs::exists(dst, ec)); // partial output cleaned up
+    }
+
+    // Progress-cancellation path.
+    {
+        const std::string dst = pathOf("export_cancel2.mp4");
+        fc::ExportConfig config;
+        config.width = 64;
+        config.height = 36;
+        config.fps = 12.0;
+        config.totalFrames = 30;
+        int calls = 0;
+        const bool ok = fc::Exporter::run(
+            dst, config,
+            [](int64_t frame, uint8_t *rgba) {
+                fillExportFrame(frame, rgba, 64, 36);
+                return true;
+            },
+            [&](double) { return ++calls < 4; }, error);
+        CHECK(!ok);
+        CHECK(error.empty());
+        CHECK(calls == 4);
+        std::error_code ec;
+        CHECK(!fs::exists(dst, ec));
+    }
+}
+
 void testProxyCancellation() {
     const std::string src = pathOf("cancel_src.mp4");
     const std::string dst = pathOf("cancel_dst.mp4");
@@ -259,6 +430,8 @@ int main() {
     testProxyGeneration();
     testProxyNeverUpscales();
     testProxyCancellation();
+    testExport();
+    testExportOddDimsAndCancellation();
 
     return testExitCode("media");
 }

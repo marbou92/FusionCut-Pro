@@ -14,6 +14,10 @@ add_executable(fc_transition_tests transition_tests.cpp)
 target_link_libraries(fc_transition_tests PRIVATE fc_core)
 add_test(NAME transitions COMMAND fc_transition_tests)
 
+add_executable(fc_project_tests project_format_tests.cpp)
+target_link_libraries(fc_project_tests PRIVATE fc_core)
+add_test(NAME project COMMAND fc_project_tests)
+
 if(TARGET fc_media)
     add_executable(fc_media_tests
         media_tests.cpp

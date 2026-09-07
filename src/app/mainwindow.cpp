@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <map>
+#include <memory>
 
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -17,6 +21,8 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
+#include <QProgressBar>
+#include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
@@ -28,19 +34,25 @@
 
 #include <fc/version.h>
 
+#include "color_panel.h"
 #include "decode_worker.h"
 #include "effect_controls_panel.h"
 #include "effects.h"
 #include "effects_panel.h"
+#include "export_dialog.h"
+#include "exporter.h"
 #include "ffmpeg_wrappers.h"
+#include "media_probe.h"
 #include "mixer_panel.h"
 #include "preview_canvas.h"
+#include "project_format.h"
 #include "project_panel.h"
 #include "quick_mode_view.h"
 #include "timeline_panel.h"
 #include "transitions.h"
 #include "transitions_panel.h"
 #include "transport_bar.h"
+#include "video_decoder.h"
 
 namespace fc {
 
@@ -137,6 +149,10 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+    if (!confirmSaveChanges()) {
+        event->ignore();
+        return;
+    }
     saveLayout();
     QMainWindow::closeEvent(event);
 }
@@ -273,14 +289,16 @@ void MainWindow::buildDecodeThread() {
 }
 
 void MainWindow::buildProWorkspace() {
-    // Left zone: Project | Effects | Transitions (tabbed).
+    // Left zone: Project | Effects | Transitions | Color (tabbed).
     projectPanel_ = new ProjectPanel(this);
     effectsPanel_ = new EffectsPanel(this);
     transitionsPanel_ = new TransitionsPanel(this); // M5 Phase 2
+    colorPanel_ = new ColorPanel(this);             // M5 Phase 3
     auto *leftTabs = new QTabWidget(this);
     leftTabs->addTab(projectPanel_, tr("Project"));
     leftTabs->addTab(effectsPanel_, tr("Effects"));
     leftTabs->addTab(transitionsPanel_, tr("Transitions"));
+    leftTabs->addTab(colorPanel_, tr("Color"));
     auto *leftDock = makeDock(tr("Project"), leftTabs, this);
     addDockWidget(Qt::LeftDockWidgetArea, leftDock);
 
@@ -352,24 +370,47 @@ void MainWindow::buildProWorkspace() {
     });
     connect(timeline_, &TimelinePanel::clipSelected, this, [this](int64_t id) {
         selectedClipId_ = id;
-        // M5: the Effect Controls panel edits the SELECTED clip's stack.
+        // M5: the Effect Controls + Color panels edit the SELECTED clip.
         const fc::Clip *clip = id > 0 ? model_.clipById(id) : nullptr;
-        effectControls_->setStack(id, clip ? clip->effectStack : std::vector<fc::EffectInstance>());
+        const std::vector<fc::EffectInstance> stack =
+            clip ? clip->effectStack : std::vector<fc::EffectInstance>();
+        effectControls_->setStack(id, stack);
+        colorPanel_->setClip(id, stack);
+        updateKeyframePanels();
     });
 
     // ---- M5 effects wiring ----
     connect(effectsPanel_, &EffectsPanel::effectAddRequested, this,
             [this](const QString &effectId) { addEffectToSelectedClip(effectId); });
+    // Both stack editors (Effect Controls + Color) emit the FULL new
+    // stack; the model write is shared. Only the OTHER panel re-syncs
+    // (rebuilding the emitting panel mid-drag would destroy its slider
+    // under the cursor); the emitter keeps its working copy, which the
+    // model just absorbed.
+    auto writeStack = [this](int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
+        fc::Clip *clip = model_.clipById(clipId);
+        if (!clip) {
+            return;
+        }
+        clip->effectStack = stack;
+        markDirty();
+        timeline_->update(); // fx badge visibility
+        if (frameClipId_ == clipId) {
+            applyProgramFrame(); // instant re-render from the raw cache
+        }
+    };
     connect(effectControls_, &EffectControlsPanel::stackChanged, this,
-            [this](int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
-                fc::Clip *clip = model_.clipById(clipId);
-                if (!clip) {
-                    return;
+            [this, writeStack](int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
+                writeStack(clipId, stack);
+                if (const fc::Clip *clip = model_.clipById(clipId)) {
+                    colorPanel_->setClip(clipId, clip->effectStack); // cheap refresh
                 }
-                clip->effectStack = stack;
-                timeline_->update(); // fx badge visibility
-                if (frameClipId_ == clipId) {
-                    applyProgramFrame(); // instant re-render from the raw cache
+            });
+    connect(colorPanel_, &ColorPanel::stackChanged, this,
+            [this, writeStack](int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
+                writeStack(clipId, stack);
+                if (const fc::Clip *clip = model_.clipById(clipId)) {
+                    effectControls_->setStack(clipId, clip->effectStack);
                 }
             });
 
@@ -391,6 +432,7 @@ void MainWindow::buildProWorkspace() {
                     statusBar()->showMessage(
                         tr("Duration rejected - it does not fit the outgoing clip."), 4000);
                 }
+                markDirty(); // M5 Phase 3: transition edits count
                 if (const fc::Transition *t = model_.transitionById(id)) {
                     pushTransitionToEditor(*t); // refresh slider bounds + value
                 }
@@ -407,6 +449,7 @@ void MainWindow::buildProWorkspace() {
                 effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
                 timeline_->update();
                 applyProgramFrame();
+                markDirty(); // M5 Phase 3
                 statusBar()->showMessage(tr("Transition removed."), 4000);
             });
     connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
@@ -461,11 +504,21 @@ void MainWindow::buildQuickWorkspace() {
 void MainWindow::buildMenus() {
     // ---- File ----
     QMenu *file = menuBar()->addMenu(tr("&File"));
+    QAction *openProjectAction =
+        addMenuAction(file, tr("&Open Project..."), QKeySequence(tr("Ctrl+O")));
+    connect(openProjectAction, &QAction::triggered, this, [this] { openProject(); });
+    QAction *saveProjectAction = addMenuAction(file, tr("&Save Project"), QKeySequence::Save);
+    connect(saveProjectAction, &QAction::triggered, this, [this] { saveProject(); });
+    QAction *saveAsAction =
+        addMenuAction(file, tr("Save Project &As..."), QKeySequence(tr("Ctrl+Shift+S")));
+    connect(saveAsAction, &QAction::triggered, this, [this] { saveProjectAs(); });
+    file->addSeparator();
     QAction *importAction = addMenuAction(file, tr("&Import Media..."), QKeySequence(tr("Ctrl+I")));
     connect(importAction, &QAction::triggered, this, [this] { importMedia(); });
     QAction *exportAction = addMenuAction(file, tr("&Export Media..."), QKeySequence(tr("Ctrl+M")));
-    exportAction->setEnabled(false);
-    exportAction->setToolTip(tr("Export ships with the M4+ editing core"));
+    exportAction->setToolTip(
+        tr("Renders the timeline (effects and transitions included) to an MP4"));
+    connect(exportAction, &QAction::triggered, this, [this] { exportMedia(); });
     file->addSeparator();
     QAction *quitAction = addMenuAction(file, tr("E&xit"), QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
@@ -742,6 +795,8 @@ void MainWindow::updateSequenceDuration() {
     // M5 Phase 2: every MainWindow model mutation funnels through here;
     // keep the transition editor in sync with pruned/clamped transitions.
     syncTransitionEditor();
+    // M5 Phase 3: same funnel marks the project dirty.
+    markDirty();
 }
 
 void MainWindow::generateProxy(const QString &sourcePath) {
@@ -785,6 +840,9 @@ void MainWindow::stepFrames(int frames) {
 
 void MainWindow::requestFrameAt(double seconds) {
     playhead_ = seconds;
+    // M5 Phase 3: keyframed parameters display at the playhead's position
+    // inside the SELECTED clip.
+    updateKeyframePanels();
     // M4b composite program monitor: resolve the topmost video clip
     // under the timeline playhead and map the position into that
     // clip's source (timeline frame - clip start + source in-point).
@@ -841,13 +899,21 @@ void MainWindow::applyProgramFrame() {
     if (rawProgramFrame_.isNull()) {
         return;
     }
+    const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
     const fc::Clip *clip = model_.clipById(frameClipId_);
     QImage out = rawProgramFrame_; // shallow copy; bits() detaches below
     if (out.format() != QImage::Format_RGBA8888) {
         out = out.convertToFormat(QImage::Format_RGBA8888);
     }
     if (clip && !clip->effectStack.empty()) {
-        fc::applyEffectStack(out.bits(), out.width(), out.height(), clip->effectStack);
+        // M5 Phase 3: the frame's CLIP-RELATIVE position resolves
+        // keyframed parameters (static values when the playhead sits
+        // outside the clip).
+        int64_t clipFrame = fc::kNoKeyframeTime;
+        if (frame >= clip->timelineStart && frame < clip->timelineEnd()) {
+            clipFrame = frame - clip->timelineStart;
+        }
+        fc::applyEffectStack(out.bits(), out.width(), out.height(), clip->effectStack, clipFrame);
     }
 
     // M5 Phase 2: when the playhead sits inside a transition window AND
@@ -857,7 +923,6 @@ void MainWindow::applyProgramFrame() {
     // order: per-clip effects, then the transition blend), and is scaled
     // to the outgoing frame's geometry when the sources differ.
     if (clip) {
-        const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
         fc::TransitionSample sample;
         if (model_.resolveTransitionAt(frame, clip->trackIndex, sample) &&
             sample.leftClipId == frameClipId_ && heldIncomingClipId_ == sample.rightClipId &&
@@ -868,7 +933,10 @@ void MainWindow::applyProgramFrame() {
                 held = held.convertToFormat(QImage::Format_RGBA8888);
             }
             if (right && !right->effectStack.empty()) {
-                fc::applyEffectStack(held.bits(), held.width(), held.height(), right->effectStack);
+                // The HELD frame is the incoming clip's FIRST frame: its
+                // clip-relative position is 0.
+                fc::applyEffectStack(held.bits(), held.width(), held.height(), right->effectStack,
+                                     0);
             }
             if (held.size() != out.size()) {
                 held = held.scaled(out.size(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
@@ -896,12 +964,14 @@ void MainWindow::addEffectToSelectedClip(const QString &effectId) {
         return;
     }
     clip->effectStack.push_back(fc::makeEffectInstance(effectId.toStdString()));
+    markDirty();
     const fc::EffectDescriptor *d = fc::findEffect(effectId.toStdString());
     statusBar()->showMessage(tr("Added %1 to %2 (edit it in Effect Controls)")
                                  .arg(d ? QString::fromStdString(d->label) : effectId,
                                       QString::fromStdString(clip->label)),
                              6000);
     effectControls_->setStack(selectedClipId_, clip->effectStack);
+    colorPanel_->setClip(selectedClipId_, clip->effectStack);
     timeline_->update(); // fx badge
     if (frameClipId_ == selectedClipId_) {
         applyProgramFrame();
@@ -1036,6 +1106,442 @@ void MainWindow::syncTransitionEditor() {
         return;
     }
     pushTransitionToEditor(*t); // durations may have clamped
+}
+
+// ---------------------------------------------------------------------------
+// M5 Phase 3: keyframe panel sync + project persistence + export.
+// ---------------------------------------------------------------------------
+
+void MainWindow::updateKeyframePanels() {
+    if (selectedClipId_ <= 0) {
+        return;
+    }
+    const fc::Clip *clip = model_.clipById(selectedClipId_);
+    if (!clip) {
+        return;
+    }
+    const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
+    if (frame >= clip->timelineStart && frame < clip->timelineEnd()) {
+        const int64_t inClip = frame - clip->timelineStart;
+        effectControls_->setClipFrame(inClip);
+        colorPanel_->setClipFrame(inClip);
+    } else {
+        effectControls_->setClipFrame(-1);
+        colorPanel_->setClipFrame(-1);
+    }
+}
+
+void MainWindow::markDirty() {
+    if (!dirty_) {
+        dirty_ = true;
+        updateWindowTitle();
+    }
+}
+
+void MainWindow::updateWindowTitle() {
+    const QString name =
+        projectPath_.isEmpty() ? tr("Untitled") : QFileInfo(projectPath_).fileName();
+    setWindowTitle(tr("FusionCut Pro - %1[*]").arg(name));
+    setWindowModified(dirty_);
+}
+
+void MainWindow::saveProject() {
+    if (projectPath_.isEmpty()) {
+        saveProjectAs();
+        return;
+    }
+    const std::string text = fc::serializeProject(model_);
+    QFile file(projectPath_);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, tr("Save Project"),
+                             tr("Could not write %1: %2").arg(projectPath_, file.errorString()));
+        return;
+    }
+    const qint64 written = file.write(text.data(), static_cast<qint64>(text.size()));
+    file.close();
+    if (written != static_cast<qint64>(text.size())) {
+        QMessageBox::warning(this, tr("Save Project"),
+                             tr("Could not write %1: the file is incomplete.").arg(projectPath_));
+        return;
+    }
+    dirty_ = false;
+    updateWindowTitle();
+    statusBar()->showMessage(tr("Project saved: %1").arg(projectPath_), 6000);
+}
+
+bool MainWindow::saveProjectAs() {
+    QString suggested = projectPath_;
+    if (suggested.isEmpty()) {
+        suggested = QStringLiteral("untitled.fcp");
+    }
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Save Project As"), suggested, tr("FusionCut Project (*.fcp);;All Files (*)"));
+    if (path.isEmpty()) {
+        return false;
+    }
+    projectPath_ = path;
+    saveProject();
+    return !dirty_;
+}
+
+void MainWindow::openProject() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Open Project"), QString(), tr("FusionCut Project (*.fcp);;All Files (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    if (!confirmSaveChanges()) {
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Open Project"),
+                             tr("Could not read %1: %2").arg(path, file.errorString()));
+        return;
+    }
+    const QByteArray raw = file.readAll();
+    const std::string text(raw.constData(), static_cast<size_t>(raw.size()));
+    std::string error;
+    if (!fc::parseProject(text, model_, error)) {
+        QMessageBox::warning(this, tr("Open Project"),
+                             tr("This is not a valid FusionCut project:%1")
+                                 .arg(QString::fromStdString("\n" + error)));
+        return;
+    }
+
+    // Reset the session around the loaded model.
+    startPlayback(false);
+    projectPath_ = path;
+    dirty_ = false;
+    updateWindowTitle();
+    selectedClipId_ = -1;
+    selectedTransitionId_ = -1;
+    lastProgramClipId_ = -1;
+    frameClipId_ = -1;
+    pendingProgramSeek_ = false;
+    pendingAddClipPath_.clear();
+    rawProgramFrame_ = QImage();
+    heldIncomingFrame_ = QImage();
+    heldIncomingClipId_ = -1;
+    pendingBFirstClipId_ = -1;
+    pendingBFirst_ = false;
+    bRequestInFlight_ = false;
+    bFailedClipId_ = -1;
+    bLoadedPath_.clear();
+    playhead_ = 0.0;
+    timeline_->clearSelection();
+    timeline_->clearTransitionSelection();
+    effectControls_->setStack(-1, {});
+    effectControls_->setClipFrame(-1);
+    effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
+    colorPanel_->setClip(-1, {});
+    colorPanel_->setClipFrame(-1);
+
+    // Rebuild the media library from the clip sources (order of first
+    // use); proxies survive when their generated file still exists.
+    projectPanel_->library().clear();
+    for (const fc::Clip &clip : model_.clips()) {
+        const QString src = QString::fromStdString(clip.sourcePath);
+        if (projectPanel_->library().indexOfPath(src) >= 0) {
+            continue;
+        }
+        fc::MediaItem item;
+        item.path = src;
+        item.displayName = QFileInfo(src).completeBaseName();
+        const QString proxy = proxyPathFor(src);
+        if (QFileInfo::exists(proxy)) {
+            item.proxyPath = proxy;
+        }
+        projectPanel_->addMedia(item);
+    }
+
+    duration_ = model_.durationSeconds();
+    transport_->setMedia(duration_ > 0.0 ? duration_ : 10.0, fps_);
+    updateSequenceDuration();
+    timeline_->setModel(&model_); // content refresh (same model object)
+    timeline_->update();
+
+    // Load the first video clip into the monitor.
+    for (const fc::Clip &clip : model_.clips()) {
+        const fc::Track *track = model_.trackAt(clip.trackIndex);
+        if (track && !track->isAudio) {
+            loadClip(QString::fromStdString(clip.sourcePath));
+            break;
+        }
+    }
+    statusBar()->showMessage(tr("Project loaded: %1 (%2 clips, %3 transitions)")
+                                 .arg(path)
+                                 .arg(model_.clips().size())
+                                 .arg(model_.transitions().size()),
+                             8000);
+}
+
+bool MainWindow::confirmSaveChanges() {
+    if (!dirty_) {
+        return true;
+    }
+    const QMessageBox::StandardButton choice = QMessageBox::question(
+        this, tr("Save Project?"), tr("The project has unsaved changes."),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (choice == QMessageBox::Save) {
+        saveProject();
+        return !dirty_; // a failed save keeps the window open
+    }
+    return choice == QMessageBox::Discard;
+}
+
+void MainWindow::exportMedia() {
+    if (model_.clips().empty()) {
+        statusBar()->showMessage(tr("Nothing to export - import media and build a timeline first."),
+                                 6000);
+        return;
+    }
+    if (exportRunning_) {
+        return;
+    }
+    const QString suggested = QStringLiteral("FusionCutPro-Export.mp4");
+    const QString path = QFileDialog::getSaveFileName(this, tr("Export Media"), suggested,
+                                                      tr("MP4 Video (*.mp4);;All Files (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    // Suggest the first video clip's native size.
+    int srcW = 0;
+    int srcH = 0;
+    for (const fc::Clip &clip : model_.clips()) {
+        const fc::Track *track = model_.trackAt(clip.trackIndex);
+        if (!track || track->isAudio) {
+            continue;
+        }
+        const int index =
+            projectPanel_->library().indexOfPath(QString::fromStdString(clip.sourcePath));
+        const QString probePath = (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                                      ? projectPanel_->library().at(index)->proxyPath
+                                      : QString::fromStdString(clip.sourcePath);
+        fc::MediaInfo info;
+        std::string probeError;
+        if (fc::MediaProbe::probe(probePath.toStdString(), info, probeError) && info.hasVideo) {
+            srcW = info.video.width;
+            srcH = info.video.height;
+        }
+        break;
+    }
+
+    const int64_t totalFrames = std::max<int64_t>(1, model_.durationFrames());
+    ExportDialog dialog(fps_, totalFrames, srcW, srcH, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    startPlayback(false);
+    exportCancel_ = false;
+    exportRunning_ = true;
+
+    // Modal progress dialog; the export itself runs on the decode worker
+    // thread (see runExportJob) and closes it via finishExport.
+    exportDialog_ = new QDialog(this);
+    exportDialog_->setWindowTitle(tr("Exporting Media"));
+    exportDialog_->setModal(true);
+    exportBar_ = new QProgressBar(exportDialog_);
+    exportBar_->setRange(0, 100);
+    exportBar_->setValue(0);
+    auto *cancel = new QPushButton(tr("Cancel"), exportDialog_);
+    connect(cancel, &QPushButton::clicked, this, [this, cancel] {
+        exportCancel_ = true;
+        cancel->setEnabled(false);
+        cancel->setText(tr("Cancelling..."));
+    });
+    auto *layout = new QVBoxLayout(exportDialog_);
+    layout->addWidget(exportBar_);
+    layout->addWidget(cancel, 0, Qt::AlignRight);
+
+    // The worker-thread job is queued behind anything the decoder is
+    // doing; the dialog spins the UI event loop in the meantime.
+    const int width = dialog.outputWidth();
+    const int height = dialog.outputHeight();
+    const int crf = dialog.crf();
+    const QString preset = dialog.preset();
+    exportDialog_->show();
+    QMetaObject::invokeMethod(worker_, [this, path, width, height, crf, preset] {
+        runExportJob(path, width, height, crf, preset);
+    });
+}
+
+void MainWindow::runExportJob(const QString &path, int width, int height, int crf,
+                              const QString &preset) {
+    // ---- Runs on the decode worker's thread. The modal progress dialog
+    // blocks all UI input, so the timeline model is effectively frozen
+    // while this job reads it. ----
+    const int64_t totalFrames = model_.durationFrames();
+    const double fps = fps_ > 1.0 ? fps_ : 24.0;
+
+    // Source path -> decode path (proxy when one exists), frozen up front.
+    std::map<std::string, std::string> decodePaths;
+    for (const fc::Clip &clip : model_.clips()) {
+        if (decodePaths.count(clip.sourcePath)) {
+            continue;
+        }
+        const int index =
+            projectPanel_->library().indexOfPath(QString::fromStdString(clip.sourcePath));
+        decodePaths[clip.sourcePath] =
+            (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                ? projectPanel_->library().at(index)->proxyPath.toStdString()
+                : clip.sourcePath;
+    }
+
+    // Per-source decoders + last-decoded position (sequential reads,
+    // seeks only on jumps); held transition frames cached per right clip.
+    std::map<std::string, std::unique_ptr<fc::VideoDecoder>> decoders;
+    std::map<std::string, double> nextPts;
+    std::map<int64_t, QImage> held;
+
+    auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
+        const double srcSec =
+            static_cast<double>(timelineFrame - clip.timelineStart + clip.sourceInFrames) / fps;
+        const std::string &decPath = decodePaths[clip.sourcePath];
+        auto it = decoders.find(decPath);
+        if (it == decoders.end()) {
+            std::string openError;
+            auto decoder = std::make_unique<fc::VideoDecoder>();
+            if (!decoder->open(decPath, openError)) {
+                return false;
+            }
+            it = decoders.emplace(decPath, std::move(decoder)).first;
+            nextPts[decPath] = -1.0e9;
+        }
+        fc::VideoDecoder *dec = it->second.get();
+        const double expect = nextPts[decPath];
+        std::string err;
+        if (srcSec < expect - 0.5 / fps || srcSec > expect + 2.5 / fps) {
+            if (!dec->seekToSeconds(srcSec, err)) {
+                return false;
+            }
+        }
+        fc::DecodedFrame df;
+        if (!dec->readFrame(df, err)) {
+            return false;
+        }
+        nextPts[decPath] = df.ptsSeconds + 1.0 / fps;
+        out = QImage(df.rgba.data(), df.width, df.height, QImage::Format_RGBA8888).copy();
+        return true;
+    };
+
+    fc::ExportConfig config;
+    config.width = width;
+    config.height = height;
+    config.fps = fps;
+    config.totalFrames = totalFrames;
+    config.crf = crf;
+    config.preset = preset.toStdString();
+
+    auto provider = [&](int64_t f, uint8_t *rgba) -> bool {
+        if (exportCancel_.load()) {
+            return false;
+        }
+        QImage out(width, height, QImage::Format_RGBA8888);
+        out.fill(Qt::black);
+        const fc::Clip *clip = model_.activeVideoClipAt(f);
+        if (clip) {
+            QImage live;
+            if (fetchFrame(*clip, f, live)) {
+                if (live.format() != QImage::Format_RGBA8888) {
+                    live = live.convertToFormat(QImage::Format_RGBA8888);
+                }
+                fc::applyEffectStack(live.bits(), live.width(), live.height(), clip->effectStack,
+                                     f - clip->timelineStart);
+                bool composited = false;
+                fc::TransitionSample sample;
+                if (model_.resolveTransitionAt(f, clip->trackIndex, sample) &&
+                    sample.leftClipId == clip->id) {
+                    auto heldIt = held.find(sample.rightClipId);
+                    if (heldIt == held.end()) {
+                        const fc::Clip *right = model_.clipById(sample.rightClipId);
+                        QImage hf;
+                        if (right && fetchFrame(*right, right->timelineStart, hf)) {
+                            heldIt = held.emplace(sample.rightClipId, hf).first;
+                        } else {
+                            heldIt = held.emplace(sample.rightClipId, QImage()).first;
+                        }
+                    }
+                    if (!heldIt->second.isNull()) {
+                        QImage heldFrame = heldIt->second;
+                        if (heldFrame.format() != QImage::Format_RGBA8888) {
+                            heldFrame = heldFrame.convertToFormat(QImage::Format_RGBA8888);
+                        }
+                        const fc::Clip *right = model_.clipById(sample.rightClipId);
+                        if (right && !right->effectStack.empty()) {
+                            // The held frame is the incoming clip's first
+                            // frame: clip-relative position 0.
+                            fc::applyEffectStack(heldFrame.bits(), heldFrame.width(),
+                                                 heldFrame.height(), right->effectStack, 0);
+                        }
+                        QImage a = live.scaled(width, height, Qt::IgnoreAspectRatio,
+                                               Qt::SmoothTransformation);
+                        QImage b = heldFrame.scaled(width, height, Qt::IgnoreAspectRatio,
+                                                    Qt::SmoothTransformation);
+                        if (a.format() == QImage::Format_RGBA8888 &&
+                            b.format() == QImage::Format_RGBA8888 && width > 0 && height > 0) {
+                            fc::applyTransition(a.bits(), b.bits(), out.bits(), width, height,
+                                                sample.kind, sample.progress);
+                            composited = true;
+                        }
+                    }
+                }
+                if (!composited) {
+                    out =
+                        live.scaled(width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                            .convertToFormat(QImage::Format_RGBA8888);
+                }
+            }
+        }
+        if (out.format() == QImage::Format_RGBA8888 &&
+            out.bytesPerLine() == static_cast<int>(width) * 4) {
+            std::memcpy(rgba, out.constBits(), static_cast<size_t>(width) * height * 4);
+        }
+        return true;
+    };
+
+    auto progressCb = [&](double fraction) -> bool {
+        if (exportCancel_.load()) {
+            return false;
+        }
+        const int percent = static_cast<int>(std::lround(fraction * 100.0));
+        QMetaObject::invokeMethod(
+            this, [this, percent] { updateExportProgress(percent); }, Qt::QueuedConnection);
+        return true;
+    };
+
+    std::string error;
+    const bool ok = fc::Exporter::run(path.toStdString(), config, provider, progressCb, error);
+    const QString errorText = QString::fromStdString(error);
+    QMetaObject::invokeMethod(
+        this, [this, ok, errorText, path] { finishExport(ok, errorText, path); },
+        Qt::QueuedConnection);
+}
+
+void MainWindow::updateExportProgress(int percent) {
+    if (exportBar_) {
+        exportBar_->setValue(percent);
+    }
+    statusBar()->showMessage(tr("Exporting... %1%").arg(percent));
+}
+
+void MainWindow::finishExport(bool ok, const QString &error, const QString &path) {
+    exportRunning_ = false;
+    if (exportDialog_) {
+        exportDialog_->deleteLater();
+        exportDialog_ = nullptr;
+        exportBar_ = nullptr;
+    }
+    if (ok) {
+        statusBar()->showMessage(tr("Export complete: %1").arg(path), 8000);
+    } else if (error.isEmpty()) {
+        statusBar()->showMessage(tr("Export cancelled - no file was written."), 6000);
+    } else {
+        QMessageBox::warning(this, tr("Export Media"),
+                             tr("The export failed:%1").arg(QString("\n" + error)));
+    }
 }
 
 void MainWindow::saveLayout() const {

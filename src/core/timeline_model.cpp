@@ -82,6 +82,28 @@ int64_t TimelineModel::addClip(int trackIndex, const std::string &sourcePath,
     return clip.id;
 }
 
+void TimelineModel::replaceAll(double fps, std::vector<Track> tracks, std::vector<Clip> clips,
+                               std::vector<Transition> transitions) {
+    // Indices are re-derived from position (tracks arrive in file order);
+    // clip trackIndex references were validated against this count by the
+    // parser before the move.
+    for (size_t i = 0; i < tracks.size(); ++i) {
+        tracks[i].index = static_cast<int>(i);
+    }
+    fps_ = fps;
+    tracks_ = std::move(tracks);
+    clips_ = std::move(clips);
+    transitions_ = std::move(transitions);
+    nextId_ = 1;
+    for (const Clip &clip : clips_) {
+        nextId_ = std::max(nextId_, clip.id + 1);
+    }
+    for (const Transition &t : transitions_) {
+        nextId_ = std::max(nextId_, t.id + 1);
+    }
+    pruneTransitions(); // belt and braces: the file's invariants hold
+}
+
 bool TimelineModel::removeClip(int64_t id) {
     for (auto it = clips_.begin(); it != clips_.end(); ++it) {
         if (it->id == id) {
@@ -112,6 +134,17 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
             right.sourceInFrames = clip.sourceInFrames + sourceDelta;
             right.timelineStart = frame;
             clip.sourceOutFrames = right.sourceInFrames; // left half ends here
+            // M5 Phase 3: the right half inherits the stack, so its
+            // keyframe tracks shift with its new in-point. Keyframe frames
+            // are CLIP-RELATIVE TIMELINE frames, so the offset is the
+            // timeline split position, not the rate-adjusted source delta.
+            // Points before the split drop; the left half keeps its full
+            // tracks - unreachable points simply wait past its (shorter)
+            // extent, and would come back if it is extended again
+            // (non-destructive).
+            for (EffectInstance &fx : right.effectStack) {
+                fx.rebaseKeyframes(frame - start);
+            }
             clips_.insert(clips_.begin() + static_cast<ptrdiff_t>(i + 1), right);
             // M5 Phase 2: a transition on this clip's END boundary now
             // belongs to the RIGHT half (the half that owns the cut).

@@ -175,6 +175,15 @@ void EffectControlsPanel::setStack(int64_t clipId, const std::vector<fc::EffectI
     pages_->setCurrentWidget(stackPage_);
 }
 
+void EffectControlsPanel::setClipFrame(int64_t frame) {
+    if (clipFrame_ == frame || rows_.empty()) {
+        clipFrame_ = frame;
+        return;
+    }
+    clipFrame_ = frame;
+    refreshParamValues();
+}
+
 void EffectControlsPanel::setTransition(int64_t transitionId, const QString &kindLabel,
                                         int64_t durationFrames, int64_t maxDurationFrames,
                                         const QString &pairLabel, double fps) {
@@ -233,7 +242,8 @@ void EffectControlsPanel::rebuildList() {
 }
 
 void EffectControlsPanel::rebuildParams() {
-    // Clear the old parameter widgets.
+    // Clear the old parameter widgets (and the live row registry).
+    rows_.clear();
     delete paramsHost_;
     paramsHost_ = new QWidget(this);
     paramsScroll_->setWidget(paramsHost_);
@@ -263,13 +273,18 @@ void EffectControlsPanel::rebuildParams() {
         return;
     }
 
+    // Keyframe hint: the clip-relative frame the diamond buttons use.
+    // (Signal handlers read clipFrame_ LIVE - the playhead moves without
+    // a rebuild - so this value only seeds the initial widget state.)
+    const int64_t kfFrame = clipFrame_;
+
     for (size_t i = 0; i < d->params.size(); ++i) {
         const fc::EffectParamDescriptor &p = d->params[i];
         // Ensure the value slot exists (legacy instances).
         if (i >= fx.values.size()) {
             fx.setParam(p.key, p.defaultValue); // resizes + fills defaults
         }
-        const double value = fx.values[i];
+        const double value = (kfFrame >= 0) ? fx.paramAt(p.key, kfFrame) : fx.param(p.key);
 
         auto *rowWidget = new QWidget(paramsHost_);
         auto *rowLayout = new QHBoxLayout(rowWidget);
@@ -299,20 +314,65 @@ void EffectControlsPanel::rebuildParams() {
             slider->setValue(static_cast<int>(std::lround(t * kSliderSteps)));
             auto *valueLabel = new QLabel(formatValue(p, value), rowWidget);
             valueLabel->setMinimumWidth(56);
+
+            // M5 Phase 3: the keyframe diamond. Toggles the keyframe at
+            // the current clip frame (filled when one exists there).
+            auto *diamond = new QPushButton(QString::fromUtf8("\u25C6"), rowWidget);
+            diamond->setToolTip(tr("Toggle a keyframe for this parameter at the current "
+                                   "playhead position (inside the clip)"));
+            diamond->setFlat(true);
+            diamond->setFixedWidth(28);
+            const bool has = fx.keyframeAt(p.key, kfFrame) != nullptr;
+            diamond->setText(has ? QString::fromUtf8("\u25C6") : QString::fromUtf8("\u25C7"));
+
             const size_t idx = i;
-            connect(slider, &QSlider::valueChanged, this,
-                    [this, idx, p, slider, valueLabel](int sliderPos) {
-                        const int row = list_->currentRow();
-                        if (row < 0 || row >= static_cast<int>(stack_.size())) {
+            const int currentRowCapture = row;
+            connect(diamond, &QPushButton::clicked, this,
+                    [this, idx, currentRowCapture, p, slider, diamond]() {
+                        if (currentRowCapture != list_->currentRow() ||
+                            currentRowCapture >= static_cast<int>(stack_.size())) {
                             return;
                         }
-                        EffectInstance &fx = stack_[static_cast<size_t>(row)];
-                        if (idx >= fx.values.size()) {
+                        const int64_t frame = clipFrame_; // live playhead-in-clip
+                        if (frame < 0) {
+                            return; // outside the clip: nothing to key
+                        }
+                        EffectInstance &efx = stack_[static_cast<size_t>(currentRowCapture)];
+                        if (idx >= efx.values.size()) {
+                            return;
+                        }
+                        if (efx.keyframeAt(p.key, frame)) {
+                            efx.removeKeyframe(p.key, frame);
+                        } else {
+                            // Key the CURRENT value (slider position).
+                            const double pos = static_cast<double>(slider->value());
+                            const double v =
+                                p.minValue + pos / kSliderSteps * (p.maxValue - p.minValue);
+                            efx.setParam(p.key, v);
+                            efx.setKeyframe(p.key, frame, v);
+                        }
+                        refreshParamValues();
+                        emitStack();
+                    });
+
+            connect(slider, &QSlider::valueChanged, this,
+                    [this, idx, p, slider, valueLabel, currentRowCapture](int sliderPos) {
+                        if (currentRowCapture != list_->currentRow() ||
+                            currentRowCapture >= static_cast<int>(stack_.size())) {
+                            return;
+                        }
+                        EffectInstance &fx2 = stack_[static_cast<size_t>(currentRowCapture)];
+                        if (idx >= fx2.values.size()) {
                             return;
                         }
                         const double v = p.minValue + static_cast<double>(sliderPos) /
                                                           kSliderSteps * (p.maxValue - p.minValue);
-                        fx.values[idx] = v;
+                        fx2.values[idx] = v; // static value follows every edit
+                        if (fx2.keyframeTrack(p.key) && clipFrame_ >= 0) {
+                            // The param is keyframed: edits write the
+                            // keyframe at the playhead's frame (live).
+                            fx2.setKeyframe(p.key, clipFrame_, v);
+                        }
                         valueLabel->setText(formatValue(p, v));
                         Q_UNUSED(slider)
                         emitStack();
@@ -320,10 +380,58 @@ void EffectControlsPanel::rebuildParams() {
             rowLayout->addWidget(name);
             rowLayout->addWidget(slider, 1);
             rowLayout->addWidget(valueLabel);
+            rowLayout->addWidget(diamond);
+
+            ParamRow liveRow;
+            liveRow.key = p.key;
+            liveRow.minValue = p.minValue;
+            liveRow.maxValue = p.maxValue;
+            liveRow.slider = slider;
+            liveRow.value = valueLabel;
+            liveRow.keyframe = diamond;
+            rows_.push_back(liveRow);
         }
         form->addWidget(rowWidget);
     }
     form->addStretch(1);
+}
+
+void EffectControlsPanel::refreshParamValues() {
+    const int row = list_->currentRow();
+    if (row < 0 || row >= static_cast<int>(stack_.size()) || rows_.empty()) {
+        return;
+    }
+    const EffectInstance &fx = stack_[static_cast<size_t>(row)];
+    const fc::EffectDescriptor *d = fx.descriptor();
+    if (!d) {
+        return;
+    }
+    const int64_t kfFrame = clipFrame_;
+    for (const ParamRow &r : rows_) {
+        // Locate the descriptor param for formatting precision.
+        const fc::EffectParamDescriptor *p = nullptr;
+        for (const fc::EffectParamDescriptor &cand : d->params) {
+            if (cand.key == r.key) {
+                p = &cand;
+                break;
+            }
+        }
+        if (!p || !r.slider) {
+            continue;
+        }
+        const double v = (kfFrame >= 0) ? fx.paramAt(r.key, kfFrame) : fx.param(r.key);
+        const double t = (v - r.minValue) / (r.maxValue - r.minValue);
+        r.slider->blockSignals(true);
+        r.slider->setValue(static_cast<int>(std::lround(t * kSliderSteps)));
+        r.slider->blockSignals(false);
+        if (r.value) {
+            r.value->setText(formatValue(*p, v));
+        }
+        if (r.keyframe) {
+            r.keyframe->setText(fx.keyframeAt(r.key, kfFrame) ? QString::fromUtf8("\u25C6")
+                                                              : QString::fromUtf8("\u25C7"));
+        }
+    }
 }
 
 void EffectControlsPanel::emitStack() {

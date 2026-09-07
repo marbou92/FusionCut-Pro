@@ -4,6 +4,161 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-09-06
+
+**M5 Phase 3: the milestone COMPLETES. The effect catalog grows from 25
+to 52 (two new categories: Distort, Generate), every Number parameter
+can be KEYFRAMED with linear interpolation, projects SAVE and LOAD as
+deterministic JSON (`.fcp`), the Color panel lands as the colorist's
+grade view, and the long-promised export pipeline ships - File > Export
+Media renders the timeline through the exact program-monitor pipeline
+(effects with keyframes + cut transitions) to an H.264 MP4. 7471 core
+checks + 400 media checks green.**
+
+### Added - effects catalog: 25 -> 52 (fc_core)
+- Color (5 new): Color Correction (the 9-knob combined grade that
+  backs the Color panel: exposure, contrast, highlights, shadows,
+  saturation, vibrance, temperature, tint, hue - every default
+  neutral, so a default instance is an exact identity), Channel Gain,
+  Colorize (hue tint scaled by luma), Duotone (luma mapped between two
+  hue stops), Faded Film.
+- Tone (4 new): Highlights and Shadows (luma-weighted lifts), Gain,
+  Bayer Dither (4x4 ordered dither to N levels).
+- Filter (5 new): Mirror (axis + vertical), Flip, Glow (box blur +
+  screen blend), Scanlines, Halftone (luma-tracked dot radius).
+- Blur & Sharpen (3 new): Motion Blur H / V (single-axis box averages)
+  and Radial Blur (8-sample zoom along the center ray).
+- Distort (new category, 4): Wave (sine displacement, one axis),
+  Ripple (radial rings), Fisheye (barrel pull), Tile (wrap tiling).
+- Generate (new category, 4): Color Bars (7-column SMPTE-style),
+  Gradient, Grid, Noise (the film-grain hash family).
+- Stylize (2 new): Thermal (6-stop ironbow palette over luma) and
+  Glitch (hash-driven per-block-row displacement).
+- Same contract as Phase 1: RGBA8888 in place, alpha preserved,
+  deterministic integer / explicitly-rounded-double math, endpoint
+  identities at neutral defaults, reference-pixel unit tests.
+
+### Added - keyframes (fc_core + Effect Controls)
+- `fc::EffectKeyframe {frame, value}` + per-parameter keyframe tracks
+  on `EffectInstance` (clip-RELATIVE frames: 0 = the clip's first
+  timeline frame). `paramAt(key, clipFrame)` resolves linear
+  interpolation inside the bracketing pair, clamps to the endpoints
+  outside; the static `values` stay authoritative for non-keyframed
+  params and the pre-Phase-3 call sites.
+- `applyEffectStack(..., clipFrame = kNoKeyframeTime)`: a time context
+  resolves every keyframed param per frame (the preview, the export,
+  and the panels all pass the same clip-relative position, so what you
+  scrub is exactly what renders).
+- Editing API: `setKeyframe` (clamped, sorted, dedup by frame),
+  `removeKeyframe`, `keyframeAt`, `keyframeTrack`, `clearKeyframes`,
+  `hasKeyframes`, `rebaseKeyframes`. Boolean params never keyframe.
+- `TimelineModel::splitAt` RE-BASES the right half's tracks with its
+  new in-point (points before the split drop; the left half keeps its
+  full tracks non-destructively - unreachable points wait past its
+  extent and return if it is extended again).
+- Effect Controls: a keyframe DIAMOND on every Number param row -
+  click to toggle a keyframe at the playhead's position inside the
+  clip; when a param is keyframed, its slider displays the resolved
+  value at the playhead and edits write the keyframe there. The Color
+  panel follows the same display/edit semantics for the corrector.
+
+### Added - project persistence (fc_core, new `project_format.{h,cpp}`)
+- `fc::serializeProject(model)`: deterministic JSON (format 1) - same
+  tree, same bytes, every platform. Fixed field order, shortest-exact
+  number formatting, escaped strings (incl. \uXXXX surrogate pairs).
+  Tracks, clips (ids, in/out, start, rate, full effect stacks with
+  params and keyframes), transitions (ids, pair linkage, duration),
+  fps. Media files are referenced by path only - nothing is embedded
+  (the 1 GB budget).
+- `fc::parseProject(text, model, error)`: a strict hand-rolled JSON
+  subset parser + schema validator. Structural errors and schema
+  violations (missing/mistyped fields, dangling track or clip
+  references, invalid clip geometry, non-adjacent transition pairs,
+  duplicate ids) fail the whole parse - the model is never partially
+  loaded. Known effects load params BY KEY (catalog order changes
+  never corrupt a file); unknown effect / transition ids round-trip
+  untouched (the forward-compatibility contract). `TimelineModel::
+  replaceAll` swaps the whole tree in one step and re-seeds the id
+  counter above the largest id seen.
+- App: File > Open Project (Ctrl+O), Save Project (Ctrl+S), Save
+  Project As (Ctrl+Shift+S); a dirty flag marks every mutation; the
+  window title shows the project file + modified marker; closing with
+  unsaved changes prompts Save / Discard / Cancel. Loading rebuilds
+  the media library from the clip sources (proxies survive when their
+  generated file still exists) and re-opens the first video clip.
+- New 6th ctest suite (`project`): JSON codec strictness (escapes,
+  truncation, trailing garbage, wrong types), a full round trip
+  (tracks/clips/stacks/keyframes/transitions/ids preserved exactly,
+  reload fixed point, byte-identical determinism), failure atomicity
+  (a failed parse leaves the model untouched), and the malformed-input
+  battery.
+
+### Added - export pipeline (fc_media, new `exporter.{h,cpp}`)
+- `fc::Exporter::run(path, config, provider, progress, error)`: the
+  encode/mux side of export - H.264 (MPEG-4 Part 2 fallback), yuv420p,
+  CRF rate control, exact output fps as the timebase (av_d2q keeps
+  23.976 exact), pts == frame index, gop scaled to the frame rate.
+  Odd dimensions are evened down; partial files are removed on failure
+  or cancellation.
+- The renderer is a CALLBACK: the caller resolves timeline frame N
+  into a composited RGBA frame (fc_media stays timeline-free). The
+  app's provider runs the exact program-monitor pipeline per frame -
+  topmost-clip resolution, decode (proxy-aware), the clip's effect
+  stack at its clip-relative frame (keyframes interpolate), and the
+  cut-transition composite with the incoming clip's HELD first frame
+  (its stack applied at position 0), both sides scaled to the output
+  geometry. "What you scrub is what you render."
+- App: File > Export Media (Ctrl+M, previously disabled) - output-path
+  + resolution (match first clip or presets) + quality (CRF 18/23/28)
+  dialog, then a modal progress dialog with Cancel. The job runs on
+  the decode worker's thread (per-source `VideoDecoder`s, sequential
+  reads with seek-on-jump, held frames cached per incoming clip);
+  progress and completion marshal back to the UI thread.
+- Audio: this phase exports the video program only - timeline audio
+  mixing (multi-track summing, crossfades) is the audio milestone's
+  scope and ships with it.
+- Media suite additions: 30-frame deterministic pattern export ->
+  probe geometry/duration, decoder frame count + pixel round-trip,
+  monotonic per-frame progress, odd-dimension evening, both
+  cancellation paths (provider + progress) with partial-file cleanup.
+
+### Added - the Color panel (app, new `color_panel.{h,cpp}`)
+- A fourth left-dock tab (Project | Effects | Transitions | Color):
+  the colorist's view of the selected clip's grade. Nine grouped
+  sliders edit the clip's `color.corrector` instance (auto-created on
+  first touch), with live program-monitor re-render from the cached
+  raw frame, Reset Grade, and keyframe-aware display/edit at the
+  playhead. Both stack editors (Effect Controls and Color) emit the
+  full stack through the same write path; each re-syncs the other so
+  the corrector is never edited from a stale copy.
+
+### Changed
+- `MainWindow`: menus (Open/Save/Save As/Export), the dirty-flag title,
+  the close-time save prompt; `applyProgramFrame` passes the
+  clip-relative frame into `applyEffectStack` (and the held transition
+  frame applies the incoming stack at position 0); `requestFrameAt`
+  pushes the playhead-in-clip to the keyframe-aware panels; both
+  stack-editor writes mark the project dirty.
+- `EffectControlsPanel`: param rows track live widget handles so the
+  keyframe display refreshes cheaply while the playhead moves (no
+  rebuild); slider/keyframe signal handlers read the clip frame LIVE
+  (the playhead moves without a row rebuild).
+- Tests: `effects` suite 1170 -> 2643 checks (catalog census 52,
+  per-effect reference pixels, identity battery, keyframe resolution /
+  editing / rebase / split integration, time-aware application).
+
+### Verification
+- Clean-room configure + build + LINK with the real Qt 5.15.15 +
+  FFmpeg 7.1.5 toolchain (all 18 app TUs + AUTOMOC, zero errors).
+- ctest 6/6: core 88, timeline 130, effects 2643, transitions 4531,
+  project 79, media 400 (7871 checks total).
+- clang-format 22.1.8 (CI-pinned): 0 violations across src/tests.
+- wfmock battery: 38/38 with the v0.5.2 PORTABLE.txt gates.
+- Known scope (documented): export is video-only until the audio
+  milestone; the export source-position mapping matches the program
+  monitor exactly (a rate != 1 clip renders through the same
+  simplified mapping the preview uses).
+
 ## [0.5.1] - 2026-09-06
 
 **M5 Phase 2: transitions ship. 36 deterministic cut transitions across

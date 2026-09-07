@@ -4,6 +4,8 @@
 #include <QMainWindow>
 #include <QTimer>
 
+#include <atomic>
+
 #include "media_item.h"
 #include "timeline_model.h"
 
@@ -11,8 +13,10 @@ class QLabel;
 class QThread;
 class QStackedWidget;
 class DecodeWorker;
+class ColorPanel;
 class EffectsPanel;
 class EffectControlsPanel;
+class ExportDialog;
 class MixerPanel;
 class PreviewCanvas;
 class ProjectPanel;
@@ -20,6 +24,9 @@ class QuickModeView;
 class TimelinePanel;
 class TransitionsPanel;
 class TransportBar;
+
+class QDialog;
+class QProgressBar;
 
 namespace fc {
 
@@ -58,6 +65,24 @@ private:
     void stepFrames(int frames);
     void requestFrameAt(double seconds);
 
+    // M5 Phase 3: project persistence (save / save-as / open, the dirty
+    // flag, the modified-title, and the close-time save prompt).
+    void saveProject();
+    bool saveProjectAs();
+    void openProject();
+    bool confirmSaveChanges();
+    void markDirty();
+    void updateWindowTitle();
+
+    // M5 Phase 3: export. exportMedia() runs on the UI thread (dialogs);
+    // runExportJob() runs on the decode worker's thread and renders every
+    // frame through the exact program-monitor pipeline (effects with
+    // keyframes + transitions); finishExport() marshals back.
+    void exportMedia();
+    void runExportJob(const QString &path, int width, int height, int crf, const QString &preset);
+    void finishExport(bool ok, const QString &error, const QString &path);
+    void updateExportProgress(int percent);
+
     // M4b: timeline editing actions (drag-move / trim / roll / L-M-S).
     void moveClipTo(int64_t clipId, int trackIndex, int64_t startFrame);
     void trimClip(int64_t clipId, int edge, int64_t deltaFrames);
@@ -85,6 +110,10 @@ private:
     // was pruned, refresh its bounds when durations clamped.
     void syncTransitionEditor();
 
+    // M5 Phase 3: push the playhead's position inside the SELECTED clip
+    // to the keyframe-aware panels (Effect Controls + Color).
+    void updateKeyframePanels();
+
     // Restore/save panel layout.
     void restoreLayout();
     void saveLayout() const;
@@ -103,6 +132,7 @@ private:
     ProjectPanel *projectPanel_ = nullptr;
     EffectsPanel *effectsPanel_ = nullptr;
     TransitionsPanel *transitionsPanel_ = nullptr; // M5 Phase 2
+    ColorPanel *colorPanel_ = nullptr;             // M5 Phase 3
     TimelinePanel *timeline_ = nullptr;
     MixerPanel *mixer_ = nullptr;
     EffectControlsPanel *effectControls_ = nullptr;
@@ -148,6 +178,17 @@ private:
     bool bRequestInFlight_ = false;    // an open or decode is queued on worker B
     QString bLoadedPath_;
     int64_t selectedTransitionId_ = -1;
+
+    // M5 Phase 3: project persistence state.
+    QString projectPath_;
+    bool dirty_ = false;
+
+    // M5 Phase 3: export state (the cancel flag is read from the worker
+    // thread; everything else stays on the UI thread).
+    bool exportRunning_ = false;
+    std::atomic<bool> exportCancel_{false};
+    QDialog *exportDialog_ = nullptr;
+    QProgressBar *exportBar_ = nullptr;
 };
 
 } // namespace fc

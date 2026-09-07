@@ -2,6 +2,7 @@
 
 #include <QWidget>
 
+#include <string>
 #include <vector>
 
 #include "effects.h"
@@ -19,9 +20,15 @@ class QStackedWidget;
 // the panel shows one of the two editors via a stacked layout.
 //
 // Stack mode: every edit (parameter slider, enable toggle, reorder,
-// remove) emits the FULL new stack back (stackChanged) - MainWindow writes
-// it into the model and re-renders the program monitor instantly from the
-// cached raw frame.
+// remove, keyframe toggle) emits the FULL new stack back (stackChanged) -
+// MainWindow writes it into the model and re-renders the program monitor
+// instantly from the cached raw frame.
+//
+// Keyframes (M5 Phase 3): every Number param row carries a keyframe
+// toggle (diamond). The panel also tracks the playhead's position within
+// the clip (setClipFrame): keyframed sliders display the resolved value
+// there, slider edits write a keyframe at that frame, and the diamond
+// toggles the keyframe at that frame.
 //
 // Transition mode: a live duration slider (1..max frames, clamped by the
 // left clip's extent) and a Remove button; every change emits
@@ -35,6 +42,11 @@ public:
     // Shows the stack of the clip with this id (clipId < 0 or an empty
     // stack clears the panel).
     void setStack(int64_t clipId, const std::vector<fc::EffectInstance> &stack);
+
+    // M5 Phase 3: the playhead's position within the edited clip (frames
+    // since its start); -1 = outside the clip / unknown. Keyframed
+    // parameters display and edit at this frame.
+    void setClipFrame(int64_t frame);
 
     // Shows the transition editor for the cut transition with this id
     // (transitionId < 0 clears the panel). maxDurationFrames comes from
@@ -50,6 +62,7 @@ signals:
 private:
     void rebuildList();
     void rebuildParams();
+    void refreshParamValues(); // re-resolve keyframed values at clipFrame_
     void emitStack();
     void updateDurationLabel();
 
@@ -58,6 +71,19 @@ private:
     // through setStack only on selection changes (not per slider tick).
     int64_t clipId_ = -1;
     std::vector<fc::EffectInstance> stack_;
+    int64_t clipFrame_ = -1;
+
+    // One live Number-param row (rebuilt by rebuildParams, refreshed by
+    // refreshParamValues).
+    struct ParamRow {
+        std::string key;
+        double minValue = 0.0;
+        double maxValue = 1.0;
+        QSlider *slider = nullptr;
+        QLabel *value = nullptr;
+        QPushButton *keyframe = nullptr;
+    };
+    std::vector<ParamRow> rows_;
 
     // Transition editor state.
     int64_t transitionId_ = -1;

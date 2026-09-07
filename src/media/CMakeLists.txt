@@ -6,7 +6,8 @@ add_library(fc_media STATIC
     ffmpeg_wrappers.cpp
     media_probe.cpp
     video_decoder.cpp
-    proxy_generator.cpp)
+    proxy_generator.cpp
+    exporter.cpp)
 
 target_include_directories(fc_media PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
