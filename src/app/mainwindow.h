@@ -2,9 +2,11 @@
 
 #include <QImage>
 #include <QMainWindow>
+#include <QSize>
 #include <QTimer>
 
 #include <atomic>
+#include <map>
 
 #include "media_item.h"
 #include "timeline_model.h"
@@ -21,6 +23,7 @@ class MixerPanel;
 class PreviewCanvas;
 class ProjectPanel;
 class QuickModeView;
+class TextPanel;
 class TimelinePanel;
 class TransitionsPanel;
 class TransportBar;
@@ -100,6 +103,13 @@ private:
     void applyProgramFrame();
     void addEffectToSelectedClip(const QString &effectId);
 
+    // M6 Phase 1: text engine - the Add Text Clip flow (track + clip at
+    // the playhead), the model write for panel edits, and the cached
+    // text-layer renderer that feeds compositing in preview + export.
+    void addTextClip();
+    void writeTextDocument(int64_t clipId, const fc::TextDocument &doc);
+    QImage textLayerForClip(const fc::Clip *clip, int width, int height);
+
     // M5 Phase 2: cut transitions - add/remove/duration routing for the
     // panels, the held-frame fetch for the incoming clip, and the
     // cross-clip composite in applyProgramFrame.
@@ -133,6 +143,7 @@ private:
     EffectsPanel *effectsPanel_ = nullptr;
     TransitionsPanel *transitionsPanel_ = nullptr; // M5 Phase 2
     ColorPanel *colorPanel_ = nullptr;             // M5 Phase 3
+    TextPanel *textPanel_ = nullptr;               // M6 Phase 1
     TimelinePanel *timeline_ = nullptr;
     MixerPanel *mixer_ = nullptr;
     EffectControlsPanel *effectControls_ = nullptr;
@@ -182,6 +193,16 @@ private:
     // M5 Phase 3: project persistence state.
     QString projectPath_;
     bool dirty_ = false;
+
+    // M6 Phase 1: text state. The layer cache holds ONE rendered layer
+    // per text clip (keyed by clip id, invalidated on text edits and
+    // project loads) - the layer is time-invariant in Phase 1, so
+    // playback composites the cached bitmap every frame instead of
+    // re-rasterizing. lastProgramSize_ keeps the program monitor's frame
+    // geometry around so a text clip over BLACK (no video clip at the
+    // playhead) renders at the same resolution the video uses.
+    std::map<int64_t, QImage> textLayerCache_;
+    QSize lastProgramSize_{1280, 720};
 
     // M5 Phase 3: export state (the cancel flag is read from the worker
     // thread; everything else stays on the UI thread).

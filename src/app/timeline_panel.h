@@ -42,6 +42,9 @@ public slots:
     // M5 Phase 2: select a cut transition programmatically (after adding
     // one); emits transitionSelected so the editor follows.
     void selectTransition(int64_t transitionId);
+    // M6 Phase 1: select a clip programmatically (after adding a text
+    // clip); emits clipSelected so every panel follows the selection.
+    void selectClip(int64_t clipId);
 
 signals:
     void playheadMoved(double seconds);

@@ -30,6 +30,10 @@ add_executable(FusionCutPro WIN32
     effect_controls_panel.h
     color_panel.cpp
     color_panel.h
+    text_panel.cpp
+    text_panel.h
+    text_renderer.cpp
+    text_renderer.h
     export_dialog.cpp
     export_dialog.h
     quick_mode_view.cpp

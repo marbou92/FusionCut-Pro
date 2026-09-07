@@ -21,12 +21,38 @@ void TimelineModel::setFps(double fps) {
 }
 
 int TimelineModel::addTrack(const std::string &name, bool isAudio) {
+    return insertTrack(trackCount(), name, isAudio, /*isText=*/false);
+}
+
+int TimelineModel::insertTrack(int position, const std::string &name, bool isAudio, bool isText) {
+    if (isAudio && isText) {
+        return -1; // a lane is exactly one of video / audio / text
+    }
+    position = std::min(std::max(position, 0), trackCount());
     Track track;
-    track.index = static_cast<int>(tracks_.size());
+    track.index = position;
     track.name = name;
     track.isAudio = isAudio;
-    tracks_.push_back(track);
-    return track.index;
+    track.isText = isText;
+    tracks_.insert(tracks_.begin() + static_cast<ptrdiff_t>(position), track);
+    for (size_t i = 0; i < tracks_.size(); ++i) {
+        tracks_[i].index = static_cast<int>(i);
+    }
+    // Renumber everything at or below the insertion point: every clip and
+    // transition on a track with index >= position shifts up by one. The
+    // shift is uniform per track, so adjacency and same-track invariants
+    // (transitions) move with their clips.
+    for (Clip &clip : clips_) {
+        if (clip.trackIndex >= position) {
+            ++clip.trackIndex;
+        }
+    }
+    for (Transition &t : transitions_) {
+        if (t.trackIndex >= position) {
+            ++t.trackIndex;
+        }
+    }
+    return position;
 }
 
 const Track *TimelineModel::trackAt(int index) const {
@@ -59,6 +85,10 @@ int64_t TimelineModel::addClip(int trackIndex, const std::string &sourcePath,
     if (trackIndex < 0 || trackIndex >= trackCount()) {
         return 0;
     }
+    const Track *track = trackAt(trackIndex);
+    if (track && track->isText) {
+        return 0; // text lanes host text clips only (addTextClip)
+    }
     if (sourceOutFrames <= sourceInFrames) {
         return 0;
     }
@@ -80,6 +110,57 @@ int64_t TimelineModel::addClip(int trackIndex, const std::string &sourcePath,
     clip.trackIndex = trackIndex;
     clips_.push_back(clip);
     return clip.id;
+}
+
+int64_t TimelineModel::addTextClip(int trackIndex, const TextDocument &doc, int64_t timelineStart,
+                                   int64_t durationFrames) {
+    const Track *track = trackAt(trackIndex);
+    if (!track || !track->isText || track->isAudio) {
+        return 0;
+    }
+    if (durationFrames < 1 || timelineStart < 0) {
+        return 0;
+    }
+    const int64_t newEnd = timelineStart + durationFrames;
+    for (const Clip &other : clips_) {
+        if (other.trackIndex != trackIndex) {
+            continue;
+        }
+        if (timelineStart < other.timelineEnd() && newEnd > other.timelineStart) {
+            return 0; // would overlap
+        }
+    }
+    Clip clip;
+    clip.id = nextId_++;
+    clip.isText = true;
+    clip.text = doc;
+    normalizeTextDocument(clip.text);
+    clip.label = textPreviewLabel(clip.text);
+    clip.sourceInFrames = 0;
+    clip.sourceOutFrames = durationFrames; // == duration at rate 1.0
+    clip.timelineStart = timelineStart;
+    clip.rate = 1.0;
+    clip.trackIndex = trackIndex;
+    clips_.push_back(clip);
+    return clip.id;
+}
+
+std::vector<const Clip *> TimelineModel::textClipsAt(int64_t frame) const {
+    std::vector<const Clip *> out;
+    for (int t = trackCount() - 1; t >= 0; --t) {
+        // Bottom-most text lanes paint first: lane order in the panel is
+        // index order (lower index drawn higher), so higher text lanes
+        // composite LAST = on top (the same topmost-wins convention the
+        // video stack uses, inverted for alpha painting).
+        const Track *track = trackAt(t);
+        if (!track || !track->isText) {
+            continue;
+        }
+        if (const Clip *clip = clipAt(frame, t)) {
+            out.push_back(clip);
+        }
+    }
+    return out;
 }
 
 void TimelineModel::replaceAll(double fps, std::vector<Track> tracks, std::vector<Clip> clips,
@@ -131,9 +212,18 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
             Clip right = clip;
             right.id = nextId_++;
             right.label = clip.label + " (2)";
-            right.sourceInFrames = clip.sourceInFrames + sourceDelta;
+            if (clip.isText) {
+                // Text clips have no source: the left half keeps [0,
+                // splitOffset), the right half RESTARTS its synthetic
+                // extent at 0 (sourceIn is always 0 on text clips).
+                right.sourceInFrames = 0;
+                right.sourceOutFrames = clip.sourceOutFrames - sourceDelta;
+                clip.sourceOutFrames = sourceDelta;
+            } else {
+                right.sourceInFrames = clip.sourceInFrames + sourceDelta;
+                clip.sourceOutFrames = right.sourceInFrames; // left half ends here
+            }
             right.timelineStart = frame;
-            clip.sourceOutFrames = right.sourceInFrames; // left half ends here
             // M5 Phase 3: the right half inherits the stack, so its
             // keyframe tracks shift with its new in-point. Keyframe frames
             // are CLIP-RELATIVE TIMELINE frames, so the offset is the
@@ -185,8 +275,10 @@ bool TimelineModel::moveClipTo(int64_t id, int newTrackIndex, int64_t newTimelin
     if (!target || !origin) {
         return false;
     }
-    if (target->isAudio != origin->isAudio) {
-        return false; // video clips stay on video lanes, audio on audio
+    // Clip kind = the kind of its track: video / audio / text must match
+    // exactly (M6: text clips never leave text lanes).
+    if (target->isAudio != origin->isAudio || target->isText != origin->isText) {
+        return false;
     }
     if (newTimelineStart < 0) {
         return false;
@@ -216,12 +308,22 @@ int64_t TimelineModel::findDropPosition(int trackIndex, int64_t clipId, int64_t 
                                         int64_t durationFrames) const {
     const Clip *moving = clipById(clipId);
     if (!moving) {
-        return -1;
+        if (clipId != 0) {
+            return -1;
+        }
+        // clipId 0 = a NEW clip being placed (no model identity yet); the
+        // CALLER guarantees the track-kind match (M6: text drops resolve
+        // this way before addTextClip mints an id).
     }
     const Track *target = trackAt(trackIndex);
-    const Track *origin = trackAt(moving->trackIndex);
-    if (!target || !origin || target->isAudio != origin->isAudio) {
+    if (!target) {
         return -1;
+    }
+    if (moving) {
+        const Track *origin = trackAt(moving->trackIndex);
+        if (!origin || target->isAudio != origin->isAudio || target->isText != origin->isText) {
+            return -1;
+        }
     }
     if (durationFrames <= 0 || desiredStart < 0) {
         return -1;
@@ -287,6 +389,22 @@ bool TimelineModel::trimClipStart(int64_t id, int64_t deltaFrames) {
     Clip *clip = clipById(id);
     if (!clip) {
         return false;
+    }
+    if (clip->isText) {
+        // Text clips have no source to consume: trimming the head moves
+        // the start AND shrinks/grows the synthetic extent (sourceOut
+        // moves against the fixed sourceIn = 0), so the head can extend
+        // freely - there is no "before the first frame" for generated
+        // text. Keep >= 1 frame and timelineStart >= 0.
+        const int64_t newSourceOut = clip->sourceOutFrames - deltaFrames;
+        const int64_t newStart = clip->timelineStart + deltaFrames;
+        if (newSourceOut <= 0 || newStart < 0) {
+            return false;
+        }
+        clip->sourceOutFrames = newSourceOut;
+        clip->timelineStart = newStart;
+        pruneTransitions();
+        return true;
     }
     const int64_t sourceDelta =
         static_cast<int64_t>(std::llround(static_cast<double>(deltaFrames) * clip->rate));
@@ -390,6 +508,29 @@ bool TimelineModel::rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrame
     if (right->timelineStart != left->timelineEnd()) {
         return false; // must be adjacent
     }
+    if (left->isText != right->isText) {
+        return false; // kind mismatch (cannot happen via the track rules)
+    }
+    if (left->isText) {
+        // Text pair (rate 1, sourceIn 0 on both): rolling the boundary
+        // grows one synthetic extent and shrinks the other. The right
+        // clip's head has no source to consume, so its SOURCE OUT moves
+        // against the boundary instead of its source in-point.
+        if (left->sourceOutFrames + deltaFrames <= 0) {
+            return false; // left must keep >= 1 frame
+        }
+        if (right->sourceOutFrames - deltaFrames <= 0) {
+            return false; // right must keep >= 1 frame
+        }
+        if (right->timelineStart + deltaFrames <= left->timelineStart) {
+            return false; // boundary would pass the left clip's start
+        }
+        left->sourceOutFrames += deltaFrames;
+        right->sourceOutFrames -= deltaFrames;
+        right->timelineStart += deltaFrames;
+        pruneTransitions();
+        return true;
+    }
     const int64_t leftSrcDelta =
         static_cast<int64_t>(std::llround(static_cast<double>(deltaFrames) * left->rate));
     const int64_t rightSrcDelta =
@@ -451,10 +592,11 @@ const Clip *TimelineModel::clipById(int64_t id) const {
 
 const Clip *TimelineModel::activeVideoClipAt(int64_t frame) const {
     // Track 0 is the visually topmost video lane (the panel draws rows in
-    // index order, V2 above V1); the first hit wins.
+    // index order, V2 above V1); the first hit wins. Text lanes (M6) are
+    // NOT video: they composite on top instead of winning the lookup.
     for (int t = 0; t < trackCount(); ++t) {
         const Track *track = trackAt(t);
-        if (!track || track->isAudio) {
+        if (!track || track->isAudio || track->isText) {
             continue;
         }
         if (const Clip *clip = clipAt(frame, t)) {
@@ -493,7 +635,10 @@ int64_t TimelineModel::maxTransitionDuration(int64_t leftClipId, int64_t rightCl
         return 0;
     }
     const Track *track = trackAt(left->trackIndex);
-    if (!track || track->isAudio) {
+    if (!track || track->isAudio || track->isText) {
+        // M6 Phase 1: cut transitions stay on VIDEO lanes - text clips
+        // have no decoded stream to hold for the incoming side (their
+        // animated compositing arrives with the M6 animation phase).
         return 0;
     }
     if (right->timelineStart != left->timelineEnd()) {

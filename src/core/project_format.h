@@ -20,16 +20,28 @@ namespace fc {
 // to the same bytes (fixed field order, shortest-exact number format) -
 // same tree, same file, across platforms.
 //
-// The schema (format 1):
+// The schema (format 1; M6 adds the bracketed fields - old files load
+// unchanged, "text" is simply absent):
 // {
 //   "format": 1,
 //   "fps": 24,
-//   "tracks":  [ {"name","audio","locked","muted","solo"}, ... ],
+//   "tracks":  [ {"name","audio",[text],"locked","muted","solo"}, ... ],
 //   "clips":   [ {"id","track","source","label","in","out","start","rate",
 //                 "effects": [ {"id","enabled","params":{k:v},
-//                               "keyframes":{k:[[frame,value],...]}} ]}, ... ],
+//                               "keyframes":{k:[[frame,value],...]}} ]},
+//                {"id","track","label","start","duration","text":TEXT,
+//                 "effects":[...]} , ... ],
 //   "transitions": [ {"id","track","left","right","kind","duration"}, ... ]
 // }
+//
+// TEXT = {"align":"left|center|right","anchorX","anchorY","wrap",
+//         "background":bool,"bgColor":"RRGGBBAA",
+//         "runs":[{"text","family","size","bold","italic","underline",
+//                   "color":"RRGGBBAA"}]}
+//
+// Text tracks carry "text":true (mutually exclusive with "audio"); text
+// clips reference one, carry a TEXT document instead of a source, and
+// serialize their duration directly (sourceIn is always 0, rate 1).
 //
 // Forward compatibility mirrors the runtime contract: effect / transition
 // ids unknown to THIS catalog round-trip untouched (they never process,

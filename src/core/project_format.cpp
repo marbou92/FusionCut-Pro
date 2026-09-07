@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "effects.h"
+#include "text.h"
 #include "transitions.h"
 
 namespace fc {
@@ -432,6 +433,67 @@ void appendBool(std::string &out, bool v) {
     out += v ? "true" : "false";
 }
 
+// Appends a packed 0xRRGGBBAA text color as an 8-digit UPPER-CASE hex
+// string ("FF8844C0") - readable, unambiguous, deterministic.
+void appendHexColor(std::string &out, uint32_t rgba) {
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08X", rgba);
+    out += '"';
+    out += buf;
+    out += '"';
+}
+
+// ---- M6 Phase 1: text document codec ----
+
+void appendTextDocument(std::string &out, const TextDocument &doc) {
+    out += "{\"align\":\"";
+    switch (doc.align) {
+    case TextAlign::Left:
+        out += "left";
+        break;
+    case TextAlign::Right:
+        out += "right";
+        break;
+    case TextAlign::Center:
+        out += "center";
+        break;
+    }
+    out += "\",\"anchorX\":";
+    appendDouble(out, doc.box.anchorX);
+    out += ",\"anchorY\":";
+    appendDouble(out, doc.box.anchorY);
+    out += ",\"wrap\":";
+    appendDouble(out, doc.box.wrap);
+    out += ",\"background\":";
+    appendBool(out, doc.box.background);
+    out += ",\"bgColor\":";
+    appendHexColor(out, doc.box.backgroundRgba);
+    out += ",\"runs\":[";
+    bool firstRun = true;
+    for (const TextRun &run : doc.runs) {
+        if (!firstRun) {
+            out += ',';
+        }
+        firstRun = false;
+        out += "{\"text\":";
+        appendEscaped(out, run.text);
+        out += ",\"family\":";
+        appendEscaped(out, run.style.family);
+        out += ",\"size\":";
+        appendInt(out, run.style.size);
+        out += ",\"bold\":";
+        appendBool(out, run.style.bold);
+        out += ",\"italic\":";
+        appendBool(out, run.style.italic);
+        out += ",\"underline\":";
+        appendBool(out, run.style.underline);
+        out += ",\"color\":";
+        appendHexColor(out, run.style.colorRgba);
+        out += '}';
+    }
+    out += "]}";
+}
+
 // ---- Reading helpers (typed access with schema checking). ----
 
 bool getNumber(const JsonValue *node, double &out, std::string &error, const char *field) {
@@ -481,6 +543,110 @@ bool getArray(const JsonValue *node, const std::vector<JsonValue> *&out, std::st
         return false;
     }
     out = &node->arrayValue;
+    return true;
+}
+
+// 8 hex digits ("FF8844C0") -> packed 0xRRGGBBAA.
+bool parseHexColor(const JsonValue *node, uint32_t &out, std::string &error, const char *field) {
+    std::string s;
+    if (!getString(node, s, error, field)) {
+        return false;
+    }
+    if (s.size() != 8) {
+        error = std::string("field '") + field + "' must be 8 hex digits";
+        return false;
+    }
+    uint32_t value = 0;
+    for (char c : s) {
+        int digit = -1;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'A' && c <= 'F') {
+            digit = c - 'A' + 10;
+        } else if (c >= 'a' && c <= 'f') {
+            digit = c - 'a' + 10;
+        }
+        if (digit < 0) {
+            error = std::string("field '") + field + "' must be 8 hex digits";
+            return false;
+        }
+        value = (value << 4) | static_cast<uint32_t>(digit);
+    }
+    out = value;
+    return true;
+}
+
+// Rebuilds one TextDocument from its JSON object. Strict: every field
+// required (the writer always writes all of them), ranges validated.
+// The document loads AS WRITTEN (no normalization - round-trips are
+// byte-identical even for hand-merged adjacent runs).
+bool parseTextDocument(const JsonValue &node, TextDocument &doc, std::string &error) {
+    if (node.type != JsonValue::Type::Object) {
+        error = "text document is not an object";
+        return false;
+    }
+    std::string align;
+    if (!getString(node.find("align"), align, error, "text.align")) {
+        return false;
+    }
+    if (align == "left") {
+        doc.align = TextAlign::Left;
+    } else if (align == "center") {
+        doc.align = TextAlign::Center;
+    } else if (align == "right") {
+        doc.align = TextAlign::Right;
+    } else {
+        error = "field 'text.align' must be left, center, or right";
+        return false;
+    }
+    if (!getNumber(node.find("anchorX"), doc.box.anchorX, error, "text.anchorX") ||
+        !getNumber(node.find("anchorY"), doc.box.anchorY, error, "text.anchorY") ||
+        !getNumber(node.find("wrap"), doc.box.wrap, error, "text.wrap")) {
+        return false;
+    }
+    if (doc.box.anchorX < 0.0 || doc.box.anchorX > 1.0 || doc.box.anchorY < 0.0 ||
+        doc.box.anchorY > 1.0) {
+        error = "text anchors must be within [0, 1]";
+        return false;
+    }
+    if (doc.box.wrap <= 0.0 || doc.box.wrap > 1.0) {
+        error = "text wrap width must be within (0, 1]";
+        return false;
+    }
+    if (!getBool(node.find("background"), doc.box.background, error, "text.background")) {
+        return false;
+    }
+    if (!parseHexColor(node.find("bgColor"), doc.box.backgroundRgba, error, "text.bgColor")) {
+        return false;
+    }
+    const std::vector<JsonValue> *runs = nullptr;
+    if (!getArray(node.find("runs"), runs, error, "text.runs")) {
+        return false;
+    }
+    doc.runs.clear();
+    for (const JsonValue &runNode : *runs) {
+        if (runNode.type != JsonValue::Type::Object) {
+            error = "text run is not an object";
+            return false;
+        }
+        TextRun run;
+        int64_t size = 0;
+        if (!getString(runNode.find("text"), run.text, error, "text.run.text") ||
+            !getString(runNode.find("family"), run.style.family, error, "text.run.family") ||
+            !getIntegral(runNode.find("size"), size, error, "text.run.size") ||
+            !getBool(runNode.find("bold"), run.style.bold, error, "text.run.bold") ||
+            !getBool(runNode.find("italic"), run.style.italic, error, "text.run.italic") ||
+            !getBool(runNode.find("underline"), run.style.underline, error, "text.run.underline") ||
+            !parseHexColor(runNode.find("color"), run.style.colorRgba, error, "text.run.color")) {
+            return false;
+        }
+        if (size < kTextMinSize || size > kTextMaxSize) {
+            error = "text run size is out of range";
+            return false;
+        }
+        run.style.size = static_cast<int>(size);
+        doc.runs.push_back(std::move(run));
+    }
     return true;
 }
 
@@ -628,6 +794,9 @@ std::string serializeProject(const TimelineModel &model) {
         appendEscaped(out, track.name);
         out += ",\"audio\":";
         appendBool(out, track.isAudio);
+        if (track.isText) {
+            out += ",\"text\":true";
+        }
         out += ",\"locked\":";
         appendBool(out, track.locked);
         out += ",\"muted\":";
@@ -649,18 +818,32 @@ std::string serializeProject(const TimelineModel &model) {
         appendInt(out, clip.id);
         out += ",\"track\":";
         appendInt(out, clip.trackIndex);
-        out += ",\"source\":";
-        appendEscaped(out, clip.sourcePath);
-        out += ",\"label\":";
-        appendEscaped(out, clip.label);
-        out += ",\"in\":";
-        appendInt(out, clip.sourceInFrames);
-        out += ",\"out\":";
-        appendInt(out, clip.sourceOutFrames);
-        out += ",\"start\":";
-        appendInt(out, clip.timelineStart);
-        out += ",\"rate\":";
-        appendDouble(out, clip.rate);
+        if (clip.isText) {
+            // M6: text clips carry a text document instead of a source;
+            // sourceIn is always 0 and rate 1, so only the duration
+            // (== sourceOut) is written.
+            out += ",\"label\":";
+            appendEscaped(out, clip.label);
+            out += ",\"start\":";
+            appendInt(out, clip.timelineStart);
+            out += ",\"duration\":";
+            appendInt(out, clip.sourceOutFrames);
+            out += ",\"text\":";
+            appendTextDocument(out, clip.text);
+        } else {
+            out += ",\"source\":";
+            appendEscaped(out, clip.sourcePath);
+            out += ",\"label\":";
+            appendEscaped(out, clip.label);
+            out += ",\"in\":";
+            appendInt(out, clip.sourceInFrames);
+            out += ",\"out\":";
+            appendInt(out, clip.sourceOutFrames);
+            out += ",\"start\":";
+            appendInt(out, clip.timelineStart);
+            out += ",\"rate\":";
+            appendDouble(out, clip.rate);
+        }
 
         out += ",\"effects\":[";
         bool firstFx = true;
@@ -814,6 +997,17 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
             !getBool(node.find("solo"), track.solo, error, "track.solo")) {
             return false;
         }
+        // M6: "text" is optional (old-format files have none); present
+        // means it must be a valid boolean.
+        if (const JsonValue *textNode = node.find("text")) {
+            if (!getBool(textNode, track.isText, error, "track.text")) {
+                return false;
+            }
+        }
+        if (track.isAudio && track.isText) {
+            error = "track cannot be both audio and text";
+            return false;
+        }
         track.index = static_cast<int>(tracks.size());
         tracks.push_back(track);
     }
@@ -836,35 +1030,76 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
         }
         Clip clip;
         int64_t clipTrack = 0;
-        if (!getIntegral(node.find("id"), clip.id, error, "clip.id") ||
-            !getIntegral(node.find("track"), clipTrack, error, "clip.track") ||
-            !getString(node.find("source"), clip.sourcePath, error, "clip.source") ||
-            !getString(node.find("label"), clip.label, error, "clip.label") ||
-            !getIntegral(node.find("in"), clip.sourceInFrames, error, "clip.in") ||
-            !getIntegral(node.find("out"), clip.sourceOutFrames, error, "clip.out") ||
-            !getIntegral(node.find("start"), clip.timelineStart, error, "clip.start") ||
-            !getNumber(node.find("rate"), clip.rate, error, "clip.rate")) {
-            return false;
+        if (node.find("text")) {
+            // ---- M6 text clip: label/start/duration + text document ----
+            int64_t duration = 0;
+            if (!getIntegral(node.find("id"), clip.id, error, "clip.id") ||
+                !getIntegral(node.find("track"), clipTrack, error, "clip.track") ||
+                !getString(node.find("label"), clip.label, error, "clip.label") ||
+                !getIntegral(node.find("start"), clip.timelineStart, error, "clip.start") ||
+                !getIntegral(node.find("duration"), duration, error, "clip.duration") ||
+                !parseTextDocument(*node.find("text"), clip.text, error)) {
+                return false;
+            }
+            clip.trackIndex = clipTrack;
+            clip.isText = true;
+            clip.sourcePath = "";
+            clip.sourceInFrames = 0;
+            clip.sourceOutFrames = duration;
+            clip.rate = 1.0;
+            if (duration < 1) {
+                error = "text clip duration must be >= 1 frame";
+                return false;
+            }
+            if (clip.trackIndex < 0 || clip.trackIndex >= static_cast<int>(tracks.size())) {
+                error = "clip references a track that does not exist";
+                return false;
+            }
+            const Track &track = tracks[static_cast<size_t>(clip.trackIndex)];
+            if (!track.isText || track.isAudio) {
+                error = "text clip on a non-text track";
+                return false;
+            }
+            if (clip.timelineStart < 0) {
+                error = "clip start must be >= 0";
+                return false;
+            }
+        } else {
+            // ---- media clip (format 1 schema) ----
+            if (!getIntegral(node.find("id"), clip.id, error, "clip.id") ||
+                !getIntegral(node.find("track"), clipTrack, error, "clip.track") ||
+                !getString(node.find("source"), clip.sourcePath, error, "clip.source") ||
+                !getString(node.find("label"), clip.label, error, "clip.label") ||
+                !getIntegral(node.find("in"), clip.sourceInFrames, error, "clip.in") ||
+                !getIntegral(node.find("out"), clip.sourceOutFrames, error, "clip.out") ||
+                !getIntegral(node.find("start"), clip.timelineStart, error, "clip.start") ||
+                !getNumber(node.find("rate"), clip.rate, error, "clip.rate")) {
+                return false;
+            }
+            clip.trackIndex = clipTrack;
+            if (clip.sourceInFrames < 0 || clip.sourceOutFrames <= clip.sourceInFrames) {
+                error = "clip has an invalid source range";
+                return false;
+            }
+            if (clip.rate <= 0.0 || clip.rate > 100.0) {
+                error = "clip rate out of range";
+                return false;
+            }
+            if (clip.trackIndex < 0 || clip.trackIndex >= static_cast<int>(tracks.size())) {
+                error = "clip references a track that does not exist";
+                return false;
+            }
+            if (tracks[static_cast<size_t>(clip.trackIndex)].isText) {
+                error = "media clip on a text track";
+                return false;
+            }
+            if (clip.timelineStart < 0) {
+                error = "clip start must be >= 0";
+                return false;
+            }
         }
-        clip.trackIndex = clipTrack;
         if (clip.id <= 0) {
             error = "clip id must be positive";
-            return false;
-        }
-        if (clip.trackIndex < 0 || clip.trackIndex >= static_cast<int>(tracks.size())) {
-            error = "clip references a track that does not exist";
-            return false;
-        }
-        if (clip.sourceInFrames < 0 || clip.sourceOutFrames <= clip.sourceInFrames) {
-            error = "clip has an invalid source range";
-            return false;
-        }
-        if (clip.timelineStart < 0) {
-            error = "clip start must be >= 0";
-            return false;
-        }
-        if (clip.rate <= 0.0 || clip.rate > 100.0) {
-            error = "clip rate out of range";
             return false;
         }
         for (const Clip &other : clips) {

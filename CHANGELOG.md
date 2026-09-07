@@ -4,6 +4,190 @@ All notable changes to FusionCut Pro are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-07
+
+**M6 Phase 1: the text engine core ships. Titles are first-class timeline
+citizens: a TEXT track kind hosts generated TEXT clips (no source media -
+frames come from a rich-text document), a pure-C++ layout engine with
+injected font metrics wraps/aligns/places them deterministically, and a
+transparent text layer composites ON TOP of the video stack in the program
+monitor, Quick Mode, and the export - per-pixel source-over blending in
+integer math. The Text panel is a real rich-text editor (QTextEdit maps
+1:1 onto the run model): style the SELECTION (family / size / bold /
+italic / underline / color), align the block, place it with X / Y /
+width, and toggle a background box. Text clips carry effect stacks and
+keyframes like every other clip. 381 new checks, 8252 total.**
+
+### Added - the text model + layout engine (fc_core, new `text.{h,cpp}`)
+- `fc::TextDocument` / `TextRun` / `TextStyle`: a flat sequence of styled
+  UTF-8 runs (family, pixel size, bold/italic/underline, RGBA color) plus
+  the box that places the block (anchor X/Y in normalized frame
+  coordinates, wrap width fraction, optional background + color).
+  `normalizeTextDocument` drops empty runs, merges adjacent equal-style
+  runs, clamps sizes - idempotent by construction.
+- `layoutText()`: greedy word wrap (breaks after spaces, hard-splits
+  over-wide words at codepoint boundaries, trims trailing spaces from
+  line widths), per-line heights from the max of each present run's
+  ascent+descent+leading, baseline alignment across mixed sizes,
+  left/center/right alignment within the block's ink width, and
+  placement of the (optionally padded) background box at the anchor.
+  ALL INTEGER math on metrics the CALLER injects (`ShapedRun`), so the
+  tests pin every number with synthetic fonts. `LaidOutSlice` carries
+  pre-resolved UTF-8 byte ranges for the rasterizer.
+- `utf8Decode` / `utf8DecodeDetailed`: WHATWG-style UTF-8 decoding with
+  one U+FFFD per maximal invalid prefix (overlongs, surrogates, stray
+  continuations, truncated tails - all covered by tests) and byte-offset
+  tables for run slicing.
+- `compositeOver()`: source-over compositing of two RGBA8888 buffers,
+  rounded integer math with fast paths for fully transparent/opaque
+  source pixels; the numerator bound 255^2+127 keeps the alpha <= 255.
+- `textPreviewLabel()`: the clip label derived from the document (first
+  24 codepoints, whitespace-skipped, newlines to spaces, "Text" when
+  blank).
+
+### Added - text tracks + text clips (`timeline_model.{h,cpp}`)
+- `Track::isText`: a third lane kind (mutually exclusive with audio).
+  `insertTrack(position, ...)` inserts anywhere and renumbers every clip
+  and transition above it - the Add flow puts T1 at the very top like a
+  real NLE. `addTrack` is an insert at the end (unchanged behavior).
+- `fc::Clip::isText` + `TextDocument text`: a text clip has NO source
+  (sourcePath empty, sourceIn always 0, sourceOut = duration, rate 1).
+  `addTextClip()` validates the text lane, rejects overlaps (lanes stay
+  non-overlapping), normalizes the document, and derives the label.
+- Every M4b mutator keeps its invariant on text clips: trim-start and
+  roll adjust sourceOut against the fixed sourceIn so a text clip's head
+  extends freely (there is no "before the first frame" for generated
+  content); split keeps both halves showing the same document with the
+  right half's synthetic extent restarting at 0; move/findDrop enforce
+  the kind matrix (text clips never leave text lanes, media never lands
+  on one); ripple delete/trim work unchanged. `textClipsAt(frame)`
+  returns the paint list (bottom text lane first); `activeVideoClipAt`
+  skips text lanes (they composite, they do not occlude).
+- Cut transitions are REJECTED on text lanes in Phase 1 (the held-frame
+  model needs a decoded stream; text-side animated compositing arrives
+  with the M6 animation phase) - maxTransitionDuration returns 0 there.
+
+### Added - project persistence (format 1, additive)
+- Text tracks serialize `,"text":true` (absent = not a text track; old
+  v0.5.2 files load unchanged). Text clips write
+  `{"id","track","label","start","duration","text":TEXT,"effects":[..]}`
+  instead of the media clip's source fields. TEXT is a strict schema:
+  align enum, anchorX/anchorY/wrap ranges, background flag + 8-hex-digit
+  colors ("FF8844C0"), runs with per-run family/size/flags/color.
+  The parser validates lane kinds both ways (a text clip on a non-text
+  track and a media clip on a text track are hard failures) and loads
+  documents AS WRITTEN (no normalize-on-load: round-trips are
+  byte-identical, deterministic serialization included).
+
+### Added - text rendering (app, new `text_renderer.{h,cpp}`)
+- `shapeTextQt()`: the metrics bridge - QFontMetrics integer
+  advances/ascent/descent/leading per run, codepoint-by-codepoint
+  (surrogate pairs for astral planes), byte-offset tables from the core
+  decoder. `renderTextLayer()`: a TRANSPARENT RGBA8888 image with the
+  background box + slices painted by QPainter at the core layout
+  positions (TextAntialiasing on, pixel-size fonts - DPI-independent).
+  Glyph pixels are platform-dependent by nature; every layout NUMBER is
+  not. QPainter-on-QImage keeps the export worker thread safe.
+
+### Added - the Text panel (app, new `text_panel.{h,cpp}`)
+- A fifth left-dock tab. QTextEdit is the content surface (Qt's fragment
+  model converts 1:1 with the run model both ways); the style controls
+  (family combo, pixel size, B/I/U, color dialog) merge formats into the
+  SELECTION like a word processor - no selection styles what you type
+  next. Alignment buttons rewrite every block; X / Y / Width spins and
+  the background toggle + color place the block. Every edit emits the
+  FULL document (textEdited) - MainWindow writes it and re-renders
+  instantly (the Effect Controls / Color panel protocol).
+- Title > Add Text Clip (Ctrl+T) or the panel's Add button: creates a
+  text lane at the top if none exists, drops a 4 s centered 72 px
+  "Title" at the playhead (magnetic snap to the nearest gap), selects
+  it everywhere, and the panel is ready to type into.
+
+### Added - live preview + export compositing (`mainwindow.cpp`)
+- `applyProgramFrame()` now finishes by compositing every text clip at
+  the playhead ON TOP of the video (effects + transition blend first,
+  then the text stack in paint order). The text layer is cached per
+  clip (time-invariant in Phase 1) - playback composites a bitmap, not
+  a re-raster. Each text clip's OWN effect stack runs on a copy of the
+  layer per frame, so keyframed text parameters (glow, fade via
+  brightness, animated color) interpolate exactly like the preview.
+- Text over BLACK: when text covers the playhead but no video clip
+  does, the base is a black frame at the last program geometry (the
+  stale video cache never bleeds through).
+- The export provider composites the same text stack at the export
+  resolution (job-local layer cache) before the H.264 encode - the
+  exported file matches the program monitor.
+- Timeline: text clips draw with their own fill + a teal "T" badge
+  (before the fx zone, so a graded text clip shows both); the label is
+  the live text preview; lanes/trim/roll/razor/ripple all work.
+
+### Tests - `fc_text_tests` (7th ctest suite, 381 checks)
+- UTF-8: valid 1-4 byte sequences with byte-offset tables, and the
+  invalid classes (stray continuations, bad continuations that
+  re-decode, truncation, overlong C0/E0/F0 forms, surrogate halves,
+  past-Unicode, F5+/FF leads) - each pinned to exact U+FFFD counts.
+- Layout: single-line placement math (box center, baseline), all three
+  alignments, word wrap with trailing-space trimming, hard splits
+  (including a single over-wide glyph), newline semantics (trailing
+  newline adds no line, double newline keeps a blank paragraph line),
+  mixed metrics (baseline sharing, cross-run words), background padding
+  (600/60 -> 10, floor 2), anchor off-frame placement, wrap clamping,
+  degenerate inputs, byte ranges through multi-byte codepoints.
+- Compositor: opaque fast path, transparent no-op, the 50%-over-black
+  and 50%-over-50% reference pixels (hand-derived with the exact
+  integer formulas), channel independence.
+- Model: insertTrack renumbering (clips + transitions shift together,
+  pairs survive), addTextClip validation matrix, textClipsAt paint
+  order, activeVideoClipAt skipping text lanes, the full mutator
+  battery on text clips (trim/extend head, split, roll both directions
+  + limits, kind matrix, ripple, findDropPosition clipId-0 path),
+  transition rejection, duration extent.
+- Project codec: full round-trip (docs, stacks, transitions, ids) with
+  byte-identical re-serialization, old-format compatibility (v0.5.2
+  files with no "text" keys), and the rejection battery (wrong lane
+  both ways, duration 0, bad hex, out-of-range anchors/wrap/size,
+  bad align, missing run fields, audio+text track contradiction).
+
+### Changed
+- `applyProgramFrame()` restructure: the transition blend now falls
+  through to the text stack instead of returning early; a null raw
+  frame with text present renders the black base instead of bailing.
+- `findDropPosition()` accepts clipId 0 = "a NEW clip being placed"
+  (the caller pre-validates the track kind); real clip ids keep the
+  full kind check. `moveClipTo` compares BOTH track flags.
+- `addClip()` rejects text lanes (media never lands on one).
+- First-draft failures during development: all test-authoring errors
+  plus TWO REAL ENGINE BUGS the tests caught and the fixes cover:
+  (1) `textPreviewLabel` decoded each run into the SAME vector the
+  decoder clears, so multi-run previews showed only the LAST run's
+  text; (2) `compositeOver`'s truncated alpha biased channel blends
+  one unit high (50% white over 50% white rendered 129 instead of
+  128) - the alpha is now rounded, bounded by 255^2+127.
+
+### Known scope (M6 Phase 2+)
+- The bundled COLOR-EMOJI renderer (Noto CBDT/CBLC parser + the OFL
+  font in the repo + THIRD_PARTY_NOTICES.md) is Phase 2; emoji
+  codepoints currently render through the platform font fallback.
+- Text ANIMATIONS (fade/slide/typewriter presets per clip) and
+  CAPTIONS (SRT import/export) are Phase 3. Transitions between text
+  clips rejected for now (see above).
+- One text lane is auto-created by the Add flow (T1); more lanes come
+  from loaded projects or later phases (no "add track" UI yet).
+- Rich-text import/export beyond the project file (e.g. HTML) is not
+  planned; the run model is the interchange format.
+
+### Verification
+- Clean-room configure + build + LINK with the real Qt 5.15.15 +
+  FFmpeg 7.1.5 toolchain (all 18 app TUs + AUTOMOC, zero errors) -
+  the qt-app-ubuntu CI leg compiles the same code.
+- ctest 7/7: core 88, timeline 130, effects 2643, transitions 4531,
+  project 79, text 381, media 400 (8252 checks total).
+- clang-format 22.1.8 (CI-pinned): 0 violations across src/tests.
+- wfmock battery: 38/38 with the v0.6.0 PORTABLE.txt gates.
+- M6 symbols verified in the linked binary (nm: renderTextLayer,
+  compositeOver, TimelineModel::addTextClip, TimelineModel::insertTrack,
+  MainWindow::addTextClip, MainWindow::textLayerForClip, TextPanel).
+
 ## [0.5.2] - 2026-09-06
 
 **M5 Phase 3: the milestone COMPLETES. The effect catalog grows from 25

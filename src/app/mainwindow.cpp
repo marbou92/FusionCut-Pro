@@ -48,6 +48,9 @@
 #include "project_format.h"
 #include "project_panel.h"
 #include "quick_mode_view.h"
+#include "text.h"
+#include "text_panel.h"
+#include "text_renderer.h"
 #include "timeline_panel.h"
 #include "transitions.h"
 #include "transitions_panel.h"
@@ -212,6 +215,9 @@ void MainWindow::buildDecodeThread() {
         rawProgramFrame_ = frame;
         rawFramePts_ = pts;
         frameClipId_ = lastProgramClipId_;
+        if (!frame.isNull() && frame.width() > 0 && frame.height() > 0) {
+            lastProgramSize_ = frame.size(); // M6: text-over-black base geometry
+        }
         // The timeline playhead + transport show the TIMELINE position
         // (playhead_), not the source-relative pts of the arriving
         // frame - with M4b in-point offsets the two differ, and the
@@ -289,16 +295,18 @@ void MainWindow::buildDecodeThread() {
 }
 
 void MainWindow::buildProWorkspace() {
-    // Left zone: Project | Effects | Transitions | Color (tabbed).
+    // Left zone: Project | Effects | Transitions | Color | Text (tabbed).
     projectPanel_ = new ProjectPanel(this);
     effectsPanel_ = new EffectsPanel(this);
     transitionsPanel_ = new TransitionsPanel(this); // M5 Phase 2
     colorPanel_ = new ColorPanel(this);             // M5 Phase 3
+    textPanel_ = new TextPanel(this);               // M6 Phase 1
     auto *leftTabs = new QTabWidget(this);
     leftTabs->addTab(projectPanel_, tr("Project"));
     leftTabs->addTab(effectsPanel_, tr("Effects"));
     leftTabs->addTab(transitionsPanel_, tr("Transitions"));
     leftTabs->addTab(colorPanel_, tr("Color"));
+    leftTabs->addTab(textPanel_, tr("Text"));
     auto *leftDock = makeDock(tr("Project"), leftTabs, this);
     addDockWidget(Qt::LeftDockWidgetArea, leftDock);
 
@@ -376,6 +384,9 @@ void MainWindow::buildProWorkspace() {
             clip ? clip->effectStack : std::vector<fc::EffectInstance>();
         effectControls_->setStack(id, stack);
         colorPanel_->setClip(id, stack);
+        // M6: the Text panel edits the selected clip's document (null for
+        // non-text clips clears it).
+        textPanel_->setClip(id, clip && clip->isText ? &clip->text : nullptr);
         updateKeyframePanels();
     });
 
@@ -413,6 +424,12 @@ void MainWindow::buildProWorkspace() {
                     effectControls_->setStack(clipId, clip->effectStack);
                 }
             });
+
+    // ---- M6 text wiring ----
+    connect(textPanel_, &TextPanel::addTextClipRequested, this, [this] { addTextClip(); });
+    connect(
+        textPanel_, &TextPanel::textEdited, this,
+        [this](int64_t clipId, const fc::TextDocument &doc) { writeTextDocument(clipId, doc); });
 
     // ---- M5 Phase 2 transition wiring ----
     connect(transitionsPanel_, &TransitionsPanel::transitionAddRequested, this,
@@ -547,6 +564,13 @@ void MainWindow::buildMenus() {
             generateProxy(loadedPath_);
         }
     });
+
+    // ---- Title (M6 Phase 1) ----
+    QMenu *title = menuBar()->addMenu(tr("&Title"));
+    QAction *addTextAction = addMenuAction(title, tr("&Add Text Clip"), QKeySequence(tr("Ctrl+T")));
+    addTextAction->setToolTip(tr("Creates a text clip at the playhead on a text track and opens it "
+                                 "in the Text panel"));
+    connect(addTextAction, &QAction::triggered, this, [this] { addTextClip(); });
 
     // ---- Sequence ----
     QMenu *sequence = menuBar()->addMenu(tr("Se&quence"));
@@ -690,10 +714,12 @@ void MainWindow::deleteSelectedClip() {
     if (!(timeline_ && timeline_->isRippleEnabled() && model_.rippleDelete(selectedClipId_))) {
         model_.removeClip(selectedClipId_);
     }
+    textLayerCache_.erase(selectedClipId_); // M6: stale layers never resurrect
     selectedClipId_ = -1;
     lastProgramClipId_ = -1;
     timeline_->clearSelection();
     effectControls_->setStack(-1, {}); // M5: the deleted clip's editor clears
+    textPanel_->setClip(-1, nullptr);  // M6: the text editor clears too
     updateSequenceDuration();
 }
 
@@ -855,6 +881,15 @@ void MainWindow::requestFrameAt(double seconds) {
     const bool clipChanged = clipId != lastProgramClipId_;
     lastProgramClipId_ = clipId;
     if (!clip) {
+        // M6: text clips covering the playhead with NO video clip under
+        // them render over BLACK - generated frames, no decode, no
+        // stale video bleeding through the cache.
+        if (!model_.textClipsAt(frame).empty()) {
+            rawProgramFrame_ = QImage();
+            frameClipId_ = -1;
+            applyProgramFrame();
+            return;
+        }
         // Empty timeline region (or empty timeline): plain source-time
         // behavior (M3 single-media semantics).
         QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, seconds));
@@ -896,16 +931,27 @@ void MainWindow::requestFrameAt(double seconds) {
 }
 
 void MainWindow::applyProgramFrame() {
-    if (rawProgramFrame_.isNull()) {
+    const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
+    // M6: the text stack composites on top of the video frame; when no
+    // video clip is active but text clips cover the playhead, the base
+    // is a black frame at the last program geometry.
+    const std::vector<const fc::Clip *> texts = model_.textClipsAt(frame);
+    if (rawProgramFrame_.isNull() && texts.empty()) {
         return;
     }
-    const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
-    const fc::Clip *clip = model_.clipById(frameClipId_);
-    QImage out = rawProgramFrame_; // shallow copy; bits() detaches below
-    if (out.format() != QImage::Format_RGBA8888) {
-        out = out.convertToFormat(QImage::Format_RGBA8888);
+
+    QImage out;
+    if (rawProgramFrame_.isNull()) {
+        out = QImage(lastProgramSize_, QImage::Format_RGBA8888);
+        out.fill(Qt::black);
+    } else {
+        out = rawProgramFrame_; // shallow copy; bits() detaches below
+        if (out.format() != QImage::Format_RGBA8888) {
+            out = out.convertToFormat(QImage::Format_RGBA8888);
+        }
     }
-    if (clip && !clip->effectStack.empty()) {
+    const fc::Clip *clip = model_.clipById(frameClipId_);
+    if (clip && !clip->effectStack.empty() && !rawProgramFrame_.isNull()) {
         // M5 Phase 3: the frame's CLIP-RELATIVE position resolves
         // keyframed parameters (static values when the playhead sits
         // outside the clip).
@@ -945,10 +991,38 @@ void MainWindow::applyProgramFrame() {
                 QImage blended(out.width(), out.height(), QImage::Format_RGBA8888);
                 fc::applyTransition(out.bits(), held.bits(), blended.bits(), out.width(),
                                     out.height(), sample.kind, sample.progress);
-                programCanvas_->setFrame(blended, rawFramePts_);
-                quickView_->canvas()->setFrame(blended, rawFramePts_);
-                return;
+                out = blended;
             }
+        }
+    }
+
+    // M6 Phase 1: composite every text clip covering the playhead ON TOP
+    // (paint order = bottom text lane first). The layer is cached per
+    // clip; the text clip's own effect stack runs on a COPY so keyframed
+    // params resolve per frame without touching the cache.
+    for (const fc::Clip *textClip : texts) {
+        if (!textClip || !textClip->isText) {
+            continue;
+        }
+        QImage layer = textLayerForClip(textClip, out.width(), out.height());
+        if (layer.isNull() || layer.format() != QImage::Format_RGBA8888 ||
+            layer.size() != out.size()) {
+            continue;
+        }
+        if (!textClip->effectStack.empty()) {
+            int64_t textFrame = fc::kNoKeyframeTime;
+            if (frame >= textClip->timelineStart && frame < textClip->timelineEnd()) {
+                textFrame = frame - textClip->timelineStart;
+            }
+            QImage effected = layer.copy();
+            fc::applyEffectStack(effected.bits(), effected.width(), effected.height(),
+                                 textClip->effectStack, textFrame);
+            layer = effected;
+        }
+        if (out.width() > 0 && out.height() > 0 &&
+            out.bytesPerLine() == static_cast<int>(out.width()) * 4 &&
+            layer.bytesPerLine() == static_cast<int>(layer.width()) * 4) {
+            fc::compositeOver(out.bits(), layer.constBits(), out.width(), out.height());
         }
     }
 
@@ -976,6 +1050,94 @@ void MainWindow::addEffectToSelectedClip(const QString &effectId) {
     if (frameClipId_ == selectedClipId_) {
         applyProgramFrame();
     }
+}
+
+// ---------------------------------------------------------------------------
+// M6 Phase 1: text engine.
+// ---------------------------------------------------------------------------
+
+void MainWindow::addTextClip() {
+    // Find the topmost text lane, or insert one above everything (T1).
+    int textTrack = -1;
+    int textTrackCount = 0;
+    for (const fc::Track &track : model_.tracks()) {
+        if (track.isText) {
+            if (textTrack < 0) {
+                textTrack = track.index;
+            }
+            ++textTrackCount;
+        }
+    }
+    if (textTrack < 0) {
+        const std::string name = "T" + std::to_string(textTrackCount + 1);
+        textTrack = model_.insertTrack(0, name, /*isAudio=*/false, /*isText=*/true);
+        timeline_->update(); // the new lane appears at the top
+        statusBar()->showMessage(
+            tr("Added text track %1 (above the video lanes).").arg(QString::fromStdString(name)),
+            4000);
+    }
+
+    // Default document: a centered 72 px white title for 4 s.
+    fc::TextDocument doc;
+    fc::TextRun run;
+    run.text = "Title";
+    run.style.size = 72;
+    doc.runs.push_back(run);
+    doc.align = fc::TextAlign::Center;
+    doc.box.anchorX = 0.5;
+    doc.box.anchorY = 0.5;
+    doc.box.wrap = 0.8;
+
+    const int64_t duration = std::max<int64_t>(1, static_cast<int64_t>(std::llround(4.0 * fps_)));
+    const int64_t playFrame = static_cast<int64_t>(std::llround(playhead_ * fps_));
+    // clipId 0 = a NEW clip: the kind was validated above (text lane),
+    // the drop snaps to the nearest free gap around the playhead.
+    int64_t start = model_.findDropPosition(textTrack, 0, playFrame, duration);
+    if (start < 0) {
+        start = 0;
+    }
+    const int64_t id = model_.addTextClip(textTrack, doc, start, duration);
+    if (id <= 0) {
+        statusBar()->showMessage(tr("Could not add the text clip (the text track is full)."), 4000);
+        return;
+    }
+    selectedClipId_ = id;
+    timeline_->selectClip(id); // selects everywhere (panels included)
+    updateSequenceDuration();
+    markDirty();
+    requestFrameAt(playhead_);
+    statusBar()->showMessage(tr("Text clip added - type in the Text panel to edit it."), 6000);
+}
+
+void MainWindow::writeTextDocument(int64_t clipId, const fc::TextDocument &doc) {
+    fc::Clip *clip = model_.clipById(clipId);
+    if (!clip || !clip->isText) {
+        return;
+    }
+    clip->text = doc;
+    fc::normalizeTextDocument(clip->text);
+    clip->label = fc::textPreviewLabel(clip->text);
+    textLayerCache_.erase(clipId); // the layer is text-derived; re-render
+    markDirty();
+    timeline_->update(); // the clip label preview
+    applyProgramFrame(); // instant re-render (video cache or black)
+}
+
+QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height) {
+    if (!clip || !clip->isText || width <= 0 || height <= 0) {
+        return QImage();
+    }
+    auto it = textLayerCache_.find(clip->id);
+    if (it != textLayerCache_.end() && it->second.width() == width &&
+        it->second.height() == height && it->second.format() == QImage::Format_RGBA8888) {
+        return it->second;
+    }
+    QImage layer = renderTextLayer(clip->text, width, height);
+    if (layer.format() != QImage::Format_RGBA8888) {
+        layer = layer.convertToFormat(QImage::Format_RGBA8888);
+    }
+    textLayerCache_[clip->id] = layer;
+    return layer;
 }
 
 void MainWindow::restoreLayout() {
@@ -1221,6 +1383,7 @@ void MainWindow::openProject() {
     pendingProgramSeek_ = false;
     pendingAddClipPath_.clear();
     rawProgramFrame_ = QImage();
+    textLayerCache_.clear(); // M6: layers belong to the OLD model's clips
     heldIncomingFrame_ = QImage();
     heldIncomingClipId_ = -1;
     pendingBFirstClipId_ = -1;
@@ -1236,6 +1399,7 @@ void MainWindow::openProject() {
     effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
     colorPanel_->setClip(-1, {});
     colorPanel_->setClipFrame(-1);
+    textPanel_->setClip(-1, nullptr); // M6
 
     // Rebuild the media library from the clip sources (order of first
     // use); proxies survive when their generated file still exists.
@@ -1395,6 +1559,9 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     std::map<std::string, std::unique_ptr<fc::VideoDecoder>> decoders;
     std::map<std::string, double> nextPts;
     std::map<int64_t, QImage> held;
+    // M6: rendered text layers cached per clip (time-invariant in
+    // Phase 1) at the export resolution.
+    std::map<int64_t, QImage> textLayers;
 
     auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
         const double srcSec =
@@ -1493,6 +1660,39 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
                         live.scaled(width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                             .convertToFormat(QImage::Format_RGBA8888);
                 }
+            }
+        }
+
+        // M6 Phase 1: composite the text stack ON TOP (same paint order
+        // as the program monitor: bottom text lane first). The text
+        // layer is rendered at the export resolution and cached; the
+        // text clip's own effect stack runs on a copy per frame so
+        // keyframed parameters resolve exactly like the preview.
+        for (const fc::Clip *textClip : model_.textClipsAt(f)) {
+            if (!textClip || !textClip->isText) {
+                continue;
+            }
+            auto layerIt = textLayers.find(textClip->id);
+            if (layerIt == textLayers.end()) {
+                layerIt =
+                    textLayers
+                        .emplace(textClip->id, fc::renderTextLayer(textClip->text, width, height))
+                        .first;
+            }
+            QImage layer = layerIt->second;
+            if (layer.isNull() || layer.format() != QImage::Format_RGBA8888 ||
+                layer.size() != out.size()) {
+                continue;
+            }
+            if (!textClip->effectStack.empty()) {
+                QImage effected = layer.copy();
+                fc::applyEffectStack(effected.bits(), effected.width(), effected.height(),
+                                     textClip->effectStack, f - textClip->timelineStart);
+                layer = effected;
+            }
+            if (width > 0 && height > 0 && out.bytesPerLine() == static_cast<int>(width) * 4 &&
+                layer.bytesPerLine() == static_cast<int>(width) * 4) {
+                fc::compositeOver(out.bits(), layer.constBits(), width, height);
             }
         }
         if (out.format() == QImage::Format_RGBA8888 &&

@@ -18,6 +18,10 @@ add_executable(fc_project_tests project_format_tests.cpp)
 target_link_libraries(fc_project_tests PRIVATE fc_core)
 add_test(NAME project COMMAND fc_project_tests)
 
+add_executable(fc_text_tests text_tests.cpp)
+target_link_libraries(fc_text_tests PRIVATE fc_core)
+add_test(NAME text COMMAND fc_text_tests)
+
 if(TARGET fc_media)
     add_executable(fc_media_tests
         media_tests.cpp

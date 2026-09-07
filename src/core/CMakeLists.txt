@@ -4,6 +4,7 @@ add_library(fc_core STATIC
     timeline_model.cpp
     effects.cpp
     transitions.cpp
+    text.cpp
     project_format.cpp)
 
 target_include_directories(fc_core PUBLIC

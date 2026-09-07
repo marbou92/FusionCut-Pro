@@ -34,7 +34,7 @@ arrive milestone by milestone.
 | M3 - Dual-mode UI | Pro Mode dockable panels, Quick Mode streamlined timeline | Shipped (v0.3.0) |
 | M4 - Editing core | Multi-track timeline, trim/split/ripple, audio mixer | Shipped (v0.4.13) |
 | M5 - Effects & color | Effects pipeline, 50+ effects, 30+ transitions, color panel | Shipped (v0.5.2) |
-| M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Planned |
+| M6 - Text engine | Rich text, bundled color-emoji renderer, animations, captions | Phase 1 shipped (v0.6.0) |
 | M7 - AI features | Face tracking, background removal, auto-captions | Planned |
 | M8 - Optimization & polish | 1 GB RAM budget audit, shortcuts, export presets | Planned |
 
@@ -161,6 +161,32 @@ arrive milestone by milestone.
 > Cancel; partial files are cleaned up on failure or cancellation.
 > Video only in this phase: timeline audio mixing (multi-track summing,
 > crossfades) ships with the audio milestone.
+>
+> **Text (v0.6.0, M6 Phase 1):** titles are first-class timeline
+> citizens. Text tracks (T1, created at the very top of the timeline
+> when you add your first title) host TEXT clips - generated frames,
+> no source media. The clip's rich-text document (a flat sequence of
+> styled UTF-8 runs) is laid out by a deterministic integer-math
+> engine - word wrap, hard splits for over-wide words, per-line
+> baseline alignment across mixed sizes, left/center/right block
+> alignment, an optional background box - and rasterized into a
+> transparent layer that composites ON TOP of the video stack in the
+> program monitor, Quick Mode, and the export (per-pixel source-over
+> blending, also integer math). The Text panel is a real rich-text
+> editor: type, then style the SELECTION (family / pixel size / bold /
+> italic / underline / color - no selection styles what you type next),
+> align the block, place it with X / Y / Width, toggle the background.
+> Add titles with Title > Add Text Clip (Ctrl+T); every edit re-renders
+> the program monitor instantly. Text clips carry effect stacks and
+> keyframes like every other clip (glow on a title works - the stack
+> runs on the text layer), they split/trim/roll/move/ripple-delete
+> like every other clip, and they save/load in the project file
+> (format 1, additive: older projects load unchanged). Emoji glyphs
+> render through the platform font fallback in this phase - the
+> bundled color-emoji renderer ships with M6 Phase 2. The engine is
+> unit-tested in the `text` ctest suite (layout numbers are pinned
+> with synthetic font metrics; only glyph pixels are
+> platform-dependent).
 
 ## System requirements (target)
 
@@ -248,7 +274,7 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Five suites run in the core-only configuration: **core** (88 checks:
+Six suites run in the core-only configuration: **core** (88 checks:
 rational frame rates, timecode parse/format/math, LRU eviction,
 memory-pool ownership/alignment) and **timeline** (130 checks: clip
 placement/split/trim/move semantics, cross-track moves with overlap
@@ -264,7 +290,11 @@ battery - placement validation, window resolution, and invariant
 pruning under every timeline mutation) and **project** (79 checks:
 JSON codec strictness, full model round-trip with id/keyframe/stack
 fidelity, byte-identical deterministic serialization, malformed-input
-rejection, parse atomicity) and **media** (400 checks:
+rejection, parse atomicity) and **text** (381 checks: UTF-8 decoding
+across the valid and invalid classes, layout placement math on
+synthetic metrics - wrap/alignment/baseline/box, source-over
+reference pixels, the text-clip timeline mutator battery, and the
+text-document project round-trip) and **media** (400 checks:
 synthetic media is generated at runtime - no binary
 assets in the repo - then probed, decoded frame-accurately with color-order
 assertions, seeked, and transcoded to 360p proxies with geometry, audio,

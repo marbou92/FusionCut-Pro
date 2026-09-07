@@ -30,8 +30,10 @@ constexpr int kEdgeGrabPx = 8; // edge-trim / roll grab zone
 const QColor kPanelBg(0x1B, 0x1B, 0x1B);
 const QColor kVideoTrack(0x2B, 0x30, 0x3A);
 const QColor kAudioTrack(0x1F, 0x36, 0x2E);
+const QColor kTextTrack(0x32, 0x28, 0x3A);
 const QColor kRulerBg(0x21, 0x21, 0x21);
 const QColor kClipFill(0x37, 0x4B, 0x5A);
+const QColor kTextClipFill(0x59, 0x3D, 0x70);
 const QColor kClipSelected(0x00, 0xA8, 0xFF);
 const QColor kGhostFill(0x6E, 0x9B, 0xB8);
 const QColor kGhostBad(0xB0, 0x3A, 0x2E);
@@ -229,6 +231,16 @@ void TimelinePanel::selectTransition(int64_t transitionId) {
     update();
 }
 
+void TimelinePanel::selectClip(int64_t clipId) {
+    if (!model_ || clipId <= 0 || model_->clipById(clipId) == nullptr) {
+        return; // stale or unknown id - keep the current state
+    }
+    selectedClipId_ = clipId;
+    selectedTransitionId_ = -1;
+    emit clipSelected(clipId);
+    update();
+}
+
 void TimelinePanel::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     painter.fillRect(rect(), kPanelBg);
@@ -333,7 +345,7 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         const QRect rect(x0, lane.top() + 4, std::max(8, x1 - x0), lane.height() - 8);
         const bool selected = clip.id == selectedClipId_;
 
-        QColor fill = selected ? kClipSelected : kClipFill;
+        QColor fill = selected ? kClipSelected : (clip.isText ? kTextClipFill : kClipFill);
         QColor border = selected ? QColor(0xFF, 0xFF, 0xFF) : QColor(0x55, 0x66, 0x77);
         QColor text = selected ? QColor(0x10, 0x10, 0x10) : QColor(0xE8, 0xE8, 0xE8);
         // Locked / muted / non-solo lanes render dimmed.
@@ -363,6 +375,17 @@ void TimelinePanel::drawClips(QPainter &painter) const {
             painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 8, QFont::Bold));
             painter.drawText(QRect(rect.right() - 30, rect.top(), 26, rect.height()),
                              Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("fx"));
+            painter.setFont(QFont()); // restore default for the next clip
+        }
+        // M6: teal "T" badge on text clips (before the fx zone so a
+        // graded text clip shows both).
+        if (clip.isText) {
+            QColor tColor(0x1A, 0xBC, 0x9C, int(255 * dim));
+            painter.setPen(tColor);
+            painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 8, QFont::Bold));
+            const int badgeRight = clip.effectStack.empty() ? rect.right() : rect.right() - 30;
+            painter.drawText(QRect(badgeRight - 30, rect.top(), 26, rect.height()),
+                             Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("T"));
             painter.setFont(QFont()); // restore default for the next clip
         }
     }
