@@ -10,7 +10,7 @@ namespace fc {
 // Small LRU cache keyed by Key with hit/miss statistics.
 //
 // Purpose: the eviction policy core for the frame cache described in
-// Module 3 ("frame caching with LRU eviction policy"). Stays dependency
+// "Frame caching with LRU eviction policy". Stays dependency
 // free so it can be unit tested in seconds on any CI runner.
 template <typename Key, typename Value> class LruCache {
 public:

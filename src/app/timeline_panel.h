@@ -9,10 +9,10 @@ class QToolButton;
 
 // Pro Mode bottom panel: multi-track timeline, custom-painted.
 //
-// M4a: renders clips from a TimelineModel, click-to-select, razor (C)
+// renders clips from a TimelineModel, click-to-select, razor (C)
 // split at the clicked frame, Delete to remove.
 //
-// M4b: full mouse editing - drag-move clips with a magnetic-snap ghost
+// full mouse editing - drag-move clips with a magnetic-snap ghost
 // (model findDropPosition), edge-drag trim (start/end), Alt+edge-drag
 // rolling boundary edits, header L/M/S click toggling, a tool row
 // (Select / Razor / Ripple toggle), razor hover preview line, and
@@ -29,33 +29,33 @@ public:
     void setFps(double fps);
 
     bool isRazorMode() const { return razorMode_; }
-    // M4b: ripple edit toggle - when on, MainWindow routes delete /
+    // ripple edit toggle - when on, MainWindow routes delete /
     // end-trim through the model ripple variants (gaps close).
     bool isRippleEnabled() const { return rippleEnabled_; }
 
 public slots:
     void setRazorMode(bool on);
     void clearSelection();
-    // M5 Phase 2: drop the transition selection (the cut marker in the
+    // drop the transition selection (the cut marker in the
     // lane, not a clip).
     void clearTransitionSelection();
-    // M5 Phase 2: select a cut transition programmatically (after adding
+    // select a cut transition programmatically (after adding
     // one); emits transitionSelected so the editor follows.
     void selectTransition(int64_t transitionId);
-    // M6 Phase 1: select a clip programmatically (after adding a text
+    // select a clip programmatically (after adding a text
     // clip); emits clipSelected so every panel follows the selection.
     void selectClip(int64_t clipId);
 
 signals:
     void playheadMoved(double seconds);
     void clipSelected(int64_t clipId);
-    // M5 Phase 2: a cut transition marker was clicked (id > 0) or the
+    // a cut transition marker was clicked (id > 0) or the
     // selection was cleared by clicking elsewhere (-1). MainWindow routes
     // it to the transition editor in Effect Controls.
     void transitionSelected(int64_t transitionId);
     void splitRequested(int trackIndex, int64_t frame);
     void deleteRequested();
-    // M4b:
+    // :
     // Ghost-resolved drop: startFrame comes from findDropPosition
     // (already overlap-free); MainWindow still validates via moveClipTo.
     void clipMoveRequested(int64_t clipId, int trackIndex, int64_t startFrame);
@@ -93,7 +93,7 @@ private:
     void drawHeaderColumn(QPainter &painter) const;
     void drawRuler(QPainter &painter) const;
     void drawClips(QPainter &painter) const;
-    // M5 Phase 2: cut transition markers (the window box on the boundary
+    // cut transition markers (the window box on the boundary
     // between two adjacent clips, with an X cross).
     void drawTransitions(QPainter &painter) const;
     void drawDragGhost(QPainter &painter) const;
@@ -104,7 +104,7 @@ private:
     double trackDimFactor(int index) const;
     // Hit-test the clip at a position; returns nullptr for empty space.
     const fc::Clip *clipAtPos(const QPoint &pos, int *rowOut = nullptr) const;
-    // M5 Phase 2: hit-test the transition marker at a position (its
+    // hit-test the transition marker at a position (its
     // central band, so clip edge-drag trims keep working around it).
     const fc::Transition *transitionAtPos(const QPoint &pos) const;
     // The rect the transition marker occupies on its lane.
@@ -122,12 +122,12 @@ private:
     double pps_ = 60.0;
     double fps_ = 24.0;
     int64_t selectedClipId_ = -1;
-    int64_t selectedTransitionId_ = -1; // M5 Phase 2
+    int64_t selectedTransitionId_ = -1;
     bool razorMode_ = false;
     bool rippleEnabled_ = false;
     QSlider *zoom_ = nullptr;
 
-    // ---- M4b interaction state ----
+    // ---- interaction state ----
     DragMode dragMode_ = DragMode::None;
     int64_t dragClipId_ = -1;
     int64_t dragGrabOffset_ = 0;   // frames: press frame - clip start

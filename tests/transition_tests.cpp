@@ -1,4 +1,4 @@
-// FusionCut Pro - M5 Phase 2 transitions engine + model unit tests.
+// FusionCut Pro - transitions engine + model unit tests.
 // Pure data + pure processing: no Qt, no FFmpeg. Every check is a
 // deterministic reference value (integer or explicitly rounded double,
 // far from rounding boundaries) derived by hand from the geometry
@@ -112,7 +112,7 @@ TestImg slideB8() {
 void testCatalog() {
     const auto &cat = transitionCatalog();
     CHECK(cat.size() == 36);
-    CHECK(cat.size() >= 30); // the M5 milestone contract
+    CHECK(cat.size() >= 30); // the catalog contract
 
     std::vector<std::string> ids;
     size_t dissolve = 0, wipe = 0, slide = 0, push = 0, zoom = 0;
@@ -1119,8 +1119,8 @@ void testClipStackAndTransitionCoexistence() {
     CHECK(model.clips()[0].effectStack.size() == 1);
     CHECK(model.transitions().size() == 1);
 
-    // ...and splitting propagates BOTH: stack copies to both halves (M5
-    // Phase 1 semantics), the transition re-targets to the right half.
+    // ...and splitting propagates BOTH: stack copies to both halves,
+    // and the transition re-targets to the right half.
     CHECK(model.splitAt(50, 1));
     CHECK(model.clips().size() == 3);
     CHECK(model.clips()[0].effectStack.size() == 1);

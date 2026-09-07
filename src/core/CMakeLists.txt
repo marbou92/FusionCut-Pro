@@ -5,6 +5,9 @@ add_library(fc_core STATIC
     effects.cpp
     transitions.cpp
     text.cpp
+    text.h
+    emoji.cpp
+    emoji.h
     project_format.cpp)
 
 target_include_directories(fc_core PUBLIC

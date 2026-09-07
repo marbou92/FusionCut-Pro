@@ -1,4 +1,4 @@
-// FusionCut Pro - timeline model unit tests (Module 4 editing core).
+// FusionCut Pro - timeline model unit tests (the editing core).
 // Pure data + operations; no Qt, no FFmpeg - runs anywhere ctest runs.
 
 #include <cmath>

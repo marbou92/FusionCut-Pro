@@ -36,7 +36,7 @@ int main(int argc, char *argv[]) {
             // resolution itself if the --crash-test failed.
             return 0;
         }
-        // v0.4.12: the standalone fcp-loader-check.exe is GONE; the
+        // The standalone fcp-loader-check.exe is GONE; the
         // two-phase loader diagnostic (import-tree probe + debug-launch
         // watch) runs from THIS exe. --diag launches a supervisor copy
         // of ourselves that debug-watches a --diag-child instance; the
@@ -48,7 +48,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Module 10.4 UI scaling support (100-200%) on high-DPI displays.
+    // UI scaling support (100-200%) on high-DPI displays.
     fc::recordBootStage(4, "about to construct QApplication");
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);

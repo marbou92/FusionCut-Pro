@@ -3,7 +3,7 @@
 // Built by CMake as the target "fcp-apiset-synch" and installed next to
 // FusionCutPro.exe with its EXACT api-set name (see src/app/CMakeLists.txt:
 // OUTPUT_NAME "api-ms-win-core-synch-l1-2-0", PREFIX ""). It replaces the
-// v0.4.6 packaging/api-ms-win-core-synch-l1-2-0.def forwarder stub, which
+// packaging/api-ms-win-core-synch-l1-2-0.def forwarder stub, which
 // never shipped (its CI build step died on a bash quoting bug) and which
 // could not have worked on Windows 7 anyway - see WHY REAL IMPLEMENTATIONS
 // below.
@@ -13,7 +13,7 @@
 //   dependency tree) hard-imports 'api-ms-win-core-synch-l1-2-0.dll' -
 //   the WaitOnAddress futex API set - by its literal api-set name.
 //   Diagnosed live by fcp-loader-check.exe v2.1's debug-launch watch
-//   (v0.4.5 field data): first-chance 0xC0000005 READ at ntdll+0x4b4b4
+//   (field data from the failure reports): first-chance 0xC0000005 READ at ntdll+0x4b4b4
 //   (the loader's import-snapping code), targeting an address inside
 //   the just-mapped api-ms-win-core-synch-l1-2-0.dll image (base +
 //   0x13f3), load trail stopped at FusionCutPro.exe -> avcodec-62.dll
@@ -35,7 +35,7 @@
 //   before the file search runs, so this DLL is never even touched -
 //   shipping it everywhere is safe and inert.
 //
-// WHY REAL IMPLEMENTATIONS (not forwarders, as the v0.4.6 attempt)
+// WHY REAL IMPLEMENTATIONS (not forwarders, as the first attempt)
 //   A forwarder-only stub would export WaitOnAddress as a forwarder
 //   into KernelBase - but KernelBase only implements the futex family
 //   since Windows 8. On Windows 7 the import would bind against OUR
@@ -54,7 +54,7 @@
 //       WakeAllConditionVariable (Vista+) - note the Windows
 //       condition-variable wake surface is EXACTLY those two
 //       functions; there is no SignalConditionVariable in the Win32
-//       API (v0.4.7 named that phantom and MinGW CI aborted on the
+//       API (a CI leg named that phantom and the build aborted on the
 //       implicit-declaration error),
 //     * GetTickCount64 (Vista+) for timeout bookkeeping.
 //
@@ -322,7 +322,7 @@ static void fcp_wake(PVOID Address, BOOL wake_all) {
             // The Vista+ condition-variable wake surface is exactly two
             // functions: WakeAllConditionVariable (broadcast, every
             // waiter) and WakeConditionVariable (exactly ONE waiter).
-            // v0.4.7 had this backwards - WakeByAddressAll called the
+            // An earlier revision had this backwards - WakeByAddressAll called the
             // wake-one function, and the single-wake branch named
             // SignalConditionVariable, a function that does not exist
             // in the Win32 API at all (MinGW CI: implicit-declaration

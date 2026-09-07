@@ -1,4 +1,4 @@
-// FusionCut Pro - M6 Phase 1 text engine unit tests.
+// FusionCut Pro - text engine unit tests.
 // Pure data + math; no Qt, no FFmpeg - runs anywhere ctest runs.
 // Covers: UTF-8 decoding (valid + invalid classes), the rich text model
 // (normalize, preview labels), the layout engine (wrap, hard splits,
@@ -978,7 +978,7 @@ static void testProjectTextRoundTrip() {
 }
 
 static void testProjectOldFormat() {
-    // A v0.5.2-era file (no "text" anywhere) still loads.
+    // A pre-text-era file (no "text" anywhere) still loads.
     const std::string old =
         R"({"format":1,"fps":24,"tracks":[)"
         R"({"name":"V1","audio":false,"locked":false,"muted":false,"solo":false},)"

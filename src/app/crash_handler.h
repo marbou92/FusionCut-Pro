@@ -1,4 +1,4 @@
-// FusionCut Pro - process-wide crash diagnostics (Module 0 / runtime
+// FusionCut Pro - process-wide crash diagnostics (runtime
 // resilience). Replaces the run-console.bat diagnostic launcher with a
 // built-in handler that captures the *real* failure (access violation,
 // stack overflow, pure-virtual call, uncaught C++ exception, OOM,
@@ -14,7 +14,7 @@
 // installCrashHandler("", "") at .CRT$XCU static-init time, BEFORE
 // main() runs. This is intentional - it makes the Windows VEH active
 // before QApplication pulls in Qt5Core / qwindows.dll, which is the
-// exact class of 0xc0000005 startup crash the v0.4.1 in-main() install
+// exact class of 0xc0000005 startup crash the in-main() install
 // could not catch. main() then calls installCrashHandler again with
 // the real FC_VERSION_STRING; the idempotent guard keeps the handlers
 // installed but updates the version + report dir fields. Callers
@@ -61,7 +61,7 @@ namespace fc {
 // main() while still letting main() supply the real version string.
 void installCrashHandler(const std::string &appVersion = {}, const std::string &reportDir = {});
 
-// Append a milestone line to the boot-trace log file
+// Append a stage line to the boot-trace log file
 // (FusionCutPro-boot-<timestamp>.log, next to the executable). Called
 // by main() at every major startup checkpoint (entered main, about to
 // construct QApplication, QApplication constructed, MainWindow
@@ -71,7 +71,7 @@ void installCrashHandler(const std::string &appVersion = {}, const std::string &
 // so the developer sees how far startup got. No-op if the trace file
 // could not be opened.
 //
-//   stage   - small integer milestone id (caller-chosen; 0 and 1 are
+//   stage   - small integer stage id (caller-chosen; 0 and 1 are
 //             reserved for the static initializer and the late
 //             installCrashHandler call respectively)
 //   message - human-readable description, e.g. "QApplication constructed"

@@ -44,7 +44,7 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    // ---- M4b tool row: [Select] [Razor] | [Ripple] -----------------------
+    // ---- tool row: [Select] [Razor] | [Ripple] -----------------------
     auto *toolRow = new QWidget(this);
     toolRow->setFixedHeight(kToolRowHeight);
     auto *tools = new QHBoxLayout(toolRow);
@@ -368,7 +368,7 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         painter.setPen(text);
         painter.drawText(rect.adjusted(6, 0, -6, 0), Qt::AlignLeft | Qt::AlignVCenter,
                          QString::fromStdString(clip.label));
-        // M5: amber "fx" badge on clips carrying an effect stack.
+        // amber "fx" badge on clips carrying an effect stack.
         if (!clip.effectStack.empty()) {
             QColor fxColor(0xE0, 0xA8, 0x30, int(255 * dim));
             painter.setPen(fxColor);
@@ -377,7 +377,7 @@ void TimelinePanel::drawClips(QPainter &painter) const {
                              Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("fx"));
             painter.setFont(QFont()); // restore default for the next clip
         }
-        // M6: teal "T" badge on text clips (before the fx zone so a
+        // teal "T" badge on text clips (before the fx zone so a
         // graded text clip shows both).
         if (clip.isText) {
             QColor tColor(0x1A, 0xBC, 0x9C, int(255 * dim));
@@ -449,7 +449,7 @@ void TimelinePanel::drawRazorHover(QPainter &painter) const {
 }
 
 // ---------------------------------------------------------------------------
-// M5 Phase 2: cut transition markers.
+// cut transition markers.
 // ---------------------------------------------------------------------------
 
 QRect TimelinePanel::transitionRect(const fc::Transition &t) const {
@@ -632,7 +632,7 @@ void TimelinePanel::mousePressEvent(QMouseEvent *event) {
     const int y = event->pos().y();
     const int row = trackRowAt(y);
 
-    // Header column: L/M/S toggles (M4b).
+    // Header column: L/M/S toggles.
     if (row >= 0 && x >= 0 && x < kHeaderWidth && event->button() == Qt::LeftButton) {
         const int relY = y - (contentTop() + kRulerHeight + row * kTrackHeight);
         if (relY >= 22) { // the L/M/S boxes live in the lower half of the cell
@@ -657,7 +657,7 @@ void TimelinePanel::mousePressEvent(QMouseEvent *event) {
     }
 
     if (event->button() == Qt::LeftButton && model_) {
-        // M5 Phase 2: clicking a transition marker selects it (the clip
+        // clicking a transition marker selects it (the clip
         // selection yields to the editor's transition page).
         if (const fc::Transition *t = transitionAtPos(event->pos())) {
             selectedTransitionId_ = t->id;
@@ -740,7 +740,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
         return;
     }
 
-    // Playhead scrub (M4a behavior).
+    // Playhead scrub.
     if ((event->buttons() & Qt::LeftButton) && x > kHeaderWidth &&
         event->pos().y() <= areaHeight() + contentTop() && !razorMode_) {
         playhead_ = static_cast<double>(xToFrame(x)) / fps_;

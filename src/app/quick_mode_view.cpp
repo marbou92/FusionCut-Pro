@@ -36,7 +36,7 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     playButton_->setMinimumWidth(90);
     position_ = new QSlider(Qt::Horizontal, this);
     position_->setRange(0, 1000);
-    position_->setEnabled(false); // full scrubbing ships with the M4 timeline
+    position_->setEnabled(false); // full scrubbing ships with the timeline
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(16, 12, 16, 12);
@@ -90,19 +90,18 @@ QWidget *QuickModeView::buildToolbar() {
     layout->setContentsMargins(10, 8, 10, 8);
     layout->setSpacing(8);
 
-    // Module 2.2 main toolbar (shown when no clip is selected).
+    // Main toolbar (shown when no clip is selected).
     static const char *kTools[] = {"Add Media", "Text",        "Stickers",
                                    "Effects",   "Transitions", "Filters"};
     for (const char *tool : kTools) {
-        layout->addWidget(
-            flatToolButton(tr(tool), tr("Coming in milestones M4-M6"), "#E8E8E8", bar));
+        layout->addWidget(flatToolButton(tr(tool), tr("Coming later"), "#E8E8E8", bar));
     }
     layout->addStretch(1);
 
-    // Quick Actions (Module 2.2): AI one-click features.
+    // Quick Actions: AI one-click features.
     static const char *kActions[] = {"Auto-Captions", "Auto-Enhance", "Smart Crop", "Templates"};
     for (const char *action : kActions) {
-        layout->addWidget(flatToolButton(tr(action), tr("Coming in milestone M7"), "#9BB8C9", bar));
+        layout->addWidget(flatToolButton(tr(action), tr("Coming later"), "#9BB8C9", bar));
     }
     return bar;
 }

@@ -9,7 +9,7 @@ namespace fc {
 // Fixed-capacity pool of equally sized, 64-byte aligned memory blocks.
 //
 // Purpose: deterministic video-frame allocation under a strict RAM budget
-// (Module 3: "custom memory pool allocator for video frames").
+// ("custom memory pool allocator for video frames").
 //  - Never grows: acquire() returns nullptr when exhausted, so there are
 //    no surprise allocations that could blow the 1GB target.
 //  - No per-acquire malloc: all blocks are carved out of one allocation.

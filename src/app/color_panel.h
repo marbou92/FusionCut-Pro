@@ -11,7 +11,7 @@ class QLabel;
 class QPushButton;
 class QSlider;
 
-// Pro Mode left panel (M5 Phase 3): the colorist's grade view. One
+// Pro Mode left panel : the colorist's grade view. One
 // combined "Color Correction" instance per clip - the panel edits the
 // selected clip's color.corrector (auto-created on first touch) through
 // grouped sliders: exposure, contrast, highlights, shadows, saturation,

@@ -224,7 +224,7 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
                 clip.sourceOutFrames = right.sourceInFrames; // left half ends here
             }
             right.timelineStart = frame;
-            // M5 Phase 3: the right half inherits the stack, so its
+            // the right half inherits the stack, so its
             // keyframe tracks shift with its new in-point. Keyframe frames
             // are CLIP-RELATIVE TIMELINE frames, so the offset is the
             // timeline split position, not the rate-adjusted source delta.
@@ -236,7 +236,7 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
                 fx.rebaseKeyframes(frame - start);
             }
             clips_.insert(clips_.begin() + static_cast<ptrdiff_t>(i + 1), right);
-            // M5 Phase 2: a transition on this clip's END boundary now
+            // a transition on this clip's END boundary now
             // belongs to the RIGHT half (the half that owns the cut).
             for (Transition &t : transitions_) {
                 if (t.leftClipId == splitClipId) {
@@ -276,7 +276,7 @@ bool TimelineModel::moveClipTo(int64_t id, int newTrackIndex, int64_t newTimelin
         return false;
     }
     // Clip kind = the kind of its track: video / audio / text must match
-    // exactly (M6: text clips never leave text lanes).
+    // exactly (text clips never leave text lanes).
     if (target->isAudio != origin->isAudio || target->isText != origin->isText) {
         return false;
     }
@@ -312,7 +312,7 @@ int64_t TimelineModel::findDropPosition(int trackIndex, int64_t clipId, int64_t 
             return -1;
         }
         // clipId 0 = a NEW clip being placed (no model identity yet); the
-        // CALLER guarantees the track-kind match (M6: text drops resolve
+        // CALLER guarantees the track-kind match (text drops resolve
         // this way before addTextClip mints an id).
     }
     const Track *target = trackAt(trackIndex);
@@ -592,7 +592,7 @@ const Clip *TimelineModel::clipById(int64_t id) const {
 
 const Clip *TimelineModel::activeVideoClipAt(int64_t frame) const {
     // Track 0 is the visually topmost video lane (the panel draws rows in
-    // index order, V2 above V1); the first hit wins. Text lanes (M6) are
+    // index order, V2 above V1); the first hit wins. Text lanes () are
     // NOT video: they composite on top instead of winning the lookup.
     for (int t = 0; t < trackCount(); ++t) {
         const Track *track = trackAt(t);
@@ -622,7 +622,7 @@ double TimelineModel::durationSeconds() const {
 }
 
 // ---------------------------------------------------------------------------
-// M5 Phase 2: cut transitions.
+// cut transitions.
 // ---------------------------------------------------------------------------
 
 int64_t TimelineModel::maxTransitionDuration(int64_t leftClipId, int64_t rightClipId) const {
@@ -636,9 +636,9 @@ int64_t TimelineModel::maxTransitionDuration(int64_t leftClipId, int64_t rightCl
     }
     const Track *track = trackAt(left->trackIndex);
     if (!track || track->isAudio || track->isText) {
-        // M6 Phase 1: cut transitions stay on VIDEO lanes - text clips
-        // have no decoded stream to hold for the incoming side (their
-        // animated compositing arrives with the M6 animation phase).
+        // cut transitions stay on VIDEO lanes - text clips
+        // have no decoded stream to hold for the incoming side (live
+        // animated compositing for them arrives later).
         return 0;
     }
     if (right->timelineStart != left->timelineEnd()) {

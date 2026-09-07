@@ -7,7 +7,7 @@
 namespace fc {
 
 // ---------------------------------------------------------------------------
-// M6 Phase 1: the text engine (rich text model + deterministic layout).
+// The text engine (rich text model + deterministic layout).
 //
 // Pure data + pure math: no Qt, no FFmpeg - unit tested in fc_text_tests.
 // Three pieces live here:
@@ -143,14 +143,30 @@ void utf8DecodeDetailed(const std::string &utf8, std::vector<uint32_t> &codepoin
 // are integers: horizontal advances, vertical metrics, and byte offsets.
 // codepoints may contain U+000A (newline) - a hard line break with
 // advance 0 that never renders.
+//
+// The two optional vectors carry emoji cluster annotations from the
+// app layer (the EmojiFont bridge). Both must be either EMPTY or
+// exactly codepoints.size() long; runs with mismatched sizes are
+// treated as unshapable (skipped), same as mismatched advances.
+//   clusterStarts: 1 = a cluster begins at this codepoint, 0 = this
+//     codepoint continues the previous cluster. The layout engine
+//     never hard-splits inside a cluster (an over-wide cluster renders
+//     alone, overflowing, exactly like a single over-wide glyph).
+//   emojiGlyphs: non-zero = an emoji cluster head; the value is the
+//     glyph id in the emoji font whose bitmap the renderer draws for
+//     the WHOLE cluster. Continuation codepoints carry 0 and (by
+//     convention) 0 advance; the layout engine does not interpret
+//     them beyond the cluster-boundary rule above.
 struct ShapedRun {
-    size_t runIndex = 0;              // index into TextDocument::runs
-    std::vector<uint32_t> codepoints; // decoded text (incl. '\n' markers)
-    std::vector<int> advances;        // per codepoint; '\n' must be 0
-    std::vector<int> byteStarts;      // codepoints.size() + 1 entries
-    int ascent = 0;                   // pixels above the baseline
-    int descent = 0;                  // pixels below the baseline
-    int lineGap = 0;                  // extra leading between lines
+    size_t runIndex = 0;                // index into TextDocument::runs
+    std::vector<uint32_t> codepoints;   // decoded text (incl. '\n' markers)
+    std::vector<int> advances;          // per codepoint; '\n' must be 0
+    std::vector<int> byteStarts;        // codepoints.size() + 1 entries
+    int ascent = 0;                     // pixels above the baseline
+    int descent = 0;                    // pixels below the baseline
+    int lineGap = 0;                    // extra leading between lines
+    std::vector<uint8_t> clusterStarts; // optional; see above
+    std::vector<uint16_t> emojiGlyphs;  // optional; see above
 };
 
 // One draw call: a CONTIGUOUS codepoint slice of one shaped run, placed

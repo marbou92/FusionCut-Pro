@@ -61,8 +61,27 @@ endif()
 # runtime DLLs during packaging.
 install(TARGETS FusionCutPro RUNTIME DESTINATION .)
 
+# The bundled color-emoji font (see THIRD_PARTY_NOTICES.md, SIL OFL 1.1)
+# rides along flat next to the exe: POST_BUILD puts it beside the
+# binary in build trees (dev runs and ctest invocations find it there),
+# install() puts it in the portable package. The app also probes
+# resources/fonts/ next to the exe, so both layouts work at runtime.
+# A missing font is not an error: text clips fall back to the platform
+# font for emoji (the emoji renderer simply stays unused).
+set(FC_EMOJI_FONT "${CMAKE_SOURCE_DIR}/resources/fonts/NotoColorEmoji.ttf")
+if(EXISTS "${FC_EMOJI_FONT}")
+    add_custom_command(TARGET FusionCutPro POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FC_EMOJI_FONT}"
+            "$<TARGET_FILE_DIR:FusionCutPro>/NotoColorEmoji.ttf")
+    install(FILES "${FC_EMOJI_FONT}" DESTINATION .)
+else()
+    message(WARNING "resources/fonts/NotoColorEmoji.ttf not found - the "
+                    "portable build will render emoji through the platform font")
+endif()
+
 # ---------------------------------------------------------------------------
-# v0.4.12: fcp-loader-check.exe is RETIRED. Its two-phase loader
+# fcp-loader-check.exe is RETIRED. Its two-phase loader
 # diagnostic (PE import-tree probe + kernel32 debug-launch watch) is
 # baked into FusionCutPro.exe as src/app/diag_supervisor.{h,cpp}, run
 # via the --diag command-line flag (a supervisor copy of the exe
@@ -91,7 +110,7 @@ install(TARGETS FusionCutPro RUNTIME DESTINATION .)
 # wins the bind on Win7/8.x; on Win10/11 the ApiSetSchema resolves the
 # name first and this DLL is never touched (inert).
 #
-# Why real implementations instead of v0.4.6's forwarder .def: KernelBase
+# Why real implementations instead of the earlier forwarder .def: KernelBase
 # only implements the futex family since Windows 8, so a forwarder would
 # fail entry-point resolution on Windows 7 (the user's test platform)
 # and trade the 0xc0000005 startup abort for a "procedure entry point
@@ -105,7 +124,7 @@ install(TARGETS FusionCutPro RUNTIME DESTINATION .)
 #     The source follows CRT-free code rules (see its header), so GCC
 #     never needs memset/memcpy/libgcc helpers.
 #   * --entry=DllMain: with -nostdlib ld cannot find the default
-#     DllMainCRTStartup entry (the v0.4.6 CI run printed that warning);
+#     DllMainCRTStartup entry (an early CI run printed that warning);
 #     our own DllMain is the entry point.
 # Windows-only target; the qt-app-ubuntu CI leg does not build it.
 # -------------------------------------------------------------------------

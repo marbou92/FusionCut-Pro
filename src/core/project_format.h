@@ -8,7 +8,7 @@
 namespace fc {
 
 // ---------------------------------------------------------------------------
-// M5 Phase 3 project persistence (Module 8 save/load, format 1).
+// project persistence (save/load, format 1).
 //
 // Pure text codec, no Qt, no FFmpeg: a hand-rolled strict JSON subset
 // (objects, arrays, strings with escapes incl. \uXXXX surrogate pairs,
@@ -20,7 +20,7 @@ namespace fc {
 // to the same bytes (fixed field order, shortest-exact number format) -
 // same tree, same file, across platforms.
 //
-// The schema (format 1; M6 adds the bracketed fields - old files load
+// The schema (format 1; adds the bracketed fields - old files load
 // unchanged, "text" is simply absent):
 // {
 //   "format": 1,

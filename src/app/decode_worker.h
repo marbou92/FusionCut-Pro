@@ -20,7 +20,7 @@ public slots:
     // Emits mediaInfo() and frameReady() with the frame at t=0.
     void open(const QString &path);
 
-    // M5 Phase 2: opens a media file WITHOUT the open-time t=0 display
+    // opens a media file WITHOUT the open-time t=0 display
     // frame (still emits mediaInfo()). The transition held-frame worker
     // uses this - it only wants the frame it explicitly requests next,
     // not the frame at the file head.

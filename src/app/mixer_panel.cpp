@@ -78,7 +78,7 @@ MixerPanel::MixerPanel(QWidget *parent) : QWidget(parent) {
     titleLayout->addStretch(1);
     layout->addLayout(titleLayout);
 
-    // A1 + master strips (video tracks carry no audio strips in M3).
+    // A1 + master strips (video tracks carry no audio strips in ).
     layout->addWidget(makeStrip(tr("A1"), true, this));
     layout->addWidget(makeStrip(tr("Master"), false, this));
     layout->addStretch(1);

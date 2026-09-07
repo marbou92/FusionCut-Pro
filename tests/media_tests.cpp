@@ -223,7 +223,7 @@ void testProxyNeverUpscales() {
     CHECK(info.video.width == 320);
 }
 
-// ---- M5 Phase 3: the export pipeline ------------------------------------
+// ---- the export pipeline ------------------------------------
 
 // Deterministic 64x36 pattern: per-frame blue ramp + moving white column.
 void fillExportFrame(int64_t frame, uint8_t *rgba, int w, int h) {

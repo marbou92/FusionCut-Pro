@@ -66,8 +66,7 @@ ExportDialog::ExportDialog(double fps, int64_t totalFrames, int sourceWidth, int
     auto *intro =
         new QLabel(tr("Renders the timeline through the full program pipeline - every effect "
                       "(with keyframes) and every cut transition, frame-accurate at export "
-                      "resolution.\nVideo only this phase; timeline audio mixing ships with the "
-                      "audio milestone."),
+                      "resolution.\nVideo only for now; timeline audio mixing ships later."),
                    this);
     intro->setWordWrap(true);
     layout->addWidget(intro);

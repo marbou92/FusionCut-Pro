@@ -28,7 +28,7 @@ QString formatValue(const fc::EffectParamDescriptor &p, double v) {
 } // namespace
 
 EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
-    // ---- Stack editor page (M5 Phase 1) ----
+    // ---- Stack editor page ----
     stackPage_ = new QWidget(this);
     clipLabel_ = new QLabel(tr("No clip selected"), stackPage_);
     clipLabel_->setWordWrap(true);
@@ -60,7 +60,7 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
     stackLayout->addWidget(buttonRow);
     stackLayout->addWidget(paramsScroll_, 2);
 
-    // ---- Transition editor page (M5 Phase 2) ----
+    // ---- Transition editor page ----
     transitionPage_ = new QWidget(this);
     transitionLabel_ = new QLabel(tr("No transition selected"), transitionPage_);
     transitionLabel_->setWordWrap(true);
@@ -315,7 +315,7 @@ void EffectControlsPanel::rebuildParams() {
             auto *valueLabel = new QLabel(formatValue(p, value), rowWidget);
             valueLabel->setMinimumWidth(56);
 
-            // M5 Phase 3: the keyframe diamond. Toggles the keyframe at
+            // the keyframe diamond. Toggles the keyframe at
             // the current clip frame (filled when one exists there).
             auto *diamond = new QPushButton(QString::fromUtf8("\u25C6"), rowWidget);
             diamond->setToolTip(tr("Toggle a keyframe for this parameter at the current "

@@ -5,7 +5,7 @@
 
 namespace fc {
 
-// Tuning knobs for proxy generation (Module 3: "auto-generate low
+// Tuning knobs for proxy generation ("auto-generate low
 // resolution proxies (360p) for smooth playback on low-end hardware").
 struct ProxyConfig {
     int targetHeight = 360; // proxy height; sources are never upscaled

@@ -32,7 +32,7 @@
 //     address, from which path. toolhelp32 lives in kernel32 - no
 //     extra link dependency.
 //
-//   * Pre-main VEH registration via static initializer: the v0.4.1
+//   * Pre-main VEH registration via static initializer: the older
 //     handler was installed from main(), which is too late for the
 //     Windows loader-phase 0xc0000005 class ("The application was
 //     unable to start correctly"). That dialog is shown by the OS
@@ -46,7 +46,7 @@
 //     reporter.
 //
 //   * Boot-trace log file (FusionCutPro-boot-<timestamp>.log): a
-//     milestone log written at every startup checkpoint (stage0=VEH
+//     stage log written at every startup checkpoint (stage0=VEH
 //     registered, stage1=entered main, stage2=full handler install,
 //     stage3=QApplication constructed, stage4=MainWindow constructed,
 //     stage5=app.exec entered). Even if VEH can't run (e.g. the crash
@@ -108,7 +108,7 @@ std::atomic<bool> g_installed{false};
 std::atomic<bool> g_crashing{false}; // reentrancy guard
 
 // ---------- boot trace ----------------------------------------------------
-// A milestone log opened at static-init time and appended to at every
+// A boot-stage log opened at static-init time and appended to at every
 // startup checkpoint. On clean exit it is deleted; on crash it is
 // preserved AND embedded into the crash report by the VEH/terminate
 // handlers. The trace is the only diagnostic that survives a
@@ -237,7 +237,7 @@ void openBootTrace() {
     }
 }
 
-// Append one milestone line to the boot trace. Public via fc::recordBootStage.
+// Append one stage line to the boot trace. Public via fc::recordBootStage.
 void writeBootStage(int stage, const char *message) {
     if (g_bootTraceFile == nullptr) {
         return;
@@ -363,7 +363,7 @@ const char *exceptionCodeName(DWORD code) {
 // that drags in a link dependency on psapi.lib on some toolchains;
 // toolhelp32 is in kernel32 (always linked).
 //
-// v0.4.12: the snapshot is taken ONCE per crash into a vector that is
+// The snapshot is taken ONCE per crash into a vector that is
 // then reused for (a) fault-address attribution (module+RVA blame - the
 // capability the old fcp-loader-check.exe provided from OUTSIDE the
 // process, now baked in), (b) per-frame backtrace attribution, (c) the
@@ -564,7 +564,7 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
     // Build the report body. VEH runs in ordinary thread context, so
     // std::string heap allocation is safe here.
     //
-    // v0.4.12: one module snapshot feeds fault attribution, frame
+    // One module snapshot feeds fault attribution, frame
     // attribution, the module list, and the dialog - and the faulting
     // address gets a "module.dll+0xRVA" blame line (the in-process
     // loader-check capability).
@@ -669,7 +669,7 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
 
     // User-facing dialog: only if a GUI desktop is available. Use
     // MB_SYSTEMMODAL so the dialog stays on top of any hung render.
-    // v0.4.12: the blamed module is IN the dialog - the user can act on
+    // The blamed module is IN the dialog - the user can act on
     // "avcodec-62.dll crashed" without opening the log.
     char msg[1024];
     std::snprintf(msg, sizeof(msg),
@@ -961,7 +961,7 @@ void installCrashHandler(const std::string &appVersion, const std::string &repor
         // Open the boot trace FIRST. Every subsequent line in this
         // function and in main() flows through writeBootStage, which is
         // a no-op if g_bootTraceFile is null. So if the boot trace open
-        // fails here, every later milestone is silently lost. We try
+        // fails here, every later boot stage is silently lost. We try
         // to reopen later from main() (via resolveReportDir()) too.
         openBootTrace();
 
@@ -1072,7 +1072,7 @@ std::string writeManualCrashReport(const std::string &appVersion, const std::str
 // (Windows) / .ctors (POSIX) static-init time, BEFORE main() is reached.
 // That means the VEH is registered before QApplication pulls in Qt5Core
 // / Qt5Gui / Qt5Widgets / qwindows.dll - covering the entire class of
-// 0xc0000005 startup crashes that the v0.4.1 in-main() install could
+// 0xc0000005 startup crashes that the in-main() install could
 // not catch. The boot trace is also opened here so a partial trace
 // survives even a crash inside a static-import DLL's DllMain (a case
 // VEH cannot catch because VEH itself is not yet wired up at that

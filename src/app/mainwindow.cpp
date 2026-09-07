@@ -61,7 +61,7 @@ namespace fc {
 
 namespace {
 
-// FusionCut Pro design tokens (Module 2.3 design system).
+// FusionCut Pro design tokens (the shared design system).
 constexpr unsigned int kWindowBg = 0x1E1E1E; // charcoal
 constexpr unsigned int kPanelBg = 0x252525;  // panel background
 constexpr unsigned int kButtonBg = 0x2E2E2E;
@@ -99,13 +99,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     resize(1280, 720);
     applyDarkTheme();
 
+    // Bundled color-emoji font for the text engine (best-effort: a
+    // missing or damaged file leaves emoji to the platform font, which
+    // is the pre-emoji behavior - nothing else changes).
+    if (!emojiPainter_.load(emojiFontFilePath())) {
+        qWarning("FusionCut Pro: bundled emoji font not found (%s) - emoji in text render "
+                 "via the platform font",
+                 qPrintable(emojiFontFilePath()));
+    }
+
     buildDecodeThread();
     buildProWorkspace();
     buildQuickWorkspace();
     buildMenus();
     buildStatusBar();
 
-    // Timeline model: three tracks matching the M3 placeholder lanes.
+    // Timeline model: three default tracks (two video, one audio).
     model_.setFps(fps_);
     model_.addTrack("V2", false);
     model_.addTrack("V1", false);
@@ -199,7 +208,7 @@ void MainWindow::buildDecodeThread() {
                     addPendingClip(pendingAddClipPath_, sourceOut);
                     pendingAddClipPath_.clear();
                 }
-                // M4b: a program-source switch was queued during a seek -
+                // a program-source switch was queued during a seek -
                 // the new source is now open; re-resolve the timeline
                 // position (it maps into the clip and seeks directly).
                 if (pendingProgramSeek_) {
@@ -208,7 +217,7 @@ void MainWindow::buildDecodeThread() {
                 }
             });
     connect(worker_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double pts) {
-        // M5: cache the RAW (pre-effects) frame + the clip it belongs to;
+        // cache the RAW (pre-effects) frame + the clip it belongs to;
         // the program monitor render path (applyProgramFrame) applies
         // that clip's effect stack on the way to the canvas. Effect
         // parameter edits re-render instantly from this cache.
@@ -216,11 +225,11 @@ void MainWindow::buildDecodeThread() {
         rawFramePts_ = pts;
         frameClipId_ = lastProgramClipId_;
         if (!frame.isNull() && frame.width() > 0 && frame.height() > 0) {
-            lastProgramSize_ = frame.size(); // M6: text-over-black base geometry
+            lastProgramSize_ = frame.size(); // text-over-black base geometry
         }
         // The timeline playhead + transport show the TIMELINE position
         // (playhead_), not the source-relative pts of the arriving
-        // frame - with M4b in-point offsets the two differ, and the
+        // frame - with in-point offsets the two differ, and the
         // timeline position is what the user scrubbed.
         timeline_->setPlayhead(playhead_);
         transport_->setPosition(playhead_);
@@ -256,7 +265,7 @@ void MainWindow::buildDecodeThread() {
 
     decodeThread_->start();
 
-    // ---- M5 Phase 2: the held-frame worker (worker B) ----
+    // ---- the held-frame worker (worker B) ----
     // Serves ONLY the incoming clip's first frame during transition
     // windows. It never drives the program source: its mediaInfo feeds
     // nothing but the queued held-frame request, its failures degrade the
@@ -298,9 +307,9 @@ void MainWindow::buildProWorkspace() {
     // Left zone: Project | Effects | Transitions | Color | Text (tabbed).
     projectPanel_ = new ProjectPanel(this);
     effectsPanel_ = new EffectsPanel(this);
-    transitionsPanel_ = new TransitionsPanel(this); // M5 Phase 2
-    colorPanel_ = new ColorPanel(this);             // M5 Phase 3
-    textPanel_ = new TextPanel(this);               // M6 Phase 1
+    transitionsPanel_ = new TransitionsPanel(this);
+    colorPanel_ = new ColorPanel(this);
+    textPanel_ = new TextPanel(this);
     auto *leftTabs = new QTabWidget(this);
     leftTabs->addTab(projectPanel_, tr("Project"));
     leftTabs->addTab(effectsPanel_, tr("Effects"));
@@ -324,7 +333,7 @@ void MainWindow::buildProWorkspace() {
     auto *rightDock = makeDock(tr("Effect Controls"), effectControls_, this);
     addDockWidget(Qt::RightDockWidgetArea, rightDock);
 
-    // Center: Source (left) | Program (right) monitors (Module 2.1).
+    // Center: Source (left) | Program (right) monitors.
     auto *monitorSplit = new QSplitter(Qt::Horizontal, this);
 
     auto *sourceGroup = new QWidget(monitorSplit);
@@ -378,19 +387,19 @@ void MainWindow::buildProWorkspace() {
     });
     connect(timeline_, &TimelinePanel::clipSelected, this, [this](int64_t id) {
         selectedClipId_ = id;
-        // M5: the Effect Controls + Color panels edit the SELECTED clip.
+        // the Effect Controls + Color panels edit the SELECTED clip.
         const fc::Clip *clip = id > 0 ? model_.clipById(id) : nullptr;
         const std::vector<fc::EffectInstance> stack =
             clip ? clip->effectStack : std::vector<fc::EffectInstance>();
         effectControls_->setStack(id, stack);
         colorPanel_->setClip(id, stack);
-        // M6: the Text panel edits the selected clip's document (null for
+        // the Text panel edits the selected clip's document (null for
         // non-text clips clears it).
         textPanel_->setClip(id, clip && clip->isText ? &clip->text : nullptr);
         updateKeyframePanels();
     });
 
-    // ---- M5 effects wiring ----
+    // ---- effects wiring ----
     connect(effectsPanel_, &EffectsPanel::effectAddRequested, this,
             [this](const QString &effectId) { addEffectToSelectedClip(effectId); });
     // Both stack editors (Effect Controls + Color) emit the FULL new
@@ -425,13 +434,13 @@ void MainWindow::buildProWorkspace() {
                 }
             });
 
-    // ---- M6 text wiring ----
+    // ---- text wiring ----
     connect(textPanel_, &TextPanel::addTextClipRequested, this, [this] { addTextClip(); });
     connect(
         textPanel_, &TextPanel::textEdited, this,
         [this](int64_t clipId, const fc::TextDocument &doc) { writeTextDocument(clipId, doc); });
 
-    // ---- M5 Phase 2 transition wiring ----
+    // ---- transition wiring ----
     connect(transitionsPanel_, &TransitionsPanel::transitionAddRequested, this,
             [this](const QString &kind) { addTransitionToSelectedClip(kind); });
     connect(timeline_, &TimelinePanel::transitionSelected, this, [this](int64_t id) {
@@ -449,7 +458,7 @@ void MainWindow::buildProWorkspace() {
                     statusBar()->showMessage(
                         tr("Duration rejected - it does not fit the outgoing clip."), 4000);
                 }
-                markDirty(); // M5 Phase 3: transition edits count
+                markDirty(); // transition edits count
                 if (const fc::Transition *t = model_.transitionById(id)) {
                     pushTransitionToEditor(*t); // refresh slider bounds + value
                 }
@@ -466,7 +475,7 @@ void MainWindow::buildProWorkspace() {
                 effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
                 timeline_->update();
                 applyProgramFrame();
-                markDirty(); // M5 Phase 3
+                markDirty();
                 statusBar()->showMessage(tr("Transition removed."), 4000);
             });
     connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
@@ -479,7 +488,7 @@ void MainWindow::buildProWorkspace() {
             updateSequenceDuration();
         }
     });
-    // ---- M4b timeline editing wiring ----
+    // ---- timeline editing wiring ----
     connect(timeline_, &TimelinePanel::clipMoveRequested, this,
             [this](int64_t clipId, int trackIndex, int64_t startFrame) {
                 moveClipTo(clipId, trackIndex, startFrame);
@@ -565,7 +574,7 @@ void MainWindow::buildMenus() {
         }
     });
 
-    // ---- Title (M6 Phase 1) ----
+    // ---- Title ----
     QMenu *title = menuBar()->addMenu(tr("&Title"));
     QAction *addTextAction = addMenuAction(title, tr("&Add Text Clip"), QKeySequence(tr("Ctrl+T")));
     addTextAction->setToolTip(tr("Creates a text clip at the playhead on a text track and opens it "
@@ -672,7 +681,7 @@ void MainWindow::loadClip(const QString &sourcePath) {
 }
 
 void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFrames) {
-    // M4a: place on V1 (track index 1) at the playhead; first 5s or full.
+    // place on V1 (track index 1) at the playhead; first 5s or full.
     const int64_t start = static_cast<int64_t>(std::llround(playhead_ * fps_));
     const int64_t out = std::max<int64_t>(1, sourceOutFrames);
     const QString label = QFileInfo(sourcePath).completeBaseName();
@@ -710,16 +719,16 @@ void MainWindow::deleteSelectedClip() {
             return;
         }
     }
-    // M4b: with the Ripple toggle on, the gap closes; otherwise classic.
+    // with the Ripple toggle on, the gap closes; otherwise classic.
     if (!(timeline_ && timeline_->isRippleEnabled() && model_.rippleDelete(selectedClipId_))) {
         model_.removeClip(selectedClipId_);
     }
-    textLayerCache_.erase(selectedClipId_); // M6: stale layers never resurrect
+    textLayerCache_.erase(selectedClipId_); // stale layers never resurrect
     selectedClipId_ = -1;
     lastProgramClipId_ = -1;
     timeline_->clearSelection();
-    effectControls_->setStack(-1, {}); // M5: the deleted clip's editor clears
-    textPanel_->setClip(-1, nullptr);  // M6: the text editor clears too
+    effectControls_->setStack(-1, {}); // the deleted clip's editor clears
+    textPanel_->setClip(-1, nullptr);  // the text editor clears too
     updateSequenceDuration();
 }
 
@@ -818,10 +827,10 @@ void MainWindow::updateSequenceDuration() {
     if (seq > 0.0) {
         transport_->setMedia(dur, fps_);
     }
-    // M5 Phase 2: every MainWindow model mutation funnels through here;
+    // every MainWindow model mutation funnels through here;
     // keep the transition editor in sync with pruned/clamped transitions.
     syncTransitionEditor();
-    // M5 Phase 3: same funnel marks the project dirty.
+    // same funnel marks the project dirty.
     markDirty();
 }
 
@@ -866,10 +875,10 @@ void MainWindow::stepFrames(int frames) {
 
 void MainWindow::requestFrameAt(double seconds) {
     playhead_ = seconds;
-    // M5 Phase 3: keyframed parameters display at the playhead's position
+    // keyframed parameters display at the playhead's position
     // inside the SELECTED clip.
     updateKeyframePanels();
-    // M4b composite program monitor: resolve the topmost video clip
+    // composite program monitor: resolve the topmost video clip
     // under the timeline playhead and map the position into that
     // clip's source (timeline frame - clip start + source in-point).
     // One decoder serves the whole timeline: moving the playhead into
@@ -881,7 +890,7 @@ void MainWindow::requestFrameAt(double seconds) {
     const bool clipChanged = clipId != lastProgramClipId_;
     lastProgramClipId_ = clipId;
     if (!clip) {
-        // M6: text clips covering the playhead with NO video clip under
+        // text clips covering the playhead with NO video clip under
         // them render over BLACK - generated frames, no decode, no
         // stale video bleeding through the cache.
         if (!model_.textClipsAt(frame).empty()) {
@@ -891,12 +900,12 @@ void MainWindow::requestFrameAt(double seconds) {
             return;
         }
         // Empty timeline region (or empty timeline): plain source-time
-        // behavior (M3 single-media semantics).
+        // behavior ( single-media semantics).
         QMetaObject::invokeMethod(worker_, "requestFrame", Q_ARG(double, seconds));
         return;
     }
 
-    // M5 Phase 2: the cut under the playhead may carry a transition -
+    // the cut under the playhead may carry a transition -
     // make sure the HELD first frame of the incoming clip is on hand
     // (fetched once per incoming clip on the dedicated worker B). The
     // outgoing clip keeps streaming through the regular path below.
@@ -932,7 +941,7 @@ void MainWindow::requestFrameAt(double seconds) {
 
 void MainWindow::applyProgramFrame() {
     const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
-    // M6: the text stack composites on top of the video frame; when no
+    // the text stack composites on top of the video frame; when no
     // video clip is active but text clips cover the playhead, the base
     // is a black frame at the last program geometry.
     const std::vector<const fc::Clip *> texts = model_.textClipsAt(frame);
@@ -952,7 +961,7 @@ void MainWindow::applyProgramFrame() {
     }
     const fc::Clip *clip = model_.clipById(frameClipId_);
     if (clip && !clip->effectStack.empty() && !rawProgramFrame_.isNull()) {
-        // M5 Phase 3: the frame's CLIP-RELATIVE position resolves
+        // the frame's CLIP-RELATIVE position resolves
         // keyframed parameters (static values when the playhead sits
         // outside the clip).
         int64_t clipFrame = fc::kNoKeyframeTime;
@@ -962,7 +971,7 @@ void MainWindow::applyProgramFrame() {
         fc::applyEffectStack(out.bits(), out.width(), out.height(), clip->effectStack, clipFrame);
     }
 
-    // M5 Phase 2: when the playhead sits inside a transition window AND
+    // when the playhead sits inside a transition window AND
     // the cached raw frame belongs to the outgoing (left) clip AND the
     // held (incoming) frame is available, composite the cut live. The
     // held frame runs the incoming clip's effect stack first (standard
@@ -996,9 +1005,9 @@ void MainWindow::applyProgramFrame() {
         }
     }
 
-    // M6 Phase 1: composite every text clip covering the playhead ON TOP
-    // (paint order = bottom text lane first). The layer is cached per
-    // clip; the text clip's own effect stack runs on a COPY so keyframed
+    // Composite every text clip covering the playhead ON TOP (paint
+    // order = bottom text lane first). The layer is cached per clip;
+    // the text clip's own effect stack runs on a COPY so keyframed
     // params resolve per frame without touching the cache.
     for (const fc::Clip *textClip : texts) {
         if (!textClip || !textClip->isText) {
@@ -1053,7 +1062,7 @@ void MainWindow::addEffectToSelectedClip(const QString &effectId) {
 }
 
 // ---------------------------------------------------------------------------
-// M6 Phase 1: text engine.
+// Text engine: clip creation, panel sync, layer rendering.
 // ---------------------------------------------------------------------------
 
 void MainWindow::addTextClip() {
@@ -1132,7 +1141,7 @@ QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height)
         it->second.height() == height && it->second.format() == QImage::Format_RGBA8888) {
         return it->second;
     }
-    QImage layer = renderTextLayer(clip->text, width, height);
+    QImage layer = renderTextLayer(clip->text, width, height, &emojiPainter_);
     if (layer.format() != QImage::Format_RGBA8888) {
         layer = layer.convertToFormat(QImage::Format_RGBA8888);
     }
@@ -1147,7 +1156,7 @@ void MainWindow::restoreLayout() {
 }
 
 // ---------------------------------------------------------------------------
-// M5 Phase 2: cut transitions.
+// cut transitions.
 // ---------------------------------------------------------------------------
 
 void MainWindow::addTransitionToSelectedClip(const QString &kind) {
@@ -1271,7 +1280,7 @@ void MainWindow::syncTransitionEditor() {
 }
 
 // ---------------------------------------------------------------------------
-// M5 Phase 3: keyframe panel sync + project persistence + export.
+// keyframe panel sync + project persistence + export.
 // ---------------------------------------------------------------------------
 
 void MainWindow::updateKeyframePanels() {
@@ -1383,7 +1392,7 @@ void MainWindow::openProject() {
     pendingProgramSeek_ = false;
     pendingAddClipPath_.clear();
     rawProgramFrame_ = QImage();
-    textLayerCache_.clear(); // M6: layers belong to the OLD model's clips
+    textLayerCache_.clear(); // layers belong to the OLD model's clips
     heldIncomingFrame_ = QImage();
     heldIncomingClipId_ = -1;
     pendingBFirstClipId_ = -1;
@@ -1399,7 +1408,7 @@ void MainWindow::openProject() {
     effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
     colorPanel_->setClip(-1, {});
     colorPanel_->setClipFrame(-1);
-    textPanel_->setClip(-1, nullptr); // M6
+    textPanel_->setClip(-1, nullptr);
 
     // Rebuild the media library from the clip sources (order of first
     // use); proxies survive when their generated file still exists.
@@ -1559,9 +1568,13 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     std::map<std::string, std::unique_ptr<fc::VideoDecoder>> decoders;
     std::map<std::string, double> nextPts;
     std::map<int64_t, QImage> held;
-    // M6: rendered text layers cached per clip (time-invariant in
-    // Phase 1) at the export resolution.
+    // Rendered text layers cached per clip (time-invariant) at the
+    // export resolution. The emoji painter is job-local: the bitmap
+    // cache is not thread-safe and the worker thread cannot touch the
+    // GUI-side painter.
     std::map<int64_t, QImage> textLayers;
+    fc::EmojiPainter exportEmoji;
+    exportEmoji.load(fc::emojiFontFilePath());
 
     auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
         const double srcSec =
@@ -1663,21 +1676,21 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
             }
         }
 
-        // M6 Phase 1: composite the text stack ON TOP (same paint order
-        // as the program monitor: bottom text lane first). The text
-        // layer is rendered at the export resolution and cached; the
-        // text clip's own effect stack runs on a copy per frame so
-        // keyframed parameters resolve exactly like the preview.
+        // Composite the text stack ON TOP (same paint order as the
+        // program monitor: bottom text lane first). The text layer is
+        // rendered at the export resolution and cached; the text clip's
+        // own effect stack runs on a copy per frame so keyframed
+        // parameters resolve exactly like the preview.
         for (const fc::Clip *textClip : model_.textClipsAt(f)) {
             if (!textClip || !textClip->isText) {
                 continue;
             }
             auto layerIt = textLayers.find(textClip->id);
             if (layerIt == textLayers.end()) {
-                layerIt =
-                    textLayers
-                        .emplace(textClip->id, fc::renderTextLayer(textClip->text, width, height))
-                        .first;
+                layerIt = textLayers
+                              .emplace(textClip->id, fc::renderTextLayer(textClip->text, width,
+                                                                         height, &exportEmoji))
+                              .first;
             }
             QImage layer = layerIt->second;
             if (layer.isNull() || layer.format() != QImage::Format_RGBA8888 ||

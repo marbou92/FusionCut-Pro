@@ -14,8 +14,8 @@ class QScrollArea;
 class QSlider;
 class QStackedWidget;
 
-// Pro Mode right panel: the M5 effect stack editor for ONE clip, plus the
-// M5 Phase 2 transition editor. MainWindow pushes the selected clip's
+// Pro Mode right panel: the effect stack editor for ONE clip, plus the
+// transition editor. MainWindow pushes the selected clip's
 // stack in (setStack) or the selected cut transition in (setTransition);
 // the panel shows one of the two editors via a stacked layout.
 //
@@ -24,7 +24,7 @@ class QStackedWidget;
 // MainWindow writes it into the model and re-renders the program monitor
 // instantly from the cached raw frame.
 //
-// Keyframes (M5 Phase 3): every Number param row carries a keyframe
+// Keyframes : every Number param row carries a keyframe
 // toggle (diamond). The panel also tracks the playhead's position within
 // the clip (setClipFrame): keyframed sliders display the resolved value
 // there, slider edits write a keyframe at that frame, and the diamond
@@ -43,7 +43,7 @@ public:
     // stack clears the panel).
     void setStack(int64_t clipId, const std::vector<fc::EffectInstance> &stack);
 
-    // M5 Phase 3: the playhead's position within the edited clip (frames
+    // the playhead's position within the edited clip (frames
     // since its start); -1 = outside the clip / unknown. Keyframed
     // parameters display and edit at this frame.
     void setClipFrame(int64_t frame);

@@ -1,6 +1,6 @@
-// FusionCut Pro - baked-in Windows loader + startup diagnostic (v0.4.12).
+// FusionCut Pro - baked-in Windows loader + startup diagnostic.
 //
-// REPLACES the standalone fcp-loader-check.exe of v0.4.3-v0.4.11: the
+// REPLACES the standalone fcp-loader-check.exe it used to ship with: the
 // same two-phase diagnostic now ships inside FusionCutPro.exe and runs
 // as `FusionCutPro.exe --diag`. The exe launches a second copy of
 // ITSELF (`--diag-child`) under the classic kernel32 debug API and
@@ -14,7 +14,7 @@
 //     (ERROR_MOD_NOT_FOUND) and wrong-architecture DLLs
 //     (ERROR_BAD_EXE_FORMAT) by name, without running any DllMain.
 //     Each probe mapping is FreeLibrary'd immediately after its subtree
-//     walk so the loader teardown stays clean at exit (the v0.4.4
+//     walk so the loader teardown stays clean at exit (the historical
 //     fcp-loader-check bug, kept fixed).
 //
 //   PHASE 2 - debug-launch watch (the decisive diagnostic):

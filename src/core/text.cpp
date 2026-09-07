@@ -91,6 +91,23 @@ struct Glyph {
     int advance = 0;
 };
 
+// A hard-split break is legal only where a CLUSTER starts (or the run
+// carries no cluster table, in which case every codepoint is its own
+// cluster). Returns the smallest index b in [idx, end) that is a legal
+// break; `end` when none is. b == idx means idx itself is legal.
+size_t nextClusterBoundary(const std::vector<ShapedRun> &shaped, const std::vector<Glyph> &stream,
+                           size_t idx, size_t end) {
+    size_t b = idx;
+    while (b < end) {
+        const ShapedRun &run = shaped[stream[b].shaped];
+        if (run.clusterStarts.empty() || run.clusterStarts[size_t(stream[b].cp)] != 0) {
+            break; // cluster boundary (or legacy run: everywhere is one)
+        }
+        ++b;
+    }
+    return b;
+}
+
 struct Line {
     std::vector<Glyph> glyphs;
     int width = 0;
@@ -191,7 +208,8 @@ TextLayout layoutText(const TextDocument &doc, const std::vector<ShapedRun> &sha
     out.wrapWidth = wrapW;
 
     // Flatten the shaped runs into one glyph stream (validated entries
-    // only: mismatched advance/byte tables make a run unshapable).
+    // only: mismatched advance/byte tables make a run unshapable; the
+    // optional cluster vectors must be all-or-nothing per run).
     std::vector<Glyph> stream;
     for (size_t s = 0; s < shaped.size(); ++s) {
         const ShapedRun &run = shaped[s];
@@ -200,6 +218,10 @@ TextLayout layoutText(const TextDocument &doc, const std::vector<ShapedRun> &sha
         }
         if (run.advances.size() != run.codepoints.size() ||
             run.byteStarts.size() != run.codepoints.size() + 1) {
+            continue;
+        }
+        if ((!run.clusterStarts.empty() && run.clusterStarts.size() != run.codepoints.size()) ||
+            (!run.emojiGlyphs.empty() && run.emojiGlyphs.size() != run.codepoints.size())) {
             continue;
         }
         for (size_t c = 0; c < run.codepoints.size(); ++c) {
@@ -294,7 +316,10 @@ TextLayout layoutText(const TextDocument &doc, const std::vector<ShapedRun> &sha
         if (curHasWord && cur.width + wordWidth > wrapW) {
             flushLine(true);
         }
-        // Hard split: the word alone exceeds the wrap width.
+        // Hard split: the word alone exceeds the wrap width. Clusters
+        // (emoji sequences) are atomic: the split point moves to the
+        // next cluster boundary, so an over-wide cluster renders alone
+        // and overflows, exactly like a single over-wide codepoint.
         while (wordWidth > wrapW && j - i > 1) {
             int piece = 0;
             size_t k = i;
@@ -305,6 +330,18 @@ TextLayout layoutText(const TextDocument &doc, const std::vector<ShapedRun> &sha
                 }
                 piece = next;
                 ++k;
+            }
+            if (k < j) {
+                const size_t k0 = k;
+                k = nextClusterBoundary(shaped, stream, k, j);
+                if (k != k0) {
+                    // include the cluster extension in the piece sum so
+                    // the wordWidth bookkeeping below stays exact
+                    piece = 0;
+                    for (size_t g = i; g < k; ++g) {
+                        piece += stream[g].advance;
+                    }
+                }
             }
             for (size_t g = i; g < k; ++g) {
                 cur.glyphs.push_back(stream[g]);
@@ -322,7 +359,13 @@ TextLayout layoutText(const TextDocument &doc, const std::vector<ShapedRun> &sha
         curHasWord = true;
         i = j;
     }
-    if (!cur.glyphs.empty() || curHasWord) {
+    // Flush the last line. cur is empty here only when nothing is
+    // pending: after a trailing '\n' (the flush already happened) or
+    // when a hard split consumed the whole word down to its last
+    // cluster boundary (words without cluster annotations always leave
+    // glyphs in cur; a fully-consumed split is new with cluster
+    // extension) - a phantom blank line must not appear in either case.
+    if (!cur.glyphs.empty()) {
         flushLine(true);
     }
 

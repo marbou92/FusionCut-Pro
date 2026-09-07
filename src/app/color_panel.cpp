@@ -12,7 +12,7 @@ namespace {
 
 constexpr int kSliderSteps = 1000;
 
-// The corrector is THE Color Panel effect (M5 Phase 3 catalog entry).
+// The corrector is THE Color Panel effect (catalog entry).
 constexpr const char *kCorrectorId = "color.corrector";
 
 struct ParamSpec {

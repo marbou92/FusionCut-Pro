@@ -1,6 +1,6 @@
 // FusionCut Pro - baked-in Windows loader + startup diagnostic (impl).
 // See diag_supervisor.h for the design narrative (phases, constraints,
-// and the fcp-loader-check.exe lineage this replaces in v0.4.12).
+// and the fcp-loader-check.exe lineage this replaces).
 
 #include "diag_supervisor.h"
 
@@ -201,7 +201,7 @@ void walkImports(HMODULE h, const char *contextName, int depth) {
         // NEVER leave a DONT_RESOLVE-mapped image in the loader's
         // module list: the teardown path would jump through an
         // unresolved import-table entry (raw RVA -> DEP execute
-        // violation at exit - the v0.4.4 fcp-loader-check bug). The
+        // violation at exit - the old fcp-loader-check bug). The
         // visited set above prevents re-walking; freeing here keeps
         // the exit path clean. For modules that were already loaded
         // normally (kernel32 etc.) this is a plain refcount decrement

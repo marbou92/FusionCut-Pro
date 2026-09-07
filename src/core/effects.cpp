@@ -553,7 +553,7 @@ void applyEmboss(const EffectInstance &fx, uint8_t *rgba, int w, int h) {
 }
 
 // ---------------------------------------------------------------------------
-// M5 Phase 3 additions (27 effects). Same contract: RGBA8888 in place,
+// additions (27 effects). Same contract: RGBA8888 in place,
 // alpha preserved, deterministic math, integer or explicitly rounded
 // double everywhere.
 // ---------------------------------------------------------------------------
@@ -1276,7 +1276,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
          "Gamma",
          "Color",
          {{"gamma", "Gamma", EffectParamType::Number, 0.2, 3.0, 1.0}}},
-        // ---- Color (Phase 3) ----
+        // ---- Color ----
         {"color.corrector",
          "Color Correction",
          "Color",
@@ -1334,7 +1334,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
          "Invert",
          "Tone",
          {{"amount", "Amount", EffectParamType::Number, 0.0, 1.0, 1.0}}},
-        // ---- Tone (Phase 3) ----
+        // ---- Tone ----
         {"tone.highlights",
          "Highlights",
          "Tone",
@@ -1376,7 +1376,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
          "Chromatic Aberration",
          "Filter",
          {{"shift", "Shift", EffectParamType::Number, 0.0, 12.0, 2.0}}},
-        // ---- Filter (Phase 3) ----
+        // ---- Filter ----
         {"filter.mirror",
          "Mirror",
          "Filter",
@@ -1410,7 +1410,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
          "Gaussian Blur",
          "Blur & Sharpen",
          {{"radius", "Radius", EffectParamType::Number, 1.0, 16.0, 3.0}}},
-        // ---- Blur & Sharpen (Phase 3) ----
+        // ---- Blur & Sharpen ----
         {"blur.motionH",
          "Motion Blur H",
          "Blur & Sharpen",
@@ -1436,7 +1436,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
          "Emboss",
          "Stylize",
          {{"strength", "Strength", EffectParamType::Number, 0.0, 2.0, 1.0}}},
-        // ---- Stylize (Phase 3) ----
+        // ---- Stylize ----
         {"stylize.thermal",
          "Thermal",
          "Stylize",
@@ -1448,7 +1448,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
           {"seed", "Seed", EffectParamType::Number, 0.0, 1.0, 0.5},
           {"blockH", "Block Height", EffectParamType::Number, 2.0, 64.0, 8.0},
           {"maxShift", "Max Shift", EffectParamType::Number, 1.0, 64.0, 24.0}}},
-        // ---- Distort (Phase 3, new category) ----
+        // ---- Distort (new category) ----
         {"distort.wave",
          "Wave",
          "Distort",
@@ -1469,7 +1469,7 @@ const std::vector<EffectDescriptor> &effectCatalog() {
          "Distort",
          {{"blockW", "Block Width", EffectParamType::Number, 2.0, 64.0, 16.0},
           {"blockH", "Block Height", EffectParamType::Number, 2.0, 64.0, 16.0}}},
-        // ---- Generate (Phase 3, new category) ----
+        // ---- Generate (new category) ----
         {"generate.bars",
          "Color Bars",
          "Generate",
@@ -1559,7 +1559,7 @@ bool EffectInstance::paramBool(const std::string &key) const {
     return param(key, 0.0) >= 0.5;
 }
 
-// ---- M5 Phase 3: keyframe resolution + editing ----
+// ---- keyframe resolution + editing ----
 
 // True when `key` names a Number param of the descriptor (only Number
 // params can be keyframed).

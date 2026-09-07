@@ -7,7 +7,7 @@
 namespace fc {
 
 // ---------------------------------------------------------------------------
-// M5 Phase 2 transitions engine.
+// transitions engine.
 //
 // Pure data + pure processing: no Qt, no FFmpeg - unit tested in
 // fc_transition_tests. The engine composites two RGBA8888 frames (4 bytes
@@ -50,7 +50,7 @@ struct TransitionDescriptor {
     std::string category; // "Dissolve", "Wipe", "Slide", "Push", "Zoom"
 };
 
-// The M5 Phase 2 catalog: 36 transitions across 5 categories.
+// The catalog: 36 transitions across 5 categories.
 const std::vector<TransitionDescriptor> &transitionCatalog();
 
 // Catalog lookup by id; nullptr when unknown.

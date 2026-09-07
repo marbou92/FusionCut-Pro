@@ -5,7 +5,7 @@
 class QLineEdit;
 class QTreeWidget;
 
-// Pro Mode left panel (tabbed with Project): the M5 effects browser.
+// Pro Mode left panel (tabbed with Project): the effects browser.
 // Built from fc::effectCatalog() (the real engine catalog, not a static
 // seed list): categories, search filter, and double-click / Apply to
 // add an effect instance to the SELECTED timeline clip.

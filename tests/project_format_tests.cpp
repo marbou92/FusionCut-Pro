@@ -1,4 +1,4 @@
-// FusionCut Pro - M5 Phase 3 project persistence unit tests (6th ctest
+// FusionCut Pro - project persistence unit tests (6th ctest
 // suite). The JSON codec and the project round-trip are pure functions:
 // every check is deterministic. Round-trips use exactly-representable
 // doubles (halves, integers) so field-by-field equality is exact.

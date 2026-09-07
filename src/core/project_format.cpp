@@ -443,7 +443,7 @@ void appendHexColor(std::string &out, uint32_t rgba) {
     out += '"';
 }
 
-// ---- M6 Phase 1: text document codec ----
+// ---- text document codec ----
 
 void appendTextDocument(std::string &out, const TextDocument &doc) {
     out += "{\"align\":\"";
@@ -819,7 +819,7 @@ std::string serializeProject(const TimelineModel &model) {
         out += ",\"track\":";
         appendInt(out, clip.trackIndex);
         if (clip.isText) {
-            // M6: text clips carry a text document instead of a source;
+            // text clips carry a text document instead of a source;
             // sourceIn is always 0 and rate 1, so only the duration
             // (== sourceOut) is written.
             out += ",\"label\":";
@@ -997,7 +997,7 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
             !getBool(node.find("solo"), track.solo, error, "track.solo")) {
             return false;
         }
-        // M6: "text" is optional (old-format files have none); present
+        // "text" is optional (old-format files have none); present
         // means it must be a valid boolean.
         if (const JsonValue *textNode = node.find("text")) {
             if (!getBool(textNode, track.isText, error, "track.text")) {
@@ -1031,7 +1031,7 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
         Clip clip;
         int64_t clipTrack = 0;
         if (node.find("text")) {
-            // ---- M6 text clip: label/start/duration + text document ----
+            // ---- text clip: label/start/duration + text document ----
             int64_t duration = 0;
             if (!getIntegral(node.find("id"), clip.id, error, "clip.id") ||
                 !getIntegral(node.find("track"), clipTrack, error, "clip.track") ||

@@ -7,7 +7,7 @@
 namespace fc {
 
 // ---------------------------------------------------------------------------
-// M5 effects engine (Module 7 catalog core).
+// effects engine (the catalog core).
 //
 // Pure data + pure processing: no Qt, no FFmpeg - unit tested in
 // fc_effect_tests. The engine processes RGBA8888 byte buffers (4 bytes
@@ -20,7 +20,7 @@ namespace fc {
 //   EffectParamDescriptor - one knob of an effect (range + default).
 //   EffectDescriptor      - the effect kind: id, label, category, params.
 //   EffectInstance       - one applied effect: id + parameter values
-//                           + (M5 Phase 3) per-parameter keyframe tracks.
+//                           + per-parameter keyframe tracks.
 //   Clip::effectStack    - the ordered list of instances on a clip
 //                           (applied top to bottom).
 //
@@ -31,10 +31,10 @@ namespace fc {
 // ---------------------------------------------------------------------------
 
 // Time value meaning "no keyframe context - use the static values" (the
-// pre-Phase-3 semantics of applyEffectStack).
+// static semantics of applyEffectStack).
 constexpr int64_t kNoKeyframeTime = INT64_MIN;
 
-// M5 Phase 3: one keyframed parameter sample. `frame` is CLIP-RELATIVE
+// one keyframed parameter sample. `frame` is CLIP-RELATIVE
 // (0 = the clip's first timeline frame); `value` is the parameter value
 // at that frame (clamped to the descriptor range when stored).
 struct EffectKeyframe {
@@ -81,7 +81,7 @@ struct EffectDescriptor {
 // copies its stack to both halves; the model then re-bases the keyframe
 // tracks of the right half).
 //
-// Keyframes (M5 Phase 3): every Number param can carry a keyframe
+// Keyframes: every Number param can carry a keyframe
 // track. The STATIC value in `values` stays authoritative whenever the
 // track is empty; with a non-empty track the effective value at a clip
 // frame is resolved by paramAt(): clamp to the first/last point outside
@@ -145,8 +145,7 @@ struct EffectInstance {
     void rebaseKeyframes(int64_t offset);
 };
 
-// The M5 catalog: 52 effects across 7 categories (25 shipped in Phase 1,
-// 27 added in Phase 3).
+// The catalog: 52 effects across 7 categories.
 const std::vector<EffectDescriptor> &effectCatalog();
 
 // Catalog lookup by id; nullptr when unknown.
@@ -161,10 +160,9 @@ EffectInstance makeEffectInstance(const std::string &id);
 // (width or height <= 0, null buffer) are no-ops. The alpha channel is
 // preserved by every effect.
 //
-// `clipFrame` (M5 Phase 3) is the frame's CLIP-RELATIVE position (0 = the
+// `clipFrame` is the frame's CLIP-RELATIVE position (0 = the
 // clip's first timeline frame) used to resolve keyframed parameters; pass
-// kNoKeyframeTime (the default) to apply the static parameter values,
-// which is exactly the pre-Phase-3 behavior.
+// kNoKeyframeTime (the default) to apply the static parameter values.
 void applyEffectStack(uint8_t *rgba, int width, int height,
                       const std::vector<EffectInstance> &stack,
                       int64_t clipFrame = kNoKeyframeTime);

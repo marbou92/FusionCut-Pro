@@ -8,7 +8,7 @@ class QComboBox;
 class QPushButton;
 class QSlider;
 
-// Quick Mode page (Module 2.2): CapCut-style simplified layout - large
+// Quick Mode page: CapCut-style simplified layout - large
 // preview, prominent toolbar, aspect selector. Shares the decode worker
 // and playback state with Pro Mode via signals routed through MainWindow.
 class QuickModeView : public QWidget {

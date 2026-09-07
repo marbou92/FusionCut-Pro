@@ -1,4 +1,4 @@
-// FusionCut Pro - M5 Phase 1 effects engine unit tests.
+// FusionCut Pro - effects engine unit tests.
 // Pure data + pure processing: no Qt, no FFmpeg. Every check is a
 // deterministic reference value (integer or explicitly rounded double,
 // far from rounding boundaries) so results are identical on every
@@ -112,7 +112,7 @@ void testCatalog() {
     CHECK(hasBool);
     CHECK(findEffect("nope.nope") == nullptr);
 
-    // Categories present (14 Color after Phase 3, plus the new Distort
+    // Categories present (14 Color, plus the Distort
     // and Generate categories).
     size_t colorCount = 0;
     size_t distortCount = 0;
@@ -132,7 +132,7 @@ void testCatalog() {
     CHECK(distortCount == 4);
     CHECK(generateCount == 4);
 
-    // Spot descriptors (Phase 3).
+    // Spot descriptors (the added catalog effects).
     CHECK(findEffect("color.corrector") != nullptr);
     CHECK(findEffect("color.corrector")->params.size() == 9);
     CHECK(findEffect("stylize.glitch") != nullptr);
@@ -690,9 +690,9 @@ void testStackSemantics() {
     }
 }
 
-// ---- M5 Phase 3: the 27 new effects ------------------------------------
+// ---- the 27 new effects ------------------------------------
 
-void testPhase3IdentityAtNeutral() {
+void testCatalogAdditionsIdentityAtNeutral() {
     // Neutral defaults are exact identities.
     const char *neutral[] = {
         "color.corrector", "color.channelgain", "tone.highlights",
@@ -733,7 +733,7 @@ void testPhase3IdentityAtNeutral() {
     CHECK(unchanged(a, b));
 }
 
-void testPhase3Color() {
+void testCatalogAdditionsColor() {
     // Corrector: exposure, contrast, temperature, shadows - each alone.
     {
         TestImg img(8, 8, 100, 100, 100);
@@ -802,7 +802,7 @@ void testPhase3Color() {
     }
 }
 
-void testPhase3Tone() {
+void testCatalogAdditionsTone() {
     // Highlights: solid 160, amount 0.5 -> +11 (w = 32/127).
     {
         TestImg img(8, 8, 160, 160, 160);
@@ -839,7 +839,7 @@ void testPhase3Tone() {
     }
 }
 
-void testPhase3Filter() {
+void testCatalogAdditionsFilter() {
     // Mirror (vertical axis, default axis 0.5): on the 16-wide gradient,
     // x >= 8 mirrors from 2*8-1-x.
     {
@@ -881,7 +881,7 @@ void testPhase3Filter() {
     }
 }
 
-void testPhase3BlurDistortGenerate() {
+void testCatalogAdditionsBlurDistortGenerate() {
     // Motion blur H, radius 2 on the gradient (v = x*16 + y).
     {
         TestImg img = gradient16();
@@ -956,7 +956,7 @@ void testPhase3BlurDistortGenerate() {
     }
 }
 
-void testPhase3Stylize() {
+void testCatalogAdditionsStylize() {
     // Thermal palette: exact stop math on 0 / 128 / 255 luma.
     {
         TestImg img(4, 4, 0, 0, 0);
@@ -1000,7 +1000,7 @@ void testPhase3Stylize() {
     }
 }
 
-// ---- M5 Phase 3: keyframes ----------------------------------------------
+// ---- keyframes ----------------------------------------------
 
 void testKeyframes() {
     EffectInstance fx = makeEffectInstance("color.brightness");
@@ -1180,12 +1180,12 @@ int main() {
     testStylizeEffects();
     testStackSemantics();
     testClipStackIntegration();
-    testPhase3IdentityAtNeutral();
-    testPhase3Color();
-    testPhase3Tone();
-    testPhase3Filter();
-    testPhase3BlurDistortGenerate();
-    testPhase3Stylize();
+    testCatalogAdditionsIdentityAtNeutral();
+    testCatalogAdditionsColor();
+    testCatalogAdditionsTone();
+    testCatalogAdditionsFilter();
+    testCatalogAdditionsBlurDistortGenerate();
+    testCatalogAdditionsStylize();
     testKeyframes();
     return testExitCode("effects");
 }

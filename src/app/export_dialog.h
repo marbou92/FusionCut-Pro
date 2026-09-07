@@ -7,7 +7,7 @@ class QLabel;
 
 namespace fc {
 
-// M5 Phase 3: the export configuration dialog. Resolution (the source's
+// the export configuration dialog. Resolution (the source's
 // size or fixed presets), quality (CRF), and a summary of what will be
 // rendered (frames, duration, effects + transitions included - the exact
 // program-monitor pipeline). Runs modeless work: the caller drives the

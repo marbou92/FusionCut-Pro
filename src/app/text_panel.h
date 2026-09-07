@@ -13,7 +13,7 @@ class QSpinBox;
 class QTextEdit;
 class QToolButton;
 
-// Pro Mode left panel (M6 Phase 1): the rich-text editor for the
+// Pro Mode left panel : the rich-text editor for the
 // SELECTED text clip. The content area is a QTextEdit (Qt's fragment
 // model maps 1:1 onto fc::TextRun), so style controls apply to the
 // SELECTION exactly like a word processor: family / size / bold /

@@ -5,7 +5,7 @@
 class QLineEdit;
 class QTreeWidget;
 
-// Pro Mode left panel (M5 Phase 2): the transitions catalog browser.
+// Pro Mode left panel : the transitions catalog browser.
 // Mirrors EffectsPanel: a search box filters the catalog by label / id /
 // category; double-click or the Apply button requests the transition on
 // the OUTGOING cut of the clip selected in the timeline (MainWindow

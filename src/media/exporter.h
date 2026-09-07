@@ -7,7 +7,7 @@
 namespace fc {
 
 // ---------------------------------------------------------------------------
-// M5 Phase 3 export pipeline (Module 8 export, effects/transitions side).
+// export pipeline (the effects/transitions render side).
 //
 // Renders a fixed-rate RGBA frame sequence through the FFmpeg encode stack
 // (H.264 with an MPEG-4 Part 2 fallback, yuv420p, CRF rate control) into
@@ -17,10 +17,10 @@ namespace fc {
 // program monitor runs - and the exporter owns only the encode/mux side.
 // That keeps fc_media free of any timeline knowledge.
 //
-// Audio: this phase exports the video program only. Timeline audio mixing
-// (multi-track summing, crossfades) is the audio milestone's scope and
-// lands with it; the export contract here is "what you scrub is what you
-// render", frame-accurate, effects and transitions included.
+// Audio: the export renders the video program only for now. Timeline
+// audio mixing (multi-track summing, crossfades) ships later; the
+// export contract here is "what you scrub is what you render",
+// frame-accurate, effects and transitions included.
 // ---------------------------------------------------------------------------
 
 struct ExportConfig {
