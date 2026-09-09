@@ -3,29 +3,42 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace fc {
 
 // ---------------------------------------------------------------------------
-// The bundled color-emoji font: parser + cluster shaper.
+// The color-emoji font: parser + cluster shaper for the fonts ALREADY
+// INSTALLED on the machine (nothing is bundled).
 //
-// The app ships Google's Noto Color Emoji (resources/fonts/
-// NotoColorEmoji.ttf, SIL OFL 1.1 - see THIRD_PARTY_NOTICES.md), a
-// CBDT/CBLC bitmap font: every emoji is a 136x128 PNG with a strike
-// ppem of 109. This module parses the font's binary tables DIRECTLY
-// (sfnt directory, CBLC bitmap index, CBDT bitmap data, cmap, GSUB) so
+// The app discovers the user's emoji-capable font files (Segoe UI Emoji
+// on Windows, Apple Color Emoji on macOS, Noto Color Emoji / JoyPixels /
+// whatever the desktop has) and parses their binary tables DIRECTLY so
 // emoji render as full-color bitmaps everywhere - including Windows 7,
-// which has no platform color-emoji support and no DirectWrite shaper
-// for emoji sequences.
+// which has no platform color-emoji support at all. Picking a different
+// font in the Text panel selects a different emoji SET: the Microsoft
+// artwork, the Apple artwork, the Google artwork...
+//
+// Two bitmap formats cover every common emoji font:
+//   * CBDT/CBLC + GSUB (Noto, Segoe UI Emoji, JoyPixels): strike
+//     indexed bitmaps with per-record metrics, PNG payloads, and
+//     ligature rules that fold sequences (flags, families, keycaps)
+//     into single glyphs;
+//   * sbix (Apple Color Emoji): strikes of inline PNG/JPEG records
+//     addressed per glyph id, advances from hmtx, 'dupe'/'flip'
+//     record indirection (the layout verified against the OpenType
+//     spec and FreeType's implementation).
+// TrueType COLLECTIONS (.ttc - Apple Color Emoji ships as one) load by
+// trying each sub-font and keeping the first usable emoji face.
 //
 // Pure fc_core: no Qt, no FFmpeg, no allocations beyond load(). All
 // parsing is bounds-checked big-endian reads; a malformed or truncated
 // font makes load() fail and every lookup return "not found" - never a
-// crash. Unit tested against the actual bundled font bytes in
-// fc_emoji_tests (the file is committed, so the expectations are
-// byte-stable).
+// crash. The unit tests pin the parser against hand-built synthetic
+// fonts (a minimal CBDT face, a minimal sbix face, and a collection
+// wrapping both) so the suite stays hermetic - no font file needed.
 //
 // Shaping model (resolveCluster): an emoji cluster is either
 //   * a SEQUENCE matched against the font's own GSUB ligature rules -
@@ -34,10 +47,13 @@ namespace fc {
 //     resolved longest-match-first, or
 //   * a SINGLE codepoint with emoji presentation: either forced by a
 //     following U+FE0F (the emoji variation selector) or one whose
-//     Unicode default presentation is emoji (isDefaultEmojiPresentation).
+//     Unicode default presentation is emoji (isDefaultEmojiPresentation
+//     - the same policy table emoji_clusters.h pins for the layout).
 // U+FE0F / U+FE0E never map to glyphs themselves; they are dropped
 // from the glyph stream used for ligature matching and are consumed
-// into the cluster they follow.
+// into the cluster they follow. A font without GSUB rules (the sbix
+// faces) simply never ligates - the caller falls back to per-codepoint
+// bitmaps for the cluster's members.
 //
 // Determinism contract: load() followed by any sequence of const calls
 // is a pure function of the font bytes. After load() succeeds the
@@ -46,14 +62,14 @@ namespace fc {
 // keep the storage alive as long as the EmojiFont.
 //
 // Metrics are in STRIKE pixels (multiply by size/ppem to scale - see
-// emojiScaleStrike, whose rounding is pinned by tests).
+// emojiScaleStrike, whose rounding is pinned by tests). For sbix
+// records the image WIDTH/HEIGHT are unknown until the image is
+// decoded (the table does not store them) - the app layer decodes and
+// completes the extents; bearingX and the hmtx-scaled advance are
+// always known.
 // ---------------------------------------------------------------------------
 
 // Strike-metric scaling: round(v * size / ppem), never negative.
-// With the bundled font (ppem 109, bitmap line 128 px, advance 136 px)
-// a text pixel size S renders the bitmap at 128*S/109 px tall with a
-// 136*S/109 px advance - exactly the font's own hmtx math (advance
-// 2550/2048 units * 109/2048-per-px = 135.7 ~= 136 strike pixels).
 inline int emojiScaleStrike(int v, int size, int ppem) {
     if (ppem <= 0) {
         return 0;
@@ -62,31 +78,37 @@ inline int emojiScaleStrike(int v, int size, int ppem) {
     return scaled > 0 ? int(scaled) : 0;
 }
 
-// Variation selectors and the joiner: never rendered, never mapped to
-// glyphs (the bundled font's cmap maps U+FE0F to .notdef); they only
-// steer cluster resolution.
-constexpr uint32_t kEmojiVS16 = 0xFE0Fu; // emoji presentation
-constexpr uint32_t kEmojiVS15 = 0xFE0Eu; // text presentation
-constexpr uint32_t kZeroWidthJoiner = 0x200Du;
-constexpr uint32_t kCombiningKeycap = 0x20E3u;
+// Which bitmap-emoji tables a font file carries (light directory
+// probe - no table contents parsed).
+enum class EmojiFontFormat : uint8_t {
+    None = 0,
+    Cbdt = 1, // CBLC + CBDT strikes
+    Sbix = 2, // sbix strikes
+};
 
 class EmojiFont {
 public:
     // Per-glyph strike metrics from the bitmap record (strike pixels).
     struct Metrics {
-        int width = 0;    // bitmap width
-        int height = 0;   // bitmap height
+        int width = 0;    // bitmap width (0 for sbix: decode-dependent)
+        int height = 0;   // bitmap height (0 for sbix: decode-dependent)
         int bearingX = 0; // left bearing (right of the pen)
-        int bearingY = 0; // top bearing (UP from the baseline)
-        int advance = 0;  // horizontal advance
+        int bearingY = 0; // top bearing (UP from the baseline; 0 for sbix)
+        int advance = 0;  // horizontal advance (CBDT record / sbix hmtx)
     };
 
-    // A resolved bitmap: the PNG payload is a VIEW into the font bytes.
+    // A resolved bitmap: the image payload is a VIEW into the font
+    // bytes (PNG for CBDT and sbix 'png ', JPEG for sbix 'jpg ').
     struct Bitmap {
         Metrics metrics;
         int ppem = 0; // the strike's ppem (scale denominator)
-        const uint8_t *png = nullptr;
-        size_t pngLen = 0;
+        const uint8_t *data = nullptr;
+        size_t dataLen = 0;
+        uint32_t format = 0; // 0 = CBDT record (PNG, complete metrics);
+                             // else the sbix graphicType 4cc, e.g. 'png '
+        int originY = 0;     // sbix: the record's originOffsetY (bottom
+                             // edge, strike px, UP-positive); 0 for CBDT
+        bool mirror = false; // sbix 'flip' chains mirror the image
     };
 
     // One resolved cluster starting at a codepoint position.
@@ -95,11 +117,13 @@ public:
         int codepoints = 0; // cluster length in codepoints (>= 1)
     };
 
-    // Parses the font. `data` must stay valid and unchanged for the
-    // lifetime of this object (the app layer owns the file bytes).
-    // Returns false on any structural problem (then every lookup
-    // reports "not found" and the text pipeline falls back to the
-    // platform font - exactly the no-font behavior).
+    // Parses the font (a plain sfnt or a TrueType Collection; for a
+    // collection the first sub-font that parses as an emoji font wins).
+    // `data` must stay valid and unchanged for the lifetime of this
+    // object (the app layer owns the file bytes). Returns false on any
+    // structural problem (then every lookup reports "not found" and
+    // the text pipeline falls back to the platform font - exactly the
+    // no-font behavior).
     bool load(const uint8_t *data, size_t size);
 
     bool loaded() const { return loaded_; }
@@ -119,25 +143,22 @@ public:
     uint16_t variantGlyph(uint32_t base, uint32_t selector) const;
     // GSUB ligature rule lookup: the glyph for a full sequence, else 0.
     uint16_t ligatureFor(const uint16_t *glyphs, size_t count) const;
-    // CBDT/CBLC bitmap for a glyph (largest-ppem strike that has it).
-    // Records must start with the PNG signature (89504e47 0d0a1a0a) -
-    // that check is what turns table damage into "missing", not
-    // garbage pixels.
+    // Bitmap for a glyph (largest-ppem strike that has it, CBDT wins
+    // over sbix when a font carries both). CBDT records must start
+    // with the PNG signature (89504e47 0d0a1a0a) - that check is what
+    // turns table damage into "missing", not garbage pixels.
     bool bitmapFor(uint16_t glyph, Bitmap *out) const;
 
     // ---- introspection ----
     int numGlyphs() const { return numGlyphs_; }
     int strikePpem() const; // the largest strike's ppem, 0 when absent
-    int bitDepth() const;   // of the largest strike
+    int bitDepth() const;   // of the largest CBDT strike
     size_t ligatureRuleCount() const { return ligatures_.size(); }
     int maxLigatureSequence() const { return maxLigatureLen_; }
+    bool isSbix() const { return !sbixStrikes_.empty(); }
 
     // Unicode "default emoji presentation" policy for SINGLE
-    // codepoints (no FE0F): the SMP emoji blocks as a range plus the
-    // stable BMP set whose presentation is emoji by default. Codepoints
-    // outside it (e.g. U+2764 HEAVY BLACK HEART) render as text unless
-    // followed by U+FE0F - that is Unicode's own rule, and the emoji
-    // font's cmap coverage gates the bitmap anyway.
+    // codepoints (no FE0F) - the shared table in emoji_clusters.h.
     static bool isDefaultEmojiPresentation(uint32_t cp);
 
 private:
@@ -151,6 +172,11 @@ private:
         int bitDepth = 0;
         uint32_t arrayOffset = 0; // from CBLC start
         std::vector<SubTable> subtables;
+    };
+    struct SbixStrike {
+        int ppem = 0;
+        size_t base = 0; // from data_ start: the strike header (ppem)
+        size_t end = 0;  // one past the glyph-offset array (bounds guard)
     };
     struct CmapRange {
         uint32_t start = 0;
@@ -166,20 +192,31 @@ private:
     const uint8_t *table(const char tag[4], size_t *len) const;
 
     bool parseCbloc();
+    bool parseSbix();
     bool parseCmap();
     bool parseGsub();
     bool parseMaxp();
+    bool parseHead();
+    bool parseHmtx();
+    bool parseFontAt(size_t dirBase);                // one sub-font's full parse
+    int sbixAdvance(uint16_t glyph, int ppem) const; // hmtx units -> strike px
+    bool bitmapForCbdt(uint16_t glyph, Bitmap *out) const;
+    bool bitmapForSbix(uint16_t glyph, Bitmap *out) const;
 
     const uint8_t *data_ = nullptr;
     size_t size_ = 0;
+    size_t dirBase_ = 0; // table directory base (sub-font offset in a ttc)
     bool loaded_ = false;
 
     size_t cbdtOff_ = 0;
     size_t cbdtLen_ = 0;
     size_t cblcOff_ = 0;
     size_t cblcLen_ = 0;
+    size_t sbixOff_ = 0;
+    size_t sbixLen_ = 0;
 
-    std::vector<Strike> strikes_;
+    std::vector<Strike> strikes_; // CBDT/CBLC
+    std::vector<SbixStrike> sbixStrikes_;
     std::vector<CmapRange> cmapRanges_; // format 12, sorted by start
     bool cmapUnsorted_ = false;
     bool hasCmap4_ = false;
@@ -190,6 +227,27 @@ private:
     std::map<std::vector<uint16_t>, uint16_t> ligatures_;
     int maxLigatureLen_ = 0;
     int numGlyphs_ = 0;
+    int unitsPerEm_ = 1000;
+    std::vector<uint16_t> hmtxAdvances_; // font units, numberOfHMetrics entries
+    uint16_t hmtxTailAdvance_ = 0;       // advance of glyphs past hmtxAdvances_
 };
+
+// ---- standalone file-level helpers (no EmojiFont state needed) ----
+
+// Light probe: reads only the table directory (the first ~4 KB) of an
+// sfnt file or a TrueType Collection and reports which bitmap-emoji
+// table family it carries. Used by font discovery to skip the ~99.9%
+// of system fonts that have none without parsing them. `size` is how
+// many bytes of the file are actually at `data` (the directory lives
+// in the first ~4 KB); `fileSize` (-1 when unknown) is the file's real
+// length - table records routinely point far past a short head, so
+// the offset bounds check uses it, not `size`.
+EmojiFontFormat sfntBitmapEmojiFormat(const uint8_t *data, size_t size, int64_t fileSize = -1);
+
+// The font's family name from its 'name' table (Windows UTF-16BE
+// preferred, Unicode-platform next, Mac Roman as the last resort;
+// empty string when the font has no readable name). Works on sfnt
+// files and collections (first sub-font with a name wins).
+std::string sfntFamilyName(const uint8_t *data, size_t size);
 
 } // namespace fc

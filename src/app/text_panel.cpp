@@ -2,7 +2,9 @@
 
 #include <QCheckBox>
 #include <QColorDialog>
+#include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFileInfo>
 #include <QFontComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -20,6 +22,37 @@
 namespace {
 
 constexpr int kDefaultSize = 64;
+// Sensible animation default when the user first picks a kind: about
+// half a second at 24 fps.
+constexpr int kDefaultAnimFrames = 12;
+
+// Combo row order == the enum order in text.h.
+int animKindToIndex(fc::TextAnimKind kind) {
+    return static_cast<int>(kind);
+}
+fc::TextAnimKind animKindFromIndex(int index) {
+    switch (static_cast<fc::TextAnimKind>(index)) {
+    case fc::TextAnimKind::None:
+    case fc::TextAnimKind::Fade:
+    case fc::TextAnimKind::Slide:
+    case fc::TextAnimKind::Pop:
+    case fc::TextAnimKind::Typewriter:
+    case fc::TextAnimKind::Wipe:
+        return static_cast<fc::TextAnimKind>(index);
+    }
+    return fc::TextAnimKind::None;
+}
+
+fc::TextAnimDir animDirFromIndex(int index) {
+    switch (static_cast<fc::TextAnimDir>(index)) {
+    case fc::TextAnimDir::Left:
+    case fc::TextAnimDir::Right:
+    case fc::TextAnimDir::Up:
+    case fc::TextAnimDir::Down:
+        return static_cast<fc::TextAnimDir>(index);
+    }
+    return fc::TextAnimDir::Left;
+}
 
 QColor toQColor(uint32_t rgba) {
     return QColor(fc::textRed(rgba), fc::textGreen(rgba), fc::textBlue(rgba), fc::textAlpha(rgba));
@@ -347,6 +380,134 @@ void TextPanel::buildUi() {
     bgLayout->addStretch(1);
     layout->addWidget(bgRow);
 
+    // ---- Animation rows ----
+    auto *animRow = new QWidget(this);
+    auto *animLayout = new QHBoxLayout(animRow);
+    animLayout->setContentsMargins(0, 0, 0, 0);
+    animLayout->setSpacing(4);
+
+    auto *inLabel = new QLabel(tr("In:"), animRow);
+    animLayout->addWidget(inLabel);
+    animIn_ = new QComboBox(animRow);
+    animIn_->addItem(tr("None"));
+    animIn_->addItem(tr("Fade"));
+    animIn_->addItem(tr("Slide"));
+    animIn_->addItem(tr("Pop"));
+    animIn_->addItem(tr("Typewriter"));
+    animIn_->addItem(tr("Wipe"));
+    animIn_->setToolTip(tr("How the clip's first frames bring the text in"));
+    connect(animIn_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (loading_) {
+                    return;
+                }
+                // A fresh kind with no duration yet gets the default so
+                // the animation is visible immediately.
+                if (animKindFromIndex(index) != fc::TextAnimKind::None &&
+                    animInFrames_->value() <= 0) {
+                    animInFrames_->setValue(kDefaultAnimFrames);
+                }
+                pushDoc();
+            });
+    animLayout->addWidget(animIn_, 1);
+
+    animInFrames_ = new QSpinBox(animRow);
+    animInFrames_->setRange(0, 1000000);
+    animInFrames_->setValue(kDefaultAnimFrames);
+    animInFrames_->setToolTip(tr("Entrance duration in frames (0 = the entrance is disabled)"));
+    animInFrames_->setSuffix(tr(" f"));
+    connect(animInFrames_, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this,
+            [this](int) {
+                if (!loading_) {
+                    pushDoc();
+                }
+            });
+    animLayout->addWidget(animInFrames_);
+
+    auto *outLabel = new QLabel(tr("Out:"), animRow);
+    animLayout->addWidget(outLabel);
+    animOut_ = new QComboBox(animRow);
+    animOut_->addItem(tr("None"));
+    animOut_->addItem(tr("Fade"));
+    animOut_->addItem(tr("Slide"));
+    animOut_->addItem(tr("Pop"));
+    animOut_->addItem(tr("Typewriter"));
+    animOut_->addItem(tr("Wipe"));
+    animOut_->setToolTip(tr("How the clip's last frames take the text out"));
+    connect(animOut_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (loading_) {
+                    return;
+                }
+                if (animKindFromIndex(index) != fc::TextAnimKind::None &&
+                    animOutFrames_->value() <= 0) {
+                    animOutFrames_->setValue(kDefaultAnimFrames);
+                }
+                pushDoc();
+            });
+    animLayout->addWidget(animOut_, 1);
+
+    animOutFrames_ = new QSpinBox(animRow);
+    animOutFrames_->setRange(0, 1000000);
+    animOutFrames_->setValue(kDefaultAnimFrames);
+    animOutFrames_->setToolTip(tr("Exit duration in frames (0 = the exit is disabled)"));
+    animOutFrames_->setSuffix(tr(" f"));
+    connect(animOutFrames_, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this,
+            [this](int) {
+                if (!loading_) {
+                    pushDoc();
+                }
+            });
+    animLayout->addWidget(animOutFrames_);
+    layout->addWidget(animRow);
+
+    auto *dirRow = new QWidget(this);
+    auto *dirLayout = new QHBoxLayout(dirRow);
+    dirLayout->setContentsMargins(0, 0, 0, 0);
+    dirLayout->setSpacing(4);
+    auto *dirLabel = new QLabel(tr("Direction:"), dirRow);
+    dirLayout->addWidget(dirLabel);
+    animDir_ = new QComboBox(dirRow);
+    animDir_->addItem(tr("Left"));
+    animDir_->addItem(tr("Right"));
+    animDir_->addItem(tr("Up"));
+    animDir_->addItem(tr("Down"));
+    animDir_->setToolTip(
+        tr("Slide: the edge the text enters from (the exit uses the opposite edge).\n"
+           "Wipe: the edge the reveal starts at."));
+    connect(animDir_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+            [this](int) {
+                if (!loading_) {
+                    pushDoc();
+                }
+            });
+    dirLayout->addWidget(animDir_);
+    dirLayout->addStretch(1);
+    layout->addWidget(dirRow);
+
+    // ---- Emoji font row (a machine-wide preference, not clip data) ----
+    auto *emojiRow = new QWidget(this);
+    auto *emojiLayout = new QHBoxLayout(emojiRow);
+    emojiLayout->setContentsMargins(0, 0, 0, 0);
+    emojiLayout->setSpacing(4);
+    auto *emojiLabel = new QLabel(tr("Emoji font:"), emojiRow);
+    emojiLayout->addWidget(emojiLabel);
+    emojiFont_ = new QComboBox(emojiRow);
+    emojiFont_->addItem(tr("System default"), QString());
+    emojiFont_->setToolTip(
+        tr("Which of this PC's installed emoji fonts renders emoji in text clips.\n"
+           "Picking a different font switches the emoji artwork (Microsoft, Apple, Google...).\n"
+           "System default: emoji render through the platform font stack."));
+    connect(emojiFont_, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, [this](int index) {
+                if (loading_) {
+                    return;
+                }
+                emit emojiFontPicked(emojiFont_->itemData(index).toString());
+            });
+    emojiLayout->addWidget(emojiFont_, 1);
+    layout->addWidget(emojiRow);
+
     editor_->setTabChangesFocus(true);
 }
 
@@ -359,13 +520,18 @@ void TextPanel::applyAlign() {
 }
 
 fc::TextDocument TextPanel::documentFromEditor() const {
-    fc::TextDocument doc = doc_; // box + align as loaded/edited via the spins
+    fc::TextDocument doc = doc_; // box + align + animation as loaded/edited via the spins
     doc.align = doc_.align;
     doc.box.anchorX = anchorX_->value();
     doc.box.anchorY = anchorY_->value();
     doc.box.wrap = wrap_->value();
     doc.box.background = background_->isChecked();
     // doc.box.backgroundRgba lives in doc_ (set via the color dialog).
+    doc.animation.inKind = animKindFromIndex(animIn_->currentIndex());
+    doc.animation.inFrames = animInFrames_->value();
+    doc.animation.outKind = animKindFromIndex(animOut_->currentIndex());
+    doc.animation.outFrames = animOutFrames_->value();
+    doc.animation.dir = animDirFromIndex(animDir_->currentIndex());
 
     doc.runs.clear();
     const QTextDocument *tdoc = editor_->document();
@@ -456,6 +622,11 @@ void TextPanel::loadIntoEditor(const fc::TextDocument &doc) {
     anchorY_->setValue(doc.box.anchorY);
     wrap_->setValue(doc.box.wrap);
     background_->setChecked(doc.box.background);
+    animIn_->setCurrentIndex(animKindToIndex(doc.animation.inKind));
+    animInFrames_->setValue(static_cast<int>(doc.animation.inFrames));
+    animOut_->setCurrentIndex(animKindToIndex(doc.animation.outKind));
+    animOutFrames_->setValue(static_cast<int>(doc.animation.outFrames));
+    animDir_->setCurrentIndex(static_cast<int>(doc.animation.dir));
     size_->setValue(base.size);
     family_->setCurrentFont(baseFont);
     bold_->setChecked(base.bold);
@@ -496,6 +667,11 @@ void TextPanel::refreshInfo() {
         wrap_->setEnabled(false);
         background_->setEnabled(false);
         bgColor_->setEnabled(false);
+        animIn_->setEnabled(false);
+        animInFrames_->setEnabled(false);
+        animOut_->setEnabled(false);
+        animOutFrames_->setEnabled(false);
+        animDir_->setEnabled(false);
         return;
     }
     info_->setText(tr("Editing text clip %1").arg(clipId_));
@@ -515,6 +691,11 @@ void TextPanel::refreshInfo() {
     wrap_->setEnabled(true);
     background_->setEnabled(true);
     bgColor_->setEnabled(true);
+    animIn_->setEnabled(true);
+    animInFrames_->setEnabled(true);
+    animOut_->setEnabled(true);
+    animOutFrames_->setEnabled(true);
+    animDir_->setEnabled(true);
 }
 
 void TextPanel::setClip(int64_t clipId, const fc::TextDocument *doc) {
@@ -528,4 +709,29 @@ void TextPanel::setClip(int64_t clipId, const fc::TextDocument *doc) {
         loading_ = false;
     }
     refreshInfo();
+}
+
+void TextPanel::setEmojiFonts(const QVector<fc::SystemEmojiFont> &fonts,
+                              const QString &currentPath) {
+    loading_ = true;
+    emojiFont_->clear();
+    emojiFont_->addItem(tr("System default"), QString());
+    int select = 0;
+    for (const fc::SystemEmojiFont &f : fonts) {
+        const QString label = QStringLiteral("%1 (%2)").arg(f.family, f.format);
+        emojiFont_->addItem(label, f.path);
+        if (f.path == currentPath) {
+            select = emojiFont_->count() - 1;
+        }
+    }
+    // A persisted pick whose file vanished from the scan (uninstalled,
+    // or a path that no longer parses) still shows - grayed semantics
+    // are overkill; MainWindow's load() simply fails and falls back.
+    if (select == 0 && !currentPath.isEmpty()) {
+        const QString name = QFileInfo(currentPath).completeBaseName();
+        emojiFont_->addItem(QStringLiteral("%1 (%2)").arg(name, tr("not found")), currentPath);
+        select = emojiFont_->count() - 1;
+    }
+    emojiFont_->setCurrentIndex(select);
+    loading_ = false;
 }

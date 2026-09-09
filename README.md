@@ -18,8 +18,11 @@ GitHub Actions. No installer, no registry writes.
 - **Dual-mode workspace** - dockable Pro Mode panels vs. streamlined Quick Mode timeline
 - **Legacy-friendly** - targets Windows 7 SP1+ (32/64-bit era hardware), 1 GB RAM minimum
 - **Deterministic engine core** - fixed block pools and LRU frame-cache eviction, never guesswork
-- **Full-color emoji in titles** - a bundled Noto Color Emoji font renders through the app's
-  own bitmap-table parser, so emoji look identical on Windows 7 through 11
+- **Full-color emoji in titles** - rendered from the emoji fonts already installed on the
+  PC (Segoe UI Emoji, Noto, Apple Color Emoji...), parsed by the app's own bitmap-table
+  engine, with a picker that switches the emoji artwork set; works on Windows 7 through 11
+- **Text animations & captions** - per-clip entrances/exits (fade, slide, pop, typewriter,
+  wipe) and SubRip (.srt) caption import/export on the text tracks
 - **Portable-first distribution** - every build is a self-contained zip straight from CI
 - **Fully tested engine primitives** - timecode, caching, effects, transitions, text, emoji,
   and allocation units run in CI on every push (Ubuntu + Windows)
@@ -146,18 +149,38 @@ features (face tracking, background removal, auto-captions), and the 1 GB RAM bu
 > The engine is unit-tested in the `text` ctest suite (layout numbers are pinned with
 > synthetic font metrics; only glyph pixels are platform-dependent).
 >
-> **Color emoji:** emoji in text render from the bundled **Noto Color Emoji** font
-> (SIL OFL 1.1 - see `THIRD_PARTY_NOTICES.md`), parsed directly from its CBDT/CBLC
-> bitmap tables by the app's own engine - no platform emoji support required, so the
-> same full-color bitmaps appear on Windows 7, 8, 10, and 11. Sequences shape through
-> the font's own GSUB rules: ZWJ chains (families, professions, couples), flags,
-> keycaps, and skin-tone modifiers all render as single glyphs; U+FE0F selects the
-> emoji presentation; hearts and other text-default symbols render as text unless
-> followed by U+FE0F (Unicode's own rule). Emoji are layout citizens like any glyph -
-> word wrap keeps them whole, they scale with the run's pixel size, and their metrics
-> fold into the line height. The font file ships next to `FusionCutPro.exe` in the
-> portable zip; without it the app still runs, and emoji fall back to the platform
-> font. The parser and shaping policy are unit-tested in the `emoji` ctest suite.
+> **Color emoji (from the machine's own fonts):** the app bundles no font. It scans the
+> PC's font directories for emoji-capable faces - **Segoe UI Emoji** on Windows,
+> **Apple Color Emoji** (a `.ttc` collection with sbix bitmaps) on macOS, **Noto Color
+> Emoji** and friends on Linux - and the Text panel's *Emoji font* picker lists them.
+> The selected file is parsed directly by the app's own engine (CBDT/CBLC bitmap
+> tables + GSUB sequence ligatures, or sbix strikes for the Apple artwork), so the
+> same full-color bitmaps appear on Windows 7 through 11 with no platform emoji
+> support required - and picking a different font switches the emoji SET: the
+> Microsoft artwork, the Apple artwork, the Google artwork. Sequences shape through
+> the font's own GSUB rules (ZWJ chains, flags, keycaps, skin tones); a font without
+> them (the sbix faces) renders each member emoji side by side, never half a flag.
+> U+FE0F selects the emoji presentation; hearts and other text-default symbols render
+> as text unless followed by U+FE0F (Unicode's own rule). Emoji are layout citizens
+> like any glyph - word wrap keeps them whole, they scale with the run's pixel size,
+> and their metrics fold into the line height. With no emoji font installed (or
+> *System default* picked), emoji fall back to the platform font stack. The parsers,
+> shaping policy, and the synthetic-font fixtures are unit-tested in the `emoji`
+> ctest suite.
+>
+> **Text animations:** every text clip carries an entrance and an exit - fade, slide
+> (from any edge), pop (scale with overshoot), typewriter (cluster-aligned reveal:
+> an emoji sequence never types out half a flag), or wipe (along any edge) - with
+> durations in frames and one direction shared by slide/wipe. The state math is pure
+> core (`textAnimationAt`), so preview and export evaluate identical animation
+> states; animated clips re-render per frame in both.
+>
+> **Captions:** *File - Import Subtitles...* turns every cue of a `.srt` file into a
+> text clip (strict parser, tolerant of real-world quirks: BOM, CRLF/CR, missing cue
+> numbers, `.` milliseconds, common presentation tags stripped) on the text track;
+> *File - Export Subtitles...* writes the timeline's text clips back out (canonical
+> writer, byte-stable round trips). The codec is pure core and unit-tested in the
+> `srt` ctest suite.
 
 ## System requirements (target)
 
@@ -244,7 +267,7 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Seven suites run in the core-only configuration: **core** (88 checks:
+Eight suites run in the core-only configuration: **core** (88 checks:
 rational frame rates, timecode parse/format/math, LRU eviction,
 memory-pool ownership/alignment) and **timeline** (130 checks: clip
 placement/split/trim/move semantics, cross-track moves with overlap
@@ -257,21 +280,26 @@ battery - resolution, editing, rebase, time-aware application) and
 **transitions** (4500+ checks: catalog integrity, endpoint exactness
 for every kind, per-family reference pixels, and the transition model
 battery - placement validation, window resolution, and invariant
-pruning under every timeline mutation) and **project** (79 checks:
+pruning under every timeline mutation) and **project** (102 checks:
 JSON codec strictness, full model round-trip with id/keyframe/stack
 fidelity, byte-identical deterministic serialization, malformed-input
-rejection, parse atomicity) and **text** (381 checks: UTF-8 decoding
+rejection, parse atomicity) and **text** (453 checks: UTF-8 decoding
 across the valid and invalid classes, layout placement math on
 synthetic metrics - wrap/alignment/baseline/box, source-over
-reference pixels, the text-clip timeline mutator battery, and the
-text-document project round-trip) and **emoji** (218 checks: the
-bundled font's strike/cmap/GSUB tables decoded against pinned
-byte-stable facts, cluster shaping - singles, FE0F presentation,
-flags, keycaps, skin tones, ZWJ chains - bitmap record decoding with
-PNG-signature verification, strike-scaling math, malformed-input
-robustness, and the layout engine's cluster-atomicity rule) and
+reference pixels, the text-clip timeline mutator battery, the
+text-document project round-trip, and the text-animation evaluator -
+progress/easing/clamping for every kind, direction map, cluster-aware
+typewriter truncation) and **emoji** (356 checks: the pure Unicode
+cluster policy - joiner chains, flags, keycaps, skin tones, tag
+sequences, VS15/VS16 - plus the font parsers pinned against
+hand-built SYNTHETIC fonts, one per format: a minimal CBDT face with
+a GSUB ligature and a format-14 variant mapping, a minimal sbix face
+with 'dupe'/'flip' records and hmtx advances, and a TrueType
+Collection wrapping them - hermetic, no font file in the repo) and
+**srt** (83 checks: strict parsing with real-world tolerance, the
+canonical writer, byte-stable round trips, markup stripping) and
 **media** (400 checks: synthetic media is generated at runtime - no
-binary assets in the repo beyond the font - then probed, decoded
+binary assets in the repo - then probed, decoded
 frame-accurately with color-order assertions, seeked, and transcoded
 to 360p proxies with geometry, audio, progress, cancellation, and
 no-upscale verification, plus the export pipeline: encode/probe/decode
@@ -285,7 +313,6 @@ media layer is enabled.
 ├── .github/workflows/     # ci.yml (lint + core/media/Qt matrix) + portable-build.yml
 ├── cmake/                 # CMake templates (version.h.in)
 ├── docs/                  # repository metadata; specs and wireframes land here
-├── resources/fonts/       # NotoColorEmoji.ttf - bundled color-emoji font (SIL OFL 1.1)
 ├── src/
 │   ├── app/               # Qt 5.15 desktop shell (Pro/Quick workspace host)
 │   ├── core/              # dependency-free engine primitives (fc_core)
@@ -293,7 +320,7 @@ media layer is enabled.
 ├── tests/                 # core + media suites, shared harness, synthetic media generator
 ├── CMakeLists.txt
 ├── LICENSE                # GPL-3.0
-├── THIRD_PARTY_NOTICES.md # bundled-component licenses (Noto Color Emoji / OFL)
+├── THIRD_PARTY_NOTICES.md # third-party licensing notes (nothing is bundled)
 └── VERSION                # single source of truth for the version number
 ```
 
@@ -306,9 +333,9 @@ This program is free software: you can redistribute it and/or modify it under th
 version 3 of the License, or (at your option) any later version.
 
 GPL-3.0 was chosen for forward compatibility with the FFmpeg ecosystem (dynamically linked,
-which also satisfies Qt's LGPL-3.0 terms). The bundled Noto Color Emoji font is licensed
-separately under the SIL Open Font License 1.1 - see
-[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+which also satisfies Qt's LGPL-3.0 terms). No fonts ship with the app - color-emoji
+rendering reads the fonts already installed on the machine, so their own licenses apply
+(see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)).
 
 ## Repository settings
 

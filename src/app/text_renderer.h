@@ -11,84 +11,110 @@
 #include "emoji.h"
 #include "text.h"
 
-class QCoreApplication;
-
 namespace fc {
 
-class EmojiPainter; // defined below; renderTextLayer takes one
+class EmojiPainter; // defined below; shapeTextQt/renderTextLayer take one
 
 // The app-layer text rasterizer: bridges REAL font metrics (Qt) into
 // the pure core layout engine, then paints the laid-out slices with
-// QPainter. Glyph PIXELS are platform-dependent (every font engine
-// differs); every NUMBER the core produces (wrap, line breaks,
-// alignment, box placement) is not.
+// QPainter.
 //
 // shapeTextQt: one ShapedRun per document run - QFontMetrics integer
 // advances/ascent/descent/leading plus the UTF-8 byte offsets the core
-// slices by. Runs with empty text are skipped. With an EmojiFont the
-// bridge also resolves emoji clusters (see emoji.h): the cluster head
-// carries the strike advance scaled to the run's pixel size, its
-// continuation codepoints advance 0, and the ShapedRun annotations
-// keep the layout engine from splitting a cluster mid-sequence.
+// slices by. Runs with empty text are skipped. EMOJI CLUSTERS are
+// segmented by the pure Unicode policy in emoji_clusters.h and stay
+// atomic (the layout engine never splits one mid-sequence):
+//   * with a loaded EmojiPainter (a color-emoji font the user picked
+//     from the machine's installed fonts), a cluster that resolves to
+//     a bitmap glyph - a GSUB ligature (flag, family, keycap) or a
+//     single emoji-presentation codepoint - carries the strike advance
+//     scaled to the run's pixel size on its head, its continuations
+//     advance 0, and the bitmap's extents fold into the run metrics so
+//     lines grow tall enough; a cluster the font cannot ligate falls
+//     back to per-codepoint bitmaps (joiners paint nothing), and only
+//     when no member has a bitmap at all does the cluster take the
+//     platform path below;
+//   * the platform path measures the cluster as ONE STRING
+//     (QFontMetrics shapes it through the platform font stack,
+//     including fallback to an emoji font) and the renderer draws it
+//     as one drawText call - monochrome on platforms without color
+//     emoji, but correctly ligated and never split.
 //
 // renderTextLayer: a TRANSPARENT RGBA8888 image (width x height) with
 // the document's background box (when enabled), text painted with
 // QPainter at the core layout positions, and emoji clusters painted as
-// scaled Noto Color Emoji bitmaps. Safe to call from non-GUI threads
-// (it paints on a QImage only - the export job does exactly that).
-// The EmojiPainter caches decoded bitmaps and is NOT thread-safe:
-// give the GUI side and the export job one instance each.
-std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, const EmojiFont *emoji = nullptr);
-QImage renderTextLayer(const TextDocument &doc, int width, int height,
-                       EmojiPainter *emoji = nullptr);
+// scaled color bitmaps from the selected font. Safe to call from
+// non-GUI threads (it paints on a QImage only - the export job does
+// exactly that; pass a per-thread EmojiPainter because its caches
+// mutate).
+//
+// ANIMATION: pass the clip-relative frame (>= 0) and the clip duration
+// and the layer renders THAT animation state - reveal (typewriter)
+// truncation happens before layout, wipe/slide/scale/alpha apply to the
+// painted layer afterwards. clipFrame < 0 (or a static document)
+// renders the settled state, byte-identical to the pre-animation
+// renderer.
+std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji = nullptr);
+QImage renderTextLayer(const TextDocument &doc, int width, int height, int64_t clipFrame = -1,
+                       int64_t clipDuration = 0, EmojiPainter *emoji = nullptr);
 
 // The pixel size actually used for a run (clamped into the core's
 // legal range so QFont::setPixelSize never sees a degenerate value).
 int textPixelSizeClamped(const TextStyle &style);
 
 // ---------------------------------------------------------------------------
-// EmojiPainter: owns the bundled font bytes + the parsed EmojiFont +
-// a per-pixel-size cache of decoded-and-scaled bitmaps.
+// EmojiPainter: owns the SELECTED emoji font file's bytes + the parsed
+// EmojiFont + this thread's caches of decoded (and scaled) images.
+//
+// The font comes from the machine's installed fonts (see
+// system_fonts.h) - the app bundles none. Picking a different file
+// selects a different emoji SET (Microsoft, Apple, Google...).
 //
 // Lifetime rule: the font file bytes live in this object and the
 // EmojiFont parses them IN PLACE, so load() must be the first call and
 // the object must not be copied after loading (the EmojiFont holds
 // raw views into bytes_).
 //
-// Thread rule: bitmap() mutates the cache. One instance per thread -
-// MainWindow keeps the GUI one, the export job creates its own.
+// Thread rule: image()/scaledImage() mutate the caches. One instance
+// per thread - MainWindow keeps the GUI one, the export job creates
+// its own from the same file path.
 // ---------------------------------------------------------------------------
 class EmojiPainter {
 public:
-    // Reads the font file and parses it. Returns false (and leaves the
-    // painter empty) when the file is missing or malformed; text then
-    // renders exactly as it would without the emoji font.
+    // Reads the font file and parses it (any CBDT or sbix emoji font,
+    // a plain sfnt or a .ttc collection). Returns false (and leaves
+    // the painter empty) when the file is missing or malformed; emoji
+    // then render through the platform font stack - exactly the
+    // no-selection behavior.
     bool load(const QString &path);
 
     bool loaded() const { return font_.loaded(); }
     const EmojiFont *font() const { return &font_; }
+    QString filePath() const { return path_; }
 
-    // The cluster bitmap at a text pixel size: decodes the PNG (Qt's
-    // built-in PNG handler - no fonts involved, thread-safe) and scales
-    // it with a smooth transform to the strike-metric-scaled size. A
-    // NULL image means "no bitmap for this glyph" (the caller skips
-    // painting; the advance was already zeroed at shaping time only
-    // when the font reported the glyph - see shapeTextQt).
-    QImage bitmap(uint16_t glyph, int sizePx);
+    // The decoded image for a glyph at its native (strike) size -
+    // decodes CBDT PNG and sbix png/jpg payloads via QImage::fromData
+    // (no fonts, no QGuiApplication; safe on worker threads) and
+    // applies the sbix 'flip' mirroring. NULL = no decodable image
+    // (the caller skips painting that glyph). Caches; bounded.
+    const QImage *image(uint16_t glyph);
 
-    void clearCache() { cache_.clear(); }
+    // The image smooth-scaled for a text pixel size (strike metrics
+    // scaled by size/ppem, the same math as emojiScaleStrike). Caches;
+    // bounded. NULL = not decodable.
+    const QImage *scaledImage(uint16_t glyph, int sizePx);
+
+    void clearCache() {
+        raw_.clear();
+        scaled_.clear();
+    }
 
 private:
     std::vector<uint8_t> bytes_;
     EmojiFont font_;
-    std::map<std::pair<uint16_t, int>, QImage> cache_;
+    QString path_;
+    std::map<uint16_t, QImage> raw_;                    // decoded at strike size
+    std::map<std::pair<uint16_t, int>, QImage> scaled_; // scaled to text size
 };
-
-// Where the app looks for the bundled font (first existing candidate
-// wins; the returned default may not exist - load() then just fails):
-//   <appdir>/NotoColorEmoji.ttf                      (portable layout)
-//   <appdir>/resources/fonts/NotoColorEmoji.ttf
-//   <appdir>/../resources/fonts/... and ../../, ../../../ (dev builds)
-QString emojiFontFilePath();
 
 } // namespace fc

@@ -4,11 +4,13 @@
 #include <QMainWindow>
 #include <QSize>
 #include <QTimer>
+#include <QVector>
 
 #include <atomic>
 #include <map>
 
 #include "media_item.h"
+#include "system_fonts.h"
 #include "text_renderer.h"
 #include "timeline_model.h"
 
@@ -107,9 +109,18 @@ private:
     // text engine - the Add Text Clip flow (track + clip at
     // the playhead), the model write for panel edits, and the cached
     // text-layer renderer that feeds compositing in preview + export.
+    // Captions import/export build on the same model (.srt cues turn
+    // into ordinary text clips; text clips turn back into cues).
     void addTextClip();
     void writeTextDocument(int64_t clipId, const fc::TextDocument &doc);
-    QImage textLayerForClip(const fc::Clip *clip, int width, int height);
+    QImage textLayerForClip(const fc::Clip *clip, int width, int height, int64_t clipFrame);
+    int ensureTextTrack();
+    // Emoji font selection (machine-wide preference, QSettings-backed):
+    // the startup scan + auto-pick, and the combo's change handler.
+    void startupEmojiFont();
+    void setEmojiFont(const QString &path);
+    void importCaptions();
+    void exportCaptions();
 
     // cut transitions - add/remove/duration routing for the
     // panels, the held-frame fetch for the incoming clip, and the
@@ -197,19 +208,23 @@ private:
 
     // Text state. The layer cache holds ONE rendered layer per text
     // clip (keyed by clip id, invalidated on text edits and project
-    // loads) - the layer is time-invariant, so playback composites the
-    // cached bitmap every frame instead of re-rasterizing (one entry
-    // per clip; the layer re-renders whenever the requested size
-    // differs). lastProgramSize_ keeps the program monitor's frame
-    // geometry around so a text clip over BLACK (no video clip at the
-    // playhead) renders at the same resolution the video uses.
-    //
-    // The emoji painter serves the GUI-side text layers: it owns the
-    // bundled color-emoji font plus the decoded-bitmap cache (one
-    // instance per thread - the export job builds its own).
+    // loads). Layers WITHOUT animations are time-invariant, so
+    // playback composites the cached bitmap every frame instead of
+    // re-rasterizing; an ANIMATED clip is re-rendered per frame (its
+    // layer depends on the clip-relative time). lastProgramSize_ keeps
+    // the program monitor's frame geometry around so a text clip over
+    // BLACK (no video clip at the playhead) renders at the same
+    // resolution the video uses.
     std::map<int64_t, QImage> textLayerCache_;
-    fc::EmojiPainter emojiPainter_;
     QSize lastProgramSize_{1280, 720};
+
+    // The SELECTED color-emoji font (one of the machine's installed
+    // fonts - the app bundles none): the GUI-side painter + its path +
+    // the discovery list feeding the Text panel's combo. The export
+    // job builds its own painter from the path (thread rule).
+    fc::EmojiPainter emojiPainter_;
+    QString emojiFontPath_;
+    QVector<fc::SystemEmojiFont> emojiFonts_;
 
     // Export state (the cancel flag is read from the worker thread;
     // everything else stays on the UI thread).

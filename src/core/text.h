@@ -31,6 +31,15 @@ namespace fc {
 // composites. Glyph RASTERIZATION is the app layer's job (QPainter) and
 // is platform-dependent - every number this file produces is not.
 //
+//   TextAnimation + textAnimationAt() - the ANIMATION model: how a text
+//   clip's first/last frames animate (fade, slide, pop, typewriter,
+//   wipe). Pure math over the clip-relative frame number, so preview
+//   and export evaluate IDENTICAL animation states (the same invariant
+//   the keyframe engine keeps for effects).
+//
+//   SRT captions live in srt.h (parse + write + markup stripping) and
+//   import as ordinary text clips - see TimelineModel::addTextClip.
+//
 // Colors are packed 0xRRGGBBAA (R in the most significant byte - the
 // memory order of the RGBA8888 buffers, so packing/unpacking is shifts).
 // ---------------------------------------------------------------------------
@@ -101,16 +110,94 @@ struct TextBox {
     bool operator!=(const TextBox &other) const { return !(*this == other); }
 };
 
+// ---- Animation ----
+
+// What the clip's entrance (the first inFrames frames) and exit (the
+// last outFrames frames) do. `dir` is shared by Slide and Wipe:
+//   Slide: the edge the text enters FROM (the exit leaves toward the
+//     OPPOSITE edge - enter from the left, leave to the right);
+//   Wipe:  the edge the reveal starts AT (Left wipes left-to-right,
+//     Up reveals from the bottom edge upward).
+// A kind with a duration of 0 (or beyond the clip) never completes its
+// progress and stays clamped - it does not break anything.
+enum class TextAnimKind : uint8_t {
+    None = 0,
+    Fade = 1,       // alpha ramp
+    Slide = 2,      // translate in from an edge, out to the opposite
+    Pop = 3,        // scale 0 -> 1 with a small overshoot (in), 1 -> 0 (out)
+    Typewriter = 4, // reveal the first N codepoints (in), hide from the
+                    // END backward (out)
+    Wipe = 5,       // reveal/cover the block along one axis
+};
+
+enum class TextAnimDir : uint8_t { Left = 0, Right = 1, Up = 2, Down = 3 };
+
+struct TextAnimation {
+    TextAnimKind inKind = TextAnimKind::None;
+    int64_t inFrames = 0;
+    TextAnimKind outKind = TextAnimKind::None;
+    int64_t outFrames = 0;
+    TextAnimDir dir = TextAnimDir::Left;
+
+    bool operator==(const TextAnimation &other) const {
+        return inKind == other.inKind && inFrames == other.inFrames && outKind == other.outKind &&
+               outFrames == other.outFrames && dir == other.dir;
+    }
+    bool operator!=(const TextAnimation &other) const { return !(*this == other); }
+};
+
+// True when either side animates (a kind beyond None with frames > 0).
+bool hasTextAnimation(const TextAnimation &anim);
+
+// The animation state for a given clip-relative frame (0 = the clip's
+// first frame). Everything the renderer needs, all normalized:
+//   alpha             global opacity multiplier [0, 1]
+//   offsetX/offsetY   translation in FRACTIONS of the frame size
+//   scale             uniform scale about the block center (>= 0)
+//   revealCodepoints  -1 = all; else only the first N codepoints of the
+//                      document render (already cluster-aligned - see
+//                      truncateTextDocument)
+//   wipe              visible fraction of the block [0, 1] along `dir`
+// Easing: fade/slide/wipe use smoothstep; pop-in uses easeOutBack (the
+// small overshoot); pop-out and typewriter reveal are linear/smoothed
+// progress. clipFrame outside [0, duration] clamps (before the clip:
+// fully pre-animation; at/after the end: fully out).
+struct TextAnimState {
+    double alpha = 1.0;
+    double offsetX = 0.0;
+    double offsetY = 0.0;
+    double scale = 1.0;
+    int64_t revealCodepoints = -1;
+    double wipe = 1.0;
+};
+
+TextAnimState textAnimationAt(const TextAnimation &anim, int64_t clipFrame, int64_t duration,
+                              int64_t totalCodepoints);
+
 struct TextDocument {
     std::vector<TextRun> runs;
     TextAlign align = TextAlign::Center;
     TextBox box;
+    TextAnimation animation;
 
     bool operator==(const TextDocument &other) const {
-        return runs == other.runs && align == other.align && box == other.box;
+        return runs == other.runs && align == other.align && box == other.box &&
+               animation == other.animation;
     }
     bool operator!=(const TextDocument &other) const { return !(*this == other); }
 };
+
+// Total codepoint count across every run (newlines count; one astral
+// codepoint counts once; invalid bytes count as their U+FFFDs).
+int64_t countTextCodepoints(const TextDocument &doc);
+
+// Copies `doc` keeping only the first `maxCodepoints` codepoints - cut
+// CLUSTER-ALIGNED: a cut landing inside a multi-codepoint emoji cluster
+// shrinks to the cluster's start, so a typewriter reveal never shows
+// half a flag or half a family. A run that loses all its text is
+// dropped (a zero-budget truncation yields an empty run list);
+// everything else is copied verbatim.
+void truncateTextDocument(const TextDocument &doc, int64_t maxCodepoints, TextDocument &out);
 
 // Drops empty runs, merges ADJACENT runs with equal styles, and clamps
 // sizes into [kTextMinSize, kTextMaxSize]. Idempotent: a normalized
@@ -144,19 +231,26 @@ void utf8DecodeDetailed(const std::string &utf8, std::vector<uint32_t> &codepoin
 // codepoints may contain U+000A (newline) - a hard line break with
 // advance 0 that never renders.
 //
-// The two optional vectors carry emoji cluster annotations from the
-// app layer (the EmojiFont bridge). Both must be either EMPTY or
-// exactly codepoints.size() long; runs with mismatched sizes are
-// treated as unshapable (skipped), same as mismatched advances.
-//   clusterStarts: 1 = a cluster begins at this codepoint, 0 = this
-//     codepoint continues the previous cluster. The layout engine
-//     never hard-splits inside a cluster (an over-wide cluster renders
-//     alone, overflowing, exactly like a single over-wide glyph).
-//   emojiGlyphs: non-zero = an emoji cluster head; the value is the
-//     glyph id in the emoji font whose bitmap the renderer draws for
-//     the WHOLE cluster. Continuation codepoints carry 0 and (by
-//     convention) 0 advance; the layout engine does not interpret
-//     them beyond the cluster-boundary rule above.
+// clusterStarts (optional, but the app layer always fills it) carries
+// the emoji cluster boundaries from the Unicode policy in
+// emoji_clusters.h: 1 = a cluster begins at this codepoint, 0 = this
+// codepoint continues the previous cluster. The layout engine never
+// hard-splits inside a cluster (an over-wide cluster renders alone,
+// overflowing, exactly like a single over-wide glyph). Must be either
+// EMPTY or exactly codepoints.size() long; a mismatched run is treated
+// as unshapable (skipped), like mismatched advances. A multi-codepoint
+// cluster's head codepoint carries the whole cluster's advance; its
+// continuations carry 0 by convention.
+//
+// emojiGlyphs (optional; the app layer fills it when an emoji font is
+// loaded) marks the codepoints whose bitmap the renderer draws:
+// non-zero = the glyph id in the selected emoji font whose bitmap
+// paints AT THIS codepoint's pen position (a ligature cluster marks
+// only its head - the single bitmap spans the cluster - while an
+// UNRESOLVED cluster marks each member that has its own bitmap).
+// Joiners and codepoints without bitmaps carry 0 and paint nothing.
+// Must be either EMPTY or exactly codepoints.size() long; a mismatched
+// run is treated as unshapable (skipped), like clusterStarts.
 struct ShapedRun {
     size_t runIndex = 0;                // index into TextDocument::runs
     std::vector<uint32_t> codepoints;   // decoded text (incl. '\n' markers)
@@ -189,6 +283,10 @@ struct TextLayout {
     // The padded background rect in frame coordinates; meaningful when
     // doc.box.background (and the document is not empty).
     int bgX = 0, bgY = 0, bgW = 0, bgH = 0;
+    // The block rect (text extents + background padding) in frame
+    // coordinates, ALWAYS meaningful when the layout is not empty -
+    // the box animations anchor here (wipe rectangles, scale center).
+    int blockX = 0, blockY = 0, blockW = 0, blockH = 0;
     // The content (wrap) width the layout wrapped at.
     int wrapWidth = 0;
 };

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "emoji_clusters.h"
+
 namespace fc {
 
 namespace {
@@ -14,8 +16,129 @@ namespace {
 // exactly at sbitOffset" convention of index subtable format 1.
 constexpr uint8_t kPngMagic[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
 
+// sbix graphicType tags (big-endian 4cc, compared as u32 values).
+constexpr uint32_t kTagPng = 0x706E6720u;  // 'png '
+constexpr uint32_t kTagJpg = 0x6A706720u;  // 'jpg '
+constexpr uint32_t kTagDupe = 0x64757065u; // 'dupe'
+constexpr uint32_t kTagFlip = 0x666C6970u; // 'flip'
+
+constexpr uint32_t kTagTtcf = 0x74746366u;     // 'ttcf'
+constexpr uint32_t kSfntTrue = 0x00010000u;    // TrueType sfnt version
+constexpr uint32_t kSfntOtto = 0x4F54544Fu;    // 'OTTO'
+constexpr uint32_t kSfntTrueTag = 0x74727565u; // 'true'
+
 bool isVariationSelector(uint32_t cp) {
     return cp == kEmojiVS16 || cp == kEmojiVS15;
+}
+
+// Mac Roman high bytes (0x80..0xFF) -> Unicode (the classic mapping;
+// family names are ASCII in practice, but the fallback stays faithful).
+constexpr uint16_t kMacRoman[128] = {
+    0x00C4, 0x00C5, 0x00C7, 0x00C9, 0x00D1, 0x00D6, 0x00DC, 0x00E1, 0x00E0, 0x00E2, 0x00E4, 0x00E3,
+    0x00E5, 0x00E7, 0x00E9, 0x00E8, 0x00EA, 0x00EB, 0x00ED, 0x00EC, 0x00EE, 0x00EF, 0x00F1, 0x00F3,
+    0x00F2, 0x00F4, 0x00F6, 0x00F5, 0x00FA, 0x00F9, 0x00FB, 0x00FF, 0x2020, 0x00B0, 0x00A2, 0x00A3,
+    0x00A7, 0x2022, 0x00B6, 0x00DF, 0x00AE, 0x00A9, 0x2122, 0x00B4, 0x00A8, 0x2260, 0x00C6, 0x00D8,
+    0x221E, 0x00B1, 0x2264, 0x2265, 0x00A5, 0x00B5, 0x2202, 0x2211, 0x220F, 0x03C0, 0x222B, 0x00AA,
+    0x00BA, 0x03A9, 0x00E6, 0x00F8, 0x00BF, 0x00A1, 0x00AC, 0x221A, 0x0192, 0x2248, 0x2206, 0x00AB,
+    0x00BB, 0x2026, 0x00A0, 0x00C0, 0x00C3, 0x00D5, 0x0152, 0x0153, 0x2013, 0x2014, 0x201C, 0x201D,
+    0x2018, 0x2019, 0x00F7, 0x25CA, 0x00FF, 0x0178, 0x2044, 0x20AC, 0x2039, 0x203A, 0xFB01, 0xFB02,
+    0x2021, 0x00B7, 0x201A, 0x201E, 0x2030, 0x00C2, 0x00CA, 0x00C1, 0x00CB, 0x00C8, 0x00CD, 0x00CE,
+    0x00CF, 0x00CC, 0x00D3, 0x00D4, 0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC,
+    0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7,
+};
+
+void appendUtf8(std::string &out, uint32_t cp) {
+    if (cp <= 0x7Fu) {
+        out.push_back(char(cp));
+    } else if (cp <= 0x7FFu) {
+        out.push_back(char(0xC0u | (cp >> 6)));
+        out.push_back(char(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0xFFFFu) {
+        out.push_back(char(0xE0u | (cp >> 12)));
+        out.push_back(char(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(char(0x80u | (cp & 0x3Fu)));
+    } else {
+        out.push_back(char(0xF0u | (cp >> 18)));
+        out.push_back(char(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(char(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(char(0x80u | (cp & 0x3Fu)));
+    }
+}
+
+// ---- stateless directory access (the free-function helpers) ----
+
+bool probeU16(const uint8_t *data, size_t size, size_t off, uint16_t *v) {
+    if (off + 2 > size) {
+        return false;
+    }
+    *v = uint16_t((uint16_t(data[off]) << 8) | uint16_t(data[off + 1]));
+    return true;
+}
+
+bool probeU32(const uint8_t *data, size_t size, size_t off, uint32_t *v) {
+    if (off + 4 > size) {
+        return false;
+    }
+    *v = (uint32_t(data[off]) << 24) | (uint32_t(data[off + 1]) << 16) |
+         (uint32_t(data[off + 2]) << 8) | uint32_t(data[off + 3]);
+    return true;
+}
+
+// One table record found in the directory at dirBase, or false.
+// `limit` is the byte length the offsets are validated against (the
+// real file size when only a head was read; `size` bounds the reads).
+bool probeTable(const uint8_t *data, size_t size, size_t dirBase, size_t limit, const char tag[4],
+                uint32_t *off, uint32_t *len) {
+    uint16_t numTables = 0;
+    if (dirBase + 12 > size || !probeU16(data, size, dirBase + 4, &numTables)) {
+        return false;
+    }
+    for (uint16_t i = 0; i < numTables; ++i) {
+        const size_t rec = dirBase + 12 + size_t(i) * 16;
+        if (rec + 16 > size) {
+            return false;
+        }
+        if (std::memcmp(data + rec, tag, 4) != 0) {
+            continue;
+        }
+        if (!probeU32(data, size, rec + 8, off) || !probeU32(data, size, rec + 12, len)) {
+            return false;
+        }
+        return size_t(*off) + *len <= limit; // claims to run past the file: refuse
+    }
+    return false;
+}
+
+// The sub-font directory offsets of a TrueType Collection (or just {0}
+// for a plain sfnt). Empty when the wrapper itself is unreadable.
+std::vector<size_t> fontDirectories(const uint8_t *data, size_t size) {
+    std::vector<size_t> dirs;
+    if (!data || size < 12) {
+        return dirs;
+    }
+    uint32_t tag = 0;
+    if (!probeU32(data, size, 0, &tag)) {
+        return dirs;
+    }
+    if (tag != kTagTtcf) {
+        if (tag == kSfntTrue || tag == kSfntOtto || tag == kSfntTrueTag) {
+            dirs.push_back(0);
+        }
+        return dirs;
+    }
+    uint32_t numFonts = 0;
+    if (!probeU32(data, size, 8, &numFonts) || numFonts == 0 || numFonts > 64) {
+        return dirs;
+    }
+    for (uint32_t f = 0; f < numFonts; ++f) {
+        uint32_t off = 0;
+        if (!probeU32(data, size, 12 + size_t(f) * 4, &off) || off < 12 ||
+            size_t(off) + 12 > size) {
+            continue;
+        }
+        dirs.push_back(size_t(off));
+    }
+    return dirs;
 }
 
 } // namespace
@@ -57,11 +180,11 @@ bool EmojiFont::rdU32(size_t off, uint32_t *v) const {
 
 const uint8_t *EmojiFont::table(const char tag[4], size_t *len) const {
     uint16_t numTables = 0;
-    if (!rdU16(4, &numTables)) {
+    if (dirBase_ + 12 > size_ || !rdU16(dirBase_ + 4, &numTables)) {
         return nullptr;
     }
     for (uint16_t i = 0; i < numTables; ++i) {
-        const size_t rec = 12 + size_t(i) * 16;
+        const size_t rec = dirBase_ + 12 + size_t(i) * 16;
         if (rec + 16 > size_) {
             return nullptr;
         }
@@ -150,6 +273,57 @@ bool EmojiFont::parseCbloc() {
     cbdtOff_ = size_t(cbdt - data_);
     cbdtLen_ = cbdtLen;
     return !strikes_.empty();
+}
+
+// ---- sbix (Apple bitmap strikes) ----
+
+bool EmojiFont::parseSbix() {
+    size_t len = 0;
+    const uint8_t *p = table("sbix", &len);
+    if (!p) {
+        return false;
+    }
+    sbixOff_ = size_t(p - data_);
+    sbixLen_ = len;
+    if (len < 8) {
+        return false;
+    }
+    uint16_t version = 0, flags = 0;
+    uint32_t numStrikes = 0;
+    if (!rdU16(sbixOff_, &version) || !rdU16(sbixOff_ + 2, &flags) ||
+        !rdU32(sbixOff_ + 4, &numStrikes)) {
+        return false;
+    }
+    if (version < 1 || numStrikes == 0 || numStrikes > 256) {
+        return false;
+    }
+    const size_t tableEnd = sbixOff_ + sbixLen_;
+    for (uint32_t s = 0; s < numStrikes; ++s) {
+        uint32_t strikeOff = 0;
+        if (!rdU32(sbixOff_ + 8 + size_t(s) * 4, &strikeOff) || strikeOff == 0) {
+            continue;
+        }
+        const size_t base = sbixOff_ + size_t(strikeOff);
+        if (base + 12 > tableEnd) {
+            continue; // not even one offset pair fits
+        }
+        uint16_t ppem = 0, ppi = 0;
+        if (!rdU16(base, &ppem) || !rdU16(base + 2, &ppi) || ppem == 0) {
+            continue;
+        }
+        if (numGlyphs_ <= 0) {
+            continue; // no glyph ids -> no records
+        }
+        // The glyph-offset array runs [base+4, base+4+(numGlyphs+1)*4);
+        // the strike's records may extend past it, but never past the
+        // table. A short array simply leaves later glyphs "missing".
+        SbixStrike strike;
+        strike.ppem = int(ppem);
+        strike.base = base;
+        strike.end = tableEnd;
+        sbixStrikes_.push_back(strike);
+    }
+    return !sbixStrikes_.empty();
 }
 
 // ---- cmap ----
@@ -491,7 +665,7 @@ uint16_t EmojiFont::ligatureFor(const uint16_t *glyphs, size_t count) const {
     return it == ligatures_.end() ? 0 : it->second;
 }
 
-// ---- maxp ----
+// ---- maxp / head / hmtx ----
 
 bool EmojiFont::parseMaxp() {
     size_t len = 0;
@@ -509,11 +683,101 @@ bool EmojiFont::parseMaxp() {
     return true;
 }
 
+bool EmojiFont::parseHead() {
+    size_t len = 0;
+    const uint8_t *p = table("head", &len);
+    if (!p || len < 20) {
+        return false;
+    }
+    uint16_t upem = 0;
+    if (!rdU16(size_t(p - data_) + 18, &upem) || upem < 16 || upem > 16384) {
+        return false;
+    }
+    unitsPerEm_ = int(upem);
+    return true;
+}
+
+bool EmojiFont::parseHmtx() {
+    size_t hheaLen = 0;
+    const uint8_t *hhea = table("hhea", &hheaLen);
+    if (!hhea || hheaLen < 36) {
+        return false;
+    }
+    uint16_t numOfMetrics = 0;
+    if (!rdU16(size_t(hhea - data_) + 34, &numOfMetrics) || numOfMetrics == 0) {
+        return false;
+    }
+    size_t hmtxLen = 0;
+    const uint8_t *hmtx = table("hmtx", &hmtxLen);
+    if (!hmtx) {
+        return false;
+    }
+    const size_t base = size_t(hmtx - data_);
+    const size_t readable = hmtxLen / 4; // advance+lsb pairs
+    const size_t count = std::min(size_t(numOfMetrics), std::min(readable, size_t(numGlyphs_)));
+    hmtxAdvances_.clear();
+    hmtxAdvances_.reserve(count);
+    uint16_t last = 0;
+    for (size_t i = 0; i < count; ++i) {
+        uint16_t adv = 0;
+        if (!rdU16(base + i * 4, &adv)) {
+            break;
+        }
+        last = adv;
+        hmtxAdvances_.push_back(adv);
+    }
+    if (hmtxAdvances_.empty()) {
+        return false;
+    }
+    // Glyphs past numberOfHMetrics repeat the last advance (hmtx rule).
+    hmtxTailAdvance_ = last;
+    return true;
+}
+
+int EmojiFont::sbixAdvance(uint16_t glyph, int ppem) const {
+    // The record carries no advance: hmtx units scaled into strike
+    // pixels (the same math FreeType runs: units * ppem / upem).
+    const uint16_t units = glyph < hmtxAdvances_.size() ? hmtxAdvances_[glyph] : hmtxTailAdvance_;
+    const int64_t scaled =
+        (int64_t(units) * int64_t(ppem) + unitsPerEm_ / 2) / int64_t(unitsPerEm_);
+    return scaled > 0 ? int(scaled) : 0;
+}
+
 // ---- load ----
+
+bool EmojiFont::parseFontAt(size_t dirBase) {
+    dirBase_ = dirBase;
+    uint16_t numTables = 0;
+    if (dirBase_ + 12 > size_ || !rdU16(dirBase_ + 4, &numTables) || numTables == 0 ||
+        dirBase_ + 12 + size_t(numTables) * 16 > size_) {
+        return false;
+    }
+    parseMaxp(); // glyph count gates the sbix offset arrays
+    bool haveBitmaps = false;
+    if (parseCbloc()) {
+        haveBitmaps = true; // CBDT route (CBLC also wins over sbix)
+    } else if (parseSbix()) {
+        // The sbix route needs hmtx advances and the units-per-em for
+        // its placement math; a font missing them is unusable.
+        if (!parseHead() || !parseHmtx()) {
+            return false;
+        }
+        haveBitmaps = true;
+    }
+    if (!haveBitmaps) {
+        return false;
+    }
+    if (!parseCmap()) {
+        return false;
+    }
+    parseGsub();
+    return true;
+}
 
 bool EmojiFont::load(const uint8_t *data, size_t size) {
     loaded_ = false;
     strikes_.clear();
+    sbixStrikes_.clear();
     cmapRanges_.clear();
     cmapUnsorted_ = false;
     hasCmap4_ = false;
@@ -522,20 +786,45 @@ bool EmojiFont::load(const uint8_t *data, size_t size) {
     ligatures_.clear();
     maxLigatureLen_ = 0;
     numGlyphs_ = 0;
+    unitsPerEm_ = 1000;
+    hmtxAdvances_.clear();
+    hmtxTailAdvance_ = 0;
+    dirBase_ = 0;
+    cbdtOff_ = cbdtLen_ = cblcOff_ = cblcLen_ = sbixOff_ = sbixLen_ = 0;
     data_ = data;
     size_ = size;
     if (!data || size < 12) {
         return false;
     }
-    uint16_t numTables = 0;
-    if (!rdU16(4, &numTables) || numTables == 0 || 12 + size_t(numTables) * 16 > size) {
+    uint32_t tag = 0;
+    if (!rdU32(0, &tag)) {
         return false;
     }
-    if (!parseCbloc() || !parseCmap()) {
+    if (tag == kTagTtcf) {
+        // TrueType Collection: keep the first sub-font that parses as
+        // a usable emoji face (Apple Color Emoji.ttc carries two).
+        uint32_t numFonts = 0;
+        if (size < 12 || !rdU32(8, &numFonts) || numFonts == 0 || numFonts > 64) {
+            return false;
+        }
+        for (uint32_t f = 0; f < numFonts; ++f) {
+            uint32_t off = 0;
+            if (!rdU32(12 + size_t(f) * 4, &off) || off < 12 || size_t(off) + 12 > size) {
+                continue;
+            }
+            if (parseFontAt(size_t(off))) {
+                loaded_ = true;
+                return true;
+            }
+        }
         return false;
     }
-    parseGsub();
-    parseMaxp();
+    if (tag != kSfntTrue && tag != kSfntOtto && tag != kSfntTrueTag) {
+        return false; // not a font we can read
+    }
+    if (!parseFontAt(0)) {
+        return false;
+    }
     loaded_ = true;
     return true;
 }
@@ -545,6 +834,9 @@ bool EmojiFont::load(const uint8_t *data, size_t size) {
 int EmojiFont::strikePpem() const {
     int best = 0;
     for (const Strike &s : strikes_) {
+        best = std::max(best, s.ppem);
+    }
+    for (const SbixStrike &s : sbixStrikes_) {
         best = std::max(best, s.ppem);
     }
     return best;
@@ -561,10 +853,17 @@ int EmojiFont::bitDepth() const {
 }
 
 bool EmojiFont::bitmapFor(uint16_t glyph, Bitmap *out) const {
+    if (!strikes_.empty()) {
+        return bitmapForCbdt(glyph, out);
+    }
+    return bitmapForSbix(glyph, out);
+}
+
+bool EmojiFont::bitmapForCbdt(uint16_t glyph, Bitmap *out) const {
     if (!loaded_ || !out || glyph == 0 || glyph >= numGlyphs_) {
         return false;
     }
-    // Largest strike wins (deterministic; the bundled font has one).
+    // Largest strike wins (deterministic; most CBDT fonts have one).
     // Resolved in one pass: strike, subtable header, glyph index in it.
     const Strike *best = nullptr;
     size_t hdr = 0;
@@ -679,9 +978,93 @@ bool EmojiFont::bitmapFor(uint16_t glyph, Bitmap *out) const {
     m.advance = int(adv);
     out->metrics = m;
     out->ppem = best->ppem;
-    out->png = data_ + pngStart;
-    out->pngLen = size_t(pngLen);
+    out->data = data_ + pngStart;
+    out->dataLen = size_t(pngLen);
+    out->format = 0; // CBDT records are PNG with complete metrics
+    out->originY = 0;
+    out->mirror = false;
     return true;
+}
+
+bool EmojiFont::bitmapForSbix(uint16_t glyph, Bitmap *out) const {
+    if (!loaded_ || !out || glyph == 0 || (numGlyphs_ > 0 && glyph >= numGlyphs_)) {
+        return false;
+    }
+    const size_t tableEnd = sbixOff_ + sbixLen_;
+    // Largest strike that has a record for the glyph wins.
+    const SbixStrike *best = nullptr;
+    for (const SbixStrike &s : sbixStrikes_) {
+        if (s.ppem <= 0) {
+            continue;
+        }
+        if (s.base + 4 + (size_t(glyph) + 1) * 4 > s.end) {
+            continue; // the offset array does not cover this glyph
+        }
+        uint32_t g0 = 0, g1 = 0;
+        if (!rdU32(s.base + 4 + size_t(glyph) * 4, &g0) ||
+            !rdU32(s.base + 4 + (size_t(glyph) + 1) * 4, &g1) || g0 >= g1) {
+            continue; // zero-length or unreadable record = missing here
+        }
+        if (!best || s.ppem > best->ppem) {
+            best = &s;
+        }
+    }
+    if (!best) {
+        return false;
+    }
+    // 'dupe'/'flip' record indirection, resolved in place with a depth
+    // guard (FreeType allows 4 hops; a cycle then reads as missing).
+    uint16_t g = glyph;
+    bool mirror = false;
+    for (int depth = 0; depth < 4; ++depth) {
+        if (best->base + 4 + (size_t(g) + 1) * 4 > best->end) {
+            return false;
+        }
+        uint32_t g0 = 0, g1 = 0;
+        if (!rdU32(best->base + 4 + size_t(g) * 4, &g0) ||
+            !rdU32(best->base + 4 + (size_t(g) + 1) * 4, &g1) || g0 >= g1 || g1 - g0 < 8) {
+            return false;
+        }
+        if (size_t(g1) > tableEnd - best->base) {
+            return false; // record claims to run past the table
+        }
+        const size_t rec = best->base + size_t(g0);
+        uint16_t ox = 0, oy = 0;
+        uint32_t tag = 0;
+        if (!rdU16(rec, &ox) || !rdU16(rec + 2, &oy) || !rdU32(rec + 4, &tag)) {
+            return false;
+        }
+        if (tag == kTagDupe || tag == kTagFlip) {
+            if (g1 - g0 < 10) {
+                return false; // no room for the target glyph id
+            }
+            uint16_t target = 0;
+            if (!rdU16(rec + 8, &target) || target == 0) {
+                return false;
+            }
+            if (tag == kTagFlip) {
+                mirror = !mirror;
+            }
+            g = target;
+            continue;
+        }
+        if (tag != kTagPng && tag != kTagJpg) {
+            return false; // 'tiff'/'rgbl'/unknown: not decodable here
+        }
+        out->metrics.width = 0; // the image carries its own size
+        out->metrics.height = 0;
+        out->metrics.bearingX = int(int16_t(ox));
+        out->metrics.bearingY = 0;
+        out->metrics.advance = sbixAdvance(g, best->ppem);
+        out->ppem = best->ppem;
+        out->data = data_ + rec + 8;
+        out->dataLen = size_t(g1 - g0) - 8;
+        out->format = tag;
+        out->originY = int(int16_t(oy));
+        out->mirror = mirror;
+        return true;
+    }
+    return false; // indirection cycle
 }
 
 // ---- cluster resolution ----
@@ -750,8 +1133,8 @@ bool EmojiFont::resolveCluster(const uint32_t *cps, size_t count, size_t pos, Re
             return true;
         }
     }
-    // A format-14 mapping for base+VS16 (not used by the bundled font,
-    // but it is the standard mechanism when present).
+    // A format-14 mapping for base+VS16 (the standard mechanism when
+    // the font carries one; Noto has an empty table).
     if (forced) {
         const uint16_t v = variantGlyph(base, kEmojiVS16);
         if (v != 0) {
@@ -769,35 +1152,112 @@ bool EmojiFont::resolveCluster(const uint32_t *cps, size_t count, size_t pos, Re
     return false;
 }
 
-// ---- presentation policy ----
+// ---- presentation policy (the shared table in emoji_clusters.h) ----
 
 bool EmojiFont::isDefaultEmojiPresentation(uint32_t cp) {
-    // The SMP emoji blocks: single glyphs there default to emoji
-    // presentation (includes lone regional indicators - the font has
-    // letter-box glyphs for them, which beats tofu).
-    if (cp >= 0x1F000u && cp <= 0x1FAFFu) {
-        return true;
-    }
-    // The stable BMP set with default emoji presentation (the
-    // Emoji_Presentation=Yes ranges; stable across Unicode versions).
-    struct Range {
-        uint32_t lo, hi;
-    };
-    static const Range kRanges[] = {
-        {0x231A, 0x231B}, {0x23E9, 0x23EC}, {0x23F0, 0x23F0}, {0x23F3, 0x23F3}, {0x25FD, 0x25FE},
-        {0x2614, 0x2615}, {0x2648, 0x2653}, {0x267F, 0x267F}, {0x2693, 0x2693}, {0x26A1, 0x26A1},
-        {0x26AA, 0x26AB}, {0x26BD, 0x26BE}, {0x26C4, 0x26C5}, {0x26CE, 0x26CE}, {0x26D4, 0x26D4},
-        {0x26EA, 0x26EA}, {0x26F2, 0x26F3}, {0x26F5, 0x26F5}, {0x26FA, 0x26FA}, {0x26FD, 0x26FD},
-        {0x2705, 0x2705}, {0x270A, 0x270B}, {0x2728, 0x2728}, {0x274C, 0x274C}, {0x274E, 0x274E},
-        {0x2753, 0x2755}, {0x2757, 0x2757}, {0x2795, 0x2797}, {0x27B0, 0x27B0}, {0x27BF, 0x27BF},
-        {0x2B1B, 0x2B1C}, {0x2B50, 0x2B50}, {0x2B55, 0x2B55},
-    };
-    for (const Range &r : kRanges) {
-        if (cp >= r.lo && cp <= r.hi) {
-            return true;
+    return fc::isDefaultEmojiPresentation(cp);
+}
+
+// ---- standalone helpers ----
+
+EmojiFontFormat sfntBitmapEmojiFormat(const uint8_t *data, size_t size, int64_t fileSize) {
+    const size_t limit = fileSize > int64_t(size) ? size_t(fileSize) : size; // max(avail, real)
+    for (size_t dirBase : fontDirectories(data, size)) {
+        uint32_t off = 0, len = 0;
+        if (probeTable(data, size, dirBase, limit, "CBLC", &off, &len) &&
+            probeTable(data, size, dirBase, limit, "CBDT", &off, &len)) {
+            return EmojiFontFormat::Cbdt;
+        }
+        if (probeTable(data, size, dirBase, limit, "sbix", &off, &len)) {
+            return EmojiFontFormat::Sbix;
         }
     }
-    return false;
+    return EmojiFontFormat::None;
+}
+
+std::string sfntFamilyName(const uint8_t *data, size_t size) {
+    for (size_t dirBase : fontDirectories(data, size)) {
+        uint32_t off = 0, len = 0;
+        if (!probeTable(data, size, dirBase, size, "name", &off, &len) || len < 6) {
+            continue;
+        }
+        const size_t base = size_t(off);
+        uint16_t format = 0, count = 0, strOff = 0;
+        if (!probeU16(data, size, base, &format) || format > 1 ||
+            !probeU16(data, size, base + 2, &count) || !probeU16(data, size, base + 4, &strOff) ||
+            count > 4096) {
+            continue;
+        }
+        // Find the best-scoring nameID-1 record (deterministic: the
+        // first record at the best priority wins). Priority: Windows
+        // en-US, Windows any language, Unicode UTF-16, Mac Roman.
+        int bestScore = 0;
+        size_t bestRec = 0, bestLen = 0;
+        int bestPlatform = 0;
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t rec = base + 6 + size_t(i) * 12;
+            if (rec + 12 > base + size_t(len)) {
+                break;
+            }
+            uint16_t platform = 0, encoding = 0, language = 0, nameId = 0, length = 0, stroff = 0;
+            if (!probeU16(data, size, rec, &platform) ||
+                !probeU16(data, size, rec + 2, &encoding) ||
+                !probeU16(data, size, rec + 4, &language) ||
+                !probeU16(data, size, rec + 6, &nameId) ||
+                !probeU16(data, size, rec + 8, &length) ||
+                !probeU16(data, size, rec + 10, &stroff)) {
+                continue;
+            }
+            if (nameId != 1 || length == 0 || length > 2048) {
+                continue;
+            }
+            int score = 0;
+            if (platform == 3 && (encoding == 1 || encoding == 10)) {
+                score = language == 0x409 ? 4 : 3;
+            } else if (platform == 0 && (encoding == 1 || encoding == 3)) {
+                score = 2;
+            } else if (platform == 1 && encoding == 0) {
+                score = 1;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestRec = base + size_t(strOff) + size_t(stroff);
+                bestLen = size_t(length);
+                bestPlatform = platform;
+            }
+        }
+        if (bestScore == 0 || bestRec + bestLen > size) {
+            continue;
+        }
+        std::string out;
+        out.reserve(bestLen);
+        if (bestPlatform == 1) { // Mac Roman bytes
+            for (size_t b = 0; b < bestLen; ++b) {
+                const uint8_t byte = data[bestRec + b];
+                appendUtf8(out, byte < 0x80 ? uint32_t(byte) : uint32_t(kMacRoman[byte - 0x80]));
+            }
+        } else { // UTF-16BE (Windows / Unicode platform)
+            for (size_t b = 0; b + 1 < bestLen; b += 2) {
+                const uint16_t u =
+                    uint16_t((uint16_t(data[bestRec + b]) << 8) | uint16_t(data[bestRec + b + 1]));
+                if (u >= 0xD800 && u <= 0xDBFF && b + 3 < bestLen) {
+                    const uint16_t v = uint16_t((uint16_t(data[bestRec + b + 2]) << 8) |
+                                                uint16_t(data[bestRec + b + 3]));
+                    if (v >= 0xDC00 && v <= 0xDFFF) {
+                        appendUtf8(out,
+                                   0x10000u + (uint32_t(u - 0xD800) << 10) + uint32_t(v - 0xDC00));
+                        ++b;
+                        continue;
+                    }
+                }
+                appendUtf8(out, (u >= 0xD800 && u <= 0xDFFF) ? 0xFFFDu : uint32_t(u));
+            }
+        }
+        if (!out.empty()) {
+            return out;
+        }
+    }
+    return std::string();
 }
 
 } // namespace fc

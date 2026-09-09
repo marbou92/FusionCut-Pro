@@ -8,6 +8,10 @@ add_library(fc_core STATIC
     text.h
     emoji.cpp
     emoji.h
+    emoji_clusters.cpp
+    emoji_clusters.h
+    srt.cpp
+    srt.h
     project_format.cpp)
 
 target_include_directories(fc_core PUBLIC

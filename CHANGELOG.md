@@ -32,12 +32,29 @@ version stays at 0.1.0 until the first public build.
   alignment, background boxes - all integer-math and deterministic.
   Text tracks and generated text clips behave as full timeline
   citizens (split/trim/roll/move/ripple, effect stacks, keyframes).
-- **Color emoji:** the bundled Noto Color Emoji font (SIL OFL 1.1) is
-  parsed directly - CBLC/CBDT bitmap strikes, cmap, and the GSUB
-  ligature rules - so emoji sequences (families, flags, keycaps, skin
-  tones, VS16 presentation) render as full-color bitmaps on every
-  Windows version, 7 included. Emoji clusters are atomic in the
-  layout engine and scale with the run's pixel size.
+- **Text animations:** every text clip carries an entrance and an exit
+  (fade, slide from any edge, pop with overshoot, typewriter with a
+  cluster-aligned reveal, wipe along any edge; durations in frames,
+  one shared direction). The state math is pure core, so preview and
+  export evaluate identical animation states; animations persist
+  additively in the project file (older files round-trip unchanged).
+- **Captions:** strict SubRip (.srt) parser + canonical writer; import
+  turns cues into styled text clips on the text track, export writes
+  the timeline's text clips back out (markup-stripped, byte-stable).
+- **Color emoji from the machine's own fonts:** no font is bundled.
+  The app discovers the emoji-capable fonts installed on the PC
+  (Segoe UI Emoji, Noto Color Emoji, JoyPixels... CBDT/CBLC+GSUB
+  faces; Apple Color Emoji `.ttc` collections with sbix strikes) and
+  the Text panel's emoji-font picker selects which one renders -
+  switching fonts switches the emoji artwork set (Microsoft, Apple,
+  Google). The selected file is parsed directly (bitmap strikes, cmap,
+  GSUB ligatures, sbix records incl. 'dupe'/'flip' indirection), so
+  full-color emoji appear on every Windows version, 7 included, with
+  no platform emoji support required. Sequences without GSUB rules
+  render member-by-member, never half a flag; with no emoji font
+  installed, emoji fall back to the platform font stack. Clusters stay
+  atomic in the layout engine and scale with the run's pixel size; the
+  pick persists per machine (not per project).
 - **Project persistence:** strict deterministic JSON (`.fcp`) with
   byte-identical round-trips; ids, effect stacks, keyframes,
   transitions, and text documents load back exactly; newer-catalog

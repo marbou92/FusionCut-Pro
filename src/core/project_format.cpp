@@ -445,6 +445,75 @@ void appendHexColor(std::string &out, uint32_t rgba) {
 
 // ---- text document codec ----
 
+// Animation kind/dir enums <-> canonical strings (the file format).
+const char *textAnimKindString(TextAnimKind kind) {
+    switch (kind) {
+    case TextAnimKind::None:
+        return "none";
+    case TextAnimKind::Fade:
+        return "fade";
+    case TextAnimKind::Slide:
+        return "slide";
+    case TextAnimKind::Pop:
+        return "pop";
+    case TextAnimKind::Typewriter:
+        return "typewriter";
+    case TextAnimKind::Wipe:
+        return "wipe";
+    }
+    return "none";
+}
+
+bool parseTextAnimKind(const std::string &s, TextAnimKind *kind, std::string &error) {
+    if (s == "none") {
+        *kind = TextAnimKind::None;
+    } else if (s == "fade") {
+        *kind = TextAnimKind::Fade;
+    } else if (s == "slide") {
+        *kind = TextAnimKind::Slide;
+    } else if (s == "pop") {
+        *kind = TextAnimKind::Pop;
+    } else if (s == "typewriter") {
+        *kind = TextAnimKind::Typewriter;
+    } else if (s == "wipe") {
+        *kind = TextAnimKind::Wipe;
+    } else {
+        error = "field 'text.animation.kind' must be none, fade, slide, pop, typewriter, or wipe";
+        return false;
+    }
+    return true;
+}
+
+const char *textAnimDirString(TextAnimDir dir) {
+    switch (dir) {
+    case TextAnimDir::Left:
+        return "left";
+    case TextAnimDir::Right:
+        return "right";
+    case TextAnimDir::Up:
+        return "up";
+    case TextAnimDir::Down:
+        return "down";
+    }
+    return "left";
+}
+
+bool parseTextAnimDir(const std::string &s, TextAnimDir *dir, std::string &error) {
+    if (s == "left") {
+        *dir = TextAnimDir::Left;
+    } else if (s == "right") {
+        *dir = TextAnimDir::Right;
+    } else if (s == "up") {
+        *dir = TextAnimDir::Up;
+    } else if (s == "down") {
+        *dir = TextAnimDir::Down;
+    } else {
+        error = "field 'text.animation.dir' must be left, right, up, or down";
+        return false;
+    }
+    return true;
+}
+
 void appendTextDocument(std::string &out, const TextDocument &doc) {
     out += "{\"align\":\"";
     switch (doc.align) {
@@ -468,6 +537,21 @@ void appendTextDocument(std::string &out, const TextDocument &doc) {
     appendBool(out, doc.box.background);
     out += ",\"bgColor\":";
     appendHexColor(out, doc.box.backgroundRgba);
+    // The animation object rides along only when it is not the default
+    // (files written before animations existed re-save byte-identical).
+    if (doc.animation != TextAnimation()) {
+        out += ",\"animation\":{\"in\":\"";
+        out += textAnimKindString(doc.animation.inKind);
+        out += "\",\"inFrames\":";
+        appendInt(out, doc.animation.inFrames);
+        out += ",\"out\":\"";
+        out += textAnimKindString(doc.animation.outKind);
+        out += "\",\"outFrames\":";
+        appendInt(out, doc.animation.outFrames);
+        out += ",\"dir\":\"";
+        out += textAnimDirString(doc.animation.dir);
+        out += "\"}";
+    }
     out += ",\"runs\":[";
     bool firstRun = true;
     for (const TextRun &run : doc.runs) {
@@ -618,6 +702,36 @@ bool parseTextDocument(const JsonValue &node, TextDocument &doc, std::string &er
     }
     if (!parseHexColor(node.find("bgColor"), doc.box.backgroundRgba, error, "text.bgColor")) {
         return false;
+    }
+    // The animation object is OPTIONAL (files written before it existed
+    // load with the default - no animation); when present it must be
+    // complete and valid.
+    if (const JsonValue *animNode = node.find("animation")) {
+        if (animNode->type != JsonValue::Type::Object) {
+            error = "field 'text.animation' must be an object";
+            return false;
+        }
+        std::string inKind, outKind, dir;
+        int64_t inFrames = 0, outFrames = 0;
+        if (!getString(animNode->find("in"), inKind, error, "text.animation.in") ||
+            !getIntegral(animNode->find("inFrames"), inFrames, error, "text.animation.inFrames") ||
+            !getString(animNode->find("out"), outKind, error, "text.animation.out") ||
+            !getIntegral(animNode->find("outFrames"), outFrames, error,
+                         "text.animation.outFrames") ||
+            !getString(animNode->find("dir"), dir, error, "text.animation.dir")) {
+            return false;
+        }
+        if (!parseTextAnimKind(inKind, &doc.animation.inKind, error) ||
+            !parseTextAnimKind(outKind, &doc.animation.outKind, error) ||
+            !parseTextAnimDir(dir, &doc.animation.dir, error)) {
+            return false;
+        }
+        if (inFrames < 0 || inFrames > 1000000000LL || outFrames < 0 || outFrames > 1000000000LL) {
+            error = "animation frame counts must be within [0, 1e9]";
+            return false;
+        }
+        doc.animation.inFrames = inFrames;
+        doc.animation.outFrames = outFrames;
     }
     const std::vector<JsonValue> *runs = nullptr;
     if (!getArray(node.find("runs"), runs, error, "text.runs")) {

@@ -22,14 +22,18 @@ add_executable(fc_text_tests text_tests.cpp)
 target_link_libraries(fc_text_tests PRIVATE fc_core)
 add_test(NAME text COMMAND fc_text_tests)
 
-# The emoji suite pins its expectations against the COMMITTED font
-# bytes, so the source-tree path is baked in at configure time (the
-# checkout always contains it; a missing file fails the suite loudly).
+# The emoji suite pins the Unicode cluster policy (joiner chains,
+# flags, keycaps, skin tones, tag sequences) - pure codepoint tables,
+# no font file involved.
 add_executable(fc_emoji_tests emoji_tests.cpp)
 target_link_libraries(fc_emoji_tests PRIVATE fc_core)
-target_compile_definitions(fc_emoji_tests PRIVATE
-    FC_EMOJI_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../resources/fonts/NotoColorEmoji.ttf")
 add_test(NAME emoji COMMAND fc_emoji_tests)
+
+# SubRip caption parsing/writing (strict parser, canonical writer,
+# markup stripping, byte-exact round-trips).
+add_executable(fc_srt_tests srt_tests.cpp)
+target_link_libraries(fc_srt_tests PRIVATE fc_core)
+add_test(NAME srt COMMAND fc_srt_tests)
 
 if(TARGET fc_media)
     add_executable(fc_media_tests

@@ -4,9 +4,65 @@
 #include <cmath>
 #include <cstring>
 
+#include "emoji_clusters.h"
+
 namespace fc {
 
 namespace {
+
+// ---- animation easing ----
+
+double clamp01(double t) {
+    if (!(t > 0.0)) { // NaN-safe: negative and NaN both clamp to 0
+        return 0.0;
+    }
+    return t > 1.0 ? 1.0 : t;
+}
+
+double smoothstep(double t) {
+    const double x = clamp01(t);
+    return x * x * (3.0 - 2.0 * x);
+}
+
+// easeOutBack: 0 at t=0, 1 at t=1, with a small overshoot near t=0.7
+// (the classic "pop" curve; c1 is the standard back constant).
+double easeOutBack(double t) {
+    const double x = clamp01(t);
+    constexpr double c1 = 1.70158;
+    constexpr double c3 = c1 + 1.0;
+    const double u = x - 1.0;
+    return 1.0 + c3 * u * u * u + c1 * u * u;
+}
+
+// Slide direction deltas: the offset the block sits at when the
+// entrance is fully UN-progressed (enter from the left edge = one full
+// frame-width to the left; "Up" enters from the bottom edge, moving
+// up into place). The exit uses the negated deltas (opposite edge).
+double slideDx(TextAnimDir dir) {
+    switch (dir) {
+    case TextAnimDir::Left:
+        return -1.0;
+    case TextAnimDir::Right:
+        return 1.0;
+    case TextAnimDir::Up:
+    case TextAnimDir::Down:
+        return 0.0;
+    }
+    return 0.0;
+}
+
+double slideDy(TextAnimDir dir) {
+    switch (dir) {
+    case TextAnimDir::Left:
+    case TextAnimDir::Right:
+        return 0.0;
+    case TextAnimDir::Up:
+        return 1.0;
+    case TextAnimDir::Down:
+        return -1.0;
+    }
+    return 0.0;
+}
 
 // ---- UTF-8 helpers ----
 
@@ -143,6 +199,134 @@ void utf8DecodeDetailed(const std::string &utf8, std::vector<uint32_t> &codepoin
         codepoints.push_back(cp);
         i += consumed;
         byteStarts.push_back(static_cast<int>(i));
+    }
+}
+
+bool hasTextAnimation(const TextAnimation &anim) {
+    return (anim.inKind != TextAnimKind::None && anim.inFrames > 0) ||
+           (anim.outKind != TextAnimKind::None && anim.outFrames > 0);
+}
+
+TextAnimState textAnimationAt(const TextAnimation &anim, int64_t clipFrame, int64_t duration,
+                              int64_t totalCodepoints) {
+    TextAnimState st;
+    if (!hasTextAnimation(anim) || duration <= 0) {
+        return st; // identity (fully settled)
+    }
+    // Entrance progress: 0 at frame 0, 1 once inFrames elapsed. Exit
+    // progress: 1 until the last outFrames, 0 at the clip's end.
+    const double inT =
+        (anim.inKind != TextAnimKind::None && anim.inFrames > 0)
+            ? clamp01(static_cast<double>(clipFrame) / static_cast<double>(anim.inFrames))
+            : 1.0;
+    const double outT = (anim.outKind != TextAnimKind::None && anim.outFrames > 0)
+                            ? clamp01(static_cast<double>(duration - clipFrame) /
+                                      static_cast<double>(anim.outFrames))
+                            : 1.0;
+
+    if (anim.inKind == TextAnimKind::Fade) {
+        st.alpha *= smoothstep(inT);
+    }
+    if (anim.outKind == TextAnimKind::Fade) {
+        st.alpha *= smoothstep(outT);
+    }
+
+    if (anim.inKind == TextAnimKind::Slide && inT < 1.0) {
+        const double k = 1.0 - smoothstep(inT);
+        st.offsetX += k * slideDx(anim.dir);
+        st.offsetY += k * slideDy(anim.dir);
+    }
+    if (anim.outKind == TextAnimKind::Slide && outT < 1.0) {
+        const double k = 1.0 - smoothstep(outT);
+        st.offsetX += k * -slideDx(anim.dir); // leaves toward the opposite edge
+        st.offsetY += k * -slideDy(anim.dir);
+    }
+
+    if (anim.inKind == TextAnimKind::Pop) {
+        st.scale *= easeOutBack(inT);
+    }
+    if (anim.outKind == TextAnimKind::Pop) {
+        st.scale *= smoothstep(outT); // symmetric shrink, no undershoot
+    }
+    if (st.scale < 0.0) {
+        st.scale = 0.0;
+    }
+
+    // Typewriter: the visible fraction of the codepoint stream (the
+    // cluster-alignment happens in truncateTextDocument).
+    double reveal = 1.0;
+    if (anim.inKind == TextAnimKind::Typewriter) {
+        reveal = std::min(reveal, clamp01(inT));
+    }
+    if (anim.outKind == TextAnimKind::Typewriter) {
+        reveal = std::min(reveal, clamp01(outT));
+    }
+    if (reveal < 1.0) {
+        const double n = std::llround(reveal * static_cast<double>(totalCodepoints));
+        st.revealCodepoints = n < 0.0 ? 0 : static_cast<int64_t>(n);
+    }
+
+    if (anim.inKind == TextAnimKind::Wipe) {
+        st.wipe = std::min(st.wipe, smoothstep(inT));
+    }
+    if (anim.outKind == TextAnimKind::Wipe) {
+        st.wipe = std::min(st.wipe, smoothstep(outT));
+    }
+    return st;
+}
+
+int64_t countTextCodepoints(const TextDocument &doc) {
+    int64_t total = 0;
+    std::vector<uint32_t> one;
+    for (const TextRun &run : doc.runs) {
+        utf8Decode(run.text, one);
+        total += static_cast<int64_t>(one.size());
+    }
+    return total;
+}
+
+void truncateTextDocument(const TextDocument &doc, int64_t maxCodepoints, TextDocument &out) {
+    out = doc; // box + align + animation carry over verbatim
+    if (maxCodepoints < 0) {
+        maxCodepoints = 0;
+    }
+    out.runs.clear();
+
+    // Walk WHOLE units: a plain codepoint, a single-codepoint cluster,
+    // or one full multi-codepoint cluster. A unit that does not fit the
+    // remaining budget is dropped ENTIRELY (the cut shrinks to the
+    // cluster's start, never through it) - and everything after the
+    // cut is dropped too.
+    int64_t kept = 0;
+    bool clipped = false;
+    for (const TextRun &run : doc.runs) {
+        if (clipped) {
+            break;
+        }
+        std::vector<uint32_t> cps;
+        std::vector<int> byteStarts;
+        utf8DecodeDetailed(run.text, cps, byteStarts);
+        const size_t n = cps.size();
+        if (n == 0) {
+            out.runs.push_back(run); // empty run: costs no codepoints
+            continue;
+        }
+        size_t take = 0; // codepoints of THIS run kept so far
+        while (take < n) {
+            const int len = emojiClusterLength(cps.data(), n, take);
+            const int64_t unit = len >= 2 ? len : 1;
+            if (kept + static_cast<int64_t>(take) + unit > maxCodepoints) {
+                clipped = true;
+                break;
+            }
+            take += static_cast<size_t>(unit);
+        }
+        if (!clipped || take > 0) {
+            TextRun cut = run;
+            cut.text.assign(run.text, 0, static_cast<size_t>(byteStarts[take]));
+            out.runs.push_back(std::move(cut));
+            kept += static_cast<int64_t>(take);
+        }
     }
 }
 
@@ -392,6 +576,10 @@ TextLayout layoutText(const TextDocument &doc, const std::vector<ShapedRun> &sha
     out.bgY = doc.box.background ? boxY : 0;
     out.bgW = doc.box.background ? outerW : 0;
     out.bgH = doc.box.background ? outerH : 0;
+    out.blockX = boxX;
+    out.blockY = boxY;
+    out.blockW = outerW;
+    out.blockH = outerH;
 
     const int textX0 = boxX + padding;
     const int textY0 = boxY + padding;

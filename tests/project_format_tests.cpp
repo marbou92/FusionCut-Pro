@@ -285,11 +285,142 @@ void testJsonStringsAndNumbers() {
     CHECK(loaded.fps() == 24.0);
 }
 
+// ---------------------------------------------------------------------------
+// Text animations ride inside the text document: additive on write
+// (default = no key), strict on read.
+// ---------------------------------------------------------------------------
+
+void testTextAnimationRoundTrip() {
+    TimelineModel m;
+    m.setFps(24.0);
+    m.insertTrack(0, "T1", false, true);
+    TextDocument doc;
+    TextRun run;
+    run.text = "Hello";
+    doc.runs.push_back(run);
+    doc.animation.inKind = TextAnimKind::Fade;
+    doc.animation.inFrames = 12;
+    doc.animation.outKind = TextAnimKind::Slide;
+    doc.animation.outFrames = 8;
+    doc.animation.dir = TextAnimDir::Up;
+    const int64_t id = m.addTextClip(0, doc, 0, 96);
+    CHECK(id > 0);
+
+    const std::string text = serializeProject(m);
+    // The animation object is present with exactly these fields.
+    CHECK(text.find("\"animation\":{\"in\":\"fade\",\"inFrames\":12,\"out\":\"slide\","
+                    "\"outFrames\":8,\"dir\":\"up\"}") != std::string::npos);
+
+    TimelineModel loaded;
+    std::string error;
+    CHECK(parseProject(text, loaded, error));
+    const Clip *clip = loaded.clipById(id);
+    CHECK(clip != nullptr);
+    CHECK(clip->text.animation.inKind == TextAnimKind::Fade);
+    CHECK(clip->text.animation.inFrames == 12);
+    CHECK(clip->text.animation.outKind == TextAnimKind::Slide);
+    CHECK(clip->text.animation.outFrames == 8);
+    CHECK(clip->text.animation.dir == TextAnimDir::Up);
+    // Byte-identical re-serialization (the involution invariant).
+    CHECK(serializeProject(loaded) == text);
+
+    // A DEFAULT animation writes no key at all (old files stay stable).
+    TimelineModel plain;
+    plain.setFps(24.0);
+    plain.insertTrack(0, "T1", false, true);
+    TextDocument d2;
+    TextRun r2;
+    r2.text = "Hi";
+    d2.runs.push_back(r2);
+    plain.addTextClip(0, d2, 0, 48);
+    const std::string t2 = serializeProject(plain);
+    CHECK(t2.find("animation") == std::string::npos);
+    TimelineModel l2;
+    CHECK(parseProject(t2, l2, error));
+    CHECK(l2.clips()[0].text.animation == TextAnimation());
+
+    // A pre-animation document JSON (no "animation" key) loads with the
+    // default animation.
+    const std::string old = R"({"format":1,"fps":24,"tracks":[)"
+                            R"({"name":"T1","audio":false,"text":true,"locked":false,)"
+                            R"("muted":false,"solo":false}],"clips":[{"id":1,"track":0,)"
+                            R"("label":"Hi","start":0,"duration":48,)"
+                            R"("text":{"align":"center","anchorX":0.5,"anchorY":0.5,"wrap":0.8,)"
+                            R"("background":false,"bgColor":"000000B4","runs":[)"
+                            R"({"text":"Hi","family":"","size":64,"bold":false,"italic":false,)"
+                            R"("underline":false,"color":"FFFFFFFF"}]},"effects":[]}],)"
+                            R"("transitions":[]})";
+    TimelineModel l3;
+    CHECK(parseProject(old, l3, error));
+    CHECK(l3.clips()[0].text.animation == TextAnimation());
+}
+
+void testTextAnimationRejections() {
+    TimelineModel model;
+    std::string error;
+    const std::string head = R"({"format":1,"fps":24,"tracks":[)"
+                             R"({"name":"T1","audio":false,"text":true,"locked":false,)"
+                             R"("muted":false,"solo":false}],"clips":[{"id":1,"track":0,)"
+                             R"("label":"Hi","start":0,"duration":48,)"
+                             R"("text":{"align":"center","anchorX":0.5,"anchorY":0.5,"wrap":0.8,)"
+                             R"("background":false,"bgColor":"000000B4",)";
+    const std::string tail = R"(,"runs":[{"text":"Hi","family":"","size":64,"bold":false,)"
+                             R"("italic":false,"underline":false,"color":"FFFFFFFF"}]},)"
+                             R"("effects":[]}],"transitions":[]})";
+    // A valid animation for splicing.
+    const std::string good = R"("animation":{"in":"fade","inFrames":12,"out":"none",)"
+                             R"("outFrames":0,"dir":"left"})";
+
+    // Baseline: the valid object parses.
+    CHECK(parseProject(head + good + tail, model, error));
+
+    // Unknown kind.
+    CHECK(!parseProject(head +
+                            R"("animation":{"in":"spin","inFrames":12,"out":"none",)"
+                            R"("outFrames":0,"dir":"left"})" +
+                            tail,
+                        model, error));
+    // Unknown direction.
+    CHECK(!parseProject(head +
+                            R"("animation":{"in":"fade","inFrames":12,"out":"none",)"
+                            R"("outFrames":0,"dir":"sideways"})" +
+                            tail,
+                        model, error));
+    // Negative frames.
+    CHECK(!parseProject(head +
+                            R"("animation":{"in":"fade","inFrames":-1,"out":"none",)"
+                            R"("outFrames":0,"dir":"left"})" +
+                            tail,
+                        model, error));
+    // Non-integral frames.
+    CHECK(!parseProject(head +
+                            R"("animation":{"in":"fade","inFrames":1.5,"out":"none",)"
+                            R"("outFrames":0,"dir":"left"})" +
+                            tail,
+                        model, error));
+    // Missing field (strict when the object exists).
+    CHECK(!parseProject(head +
+                            R"("animation":{"in":"fade","inFrames":12,"out":"none",)"
+                            R"("dir":"left"})" +
+                            tail,
+                        model, error));
+    // Not an object.
+    CHECK(!parseProject(head + R"("animation":"fade")" + tail, model, error));
+    // Frames beyond the sanity cap.
+    CHECK(!parseProject(head +
+                            R"("animation":{"in":"fade","inFrames":2000000000,)"
+                            R"("out":"none","outFrames":0,"dir":"left"})" +
+                            tail,
+                        model, error));
+}
+
 } // namespace
 
 int main() {
     testRoundTrip();
     testParserStrictness();
     testJsonStringsAndNumbers();
+    testTextAnimationRoundTrip();
+    testTextAnimationRejections();
     return testExitCode("project");
 }

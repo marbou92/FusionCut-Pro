@@ -48,6 +48,7 @@
 #include "project_format.h"
 #include "project_panel.h"
 #include "quick_mode_view.h"
+#include "srt.h"
 #include "text.h"
 #include "text_panel.h"
 #include "text_renderer.h"
@@ -98,15 +99,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle(tr("FusionCut Pro"));
     resize(1280, 720);
     applyDarkTheme();
-
-    // Bundled color-emoji font for the text engine (best-effort: a
-    // missing or damaged file leaves emoji to the platform font, which
-    // is the pre-emoji behavior - nothing else changes).
-    if (!emojiPainter_.load(emojiFontFilePath())) {
-        qWarning("FusionCut Pro: bundled emoji font not found (%s) - emoji in text render "
-                 "via the platform font",
-                 qPrintable(emojiFontFilePath()));
-    }
 
     buildDecodeThread();
     buildProWorkspace();
@@ -439,6 +431,9 @@ void MainWindow::buildProWorkspace() {
     connect(
         textPanel_, &TextPanel::textEdited, this,
         [this](int64_t clipId, const fc::TextDocument &doc) { writeTextDocument(clipId, doc); });
+    connect(textPanel_, &TextPanel::emojiFontPicked, this,
+            [this](const QString &path) { setEmojiFont(path); });
+    startupEmojiFont();
 
     // ---- transition wiring ----
     connect(transitionsPanel_, &TransitionsPanel::transitionAddRequested, this,
@@ -545,6 +540,15 @@ void MainWindow::buildMenus() {
     exportAction->setToolTip(
         tr("Renders the timeline (effects and transitions included) to an MP4"));
     connect(exportAction, &QAction::triggered, this, [this] { exportMedia(); });
+    file->addSeparator();
+    QAction *importCaptionsAction = addMenuAction(file, tr("Import &Subtitles..."));
+    importCaptionsAction->setToolTip(
+        tr("Turns every cue of a .srt file into a text clip on a text track"));
+    connect(importCaptionsAction, &QAction::triggered, this, [this] { importCaptions(); });
+    QAction *exportCaptionsAction = addMenuAction(file, tr("Expo&rt Subtitles..."));
+    exportCaptionsAction->setToolTip(
+        tr("Writes the timeline's text clips to a .srt file (styles are flattened to text)"));
+    connect(exportCaptionsAction, &QAction::triggered, this, [this] { exportCaptions(); });
     file->addSeparator();
     QAction *quitAction = addMenuAction(file, tr("E&xit"), QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
@@ -1006,14 +1010,22 @@ void MainWindow::applyProgramFrame() {
     }
 
     // Composite every text clip covering the playhead ON TOP (paint
-    // order = bottom text lane first). The layer is cached per clip;
-    // the text clip's own effect stack runs on a COPY so keyframed
-    // params resolve per frame without touching the cache.
+    // order = bottom text lane first). A static clip's layer is cached
+    // per clip; an ANIMATED clip re-renders at its clip-relative frame
+    // (the same evaluator the export job runs, so preview and export
+    // stay identical). The text clip's own effect stack runs on a COPY
+    // so keyframed params resolve per frame without touching the cache.
     for (const fc::Clip *textClip : texts) {
         if (!textClip || !textClip->isText) {
             continue;
         }
-        QImage layer = textLayerForClip(textClip, out.width(), out.height());
+        int64_t textFrame = textClip->timelineStart; // always >= 0 below
+        if (frame >= textClip->timelineStart && frame < textClip->timelineEnd()) {
+            textFrame = frame - textClip->timelineStart;
+        } else {
+            textFrame = 0; // outside (cannot happen via textClipsAt) - clamp
+        }
+        QImage layer = textLayerForClip(textClip, out.width(), out.height(), textFrame);
         if (layer.isNull() || layer.format() != QImage::Format_RGBA8888 ||
             layer.size() != out.size()) {
             continue;
@@ -1062,11 +1074,12 @@ void MainWindow::addEffectToSelectedClip(const QString &effectId) {
 }
 
 // ---------------------------------------------------------------------------
-// Text engine: clip creation, panel sync, layer rendering.
+// Text engine: clip creation, panel sync, layer rendering, captions.
 // ---------------------------------------------------------------------------
 
-void MainWindow::addTextClip() {
-    // Find the topmost text lane, or insert one above everything (T1).
+// Finds the topmost text lane, or inserts one above everything (T1).
+// Returns the track index (a text lane by construction).
+int MainWindow::ensureTextTrack() {
     int textTrack = -1;
     int textTrackCount = 0;
     for (const fc::Track &track : model_.tracks()) {
@@ -1085,6 +1098,11 @@ void MainWindow::addTextClip() {
             tr("Added text track %1 (above the video lanes).").arg(QString::fromStdString(name)),
             4000);
     }
+    return textTrack;
+}
+
+void MainWindow::addTextClip() {
+    const int textTrack = ensureTextTrack();
 
     // Default document: a centered 72 px white title for 4 s.
     fc::TextDocument doc;
@@ -1132,21 +1150,246 @@ void MainWindow::writeTextDocument(int64_t clipId, const fc::TextDocument &doc) 
     applyProgramFrame(); // instant re-render (video cache or black)
 }
 
-QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height) {
+QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height,
+                                    int64_t clipFrame) {
     if (!clip || !clip->isText || width <= 0 || height <= 0) {
         return QImage();
     }
-    auto it = textLayerCache_.find(clip->id);
-    if (it != textLayerCache_.end() && it->second.width() == width &&
-        it->second.height() == height && it->second.format() == QImage::Format_RGBA8888) {
-        return it->second;
+    // An animated clip's layer varies with the clip-relative frame, so
+    // it never touches the cache (rendered fresh per frame); a static
+    // clip caches exactly as before.
+    const bool animated = clipFrame >= 0 && fc::hasTextAnimation(clip->text.animation);
+    if (!animated) {
+        auto it = textLayerCache_.find(clip->id);
+        if (it != textLayerCache_.end() && it->second.width() == width &&
+            it->second.height() == height && it->second.format() == QImage::Format_RGBA8888) {
+            return it->second;
+        }
     }
-    QImage layer = renderTextLayer(clip->text, width, height, &emojiPainter_);
+    QImage layer = fc::renderTextLayer(clip->text, width, height, animated ? clipFrame : -1,
+                                       clip->durationFrames(), &emojiPainter_);
     if (layer.format() != QImage::Format_RGBA8888) {
         layer = layer.convertToFormat(QImage::Format_RGBA8888);
     }
-    textLayerCache_[clip->id] = layer;
+    if (!animated) {
+        textLayerCache_[clip->id] = layer;
+    }
     return layer;
+}
+
+// ---------------------------------------------------------------------------
+// Emoji font selection: the machine's installed emoji-capable fonts are
+// scanned once at startup (a cheap directory probe rejects the ~99.9%
+// without bitmap-emoji tables), the persisted user pick wins over the
+// platform-preferred auto-pick, and the Text panel's combo reflects
+// the list. Picking a different font switches the emoji ARTWORK.
+// ---------------------------------------------------------------------------
+
+void MainWindow::startupEmojiFont() {
+    emojiFonts_ = fc::discoverEmojiFonts();
+    QSettings settings;
+    QString pick = settings.value("text/emojiFont").toString();
+    if (pick.isEmpty() || !QFile::exists(pick)) {
+        // No stored pick (or the file went away): auto-pick by the
+        // platform's preferred family order.
+        pick = QString();
+        for (const QString &want : fc::preferredEmojiFontFamilies()) {
+            for (const fc::SystemEmojiFont &f : emojiFonts_) {
+                if (f.family.compare(want, Qt::CaseInsensitive) == 0) {
+                    pick = f.path;
+                    break;
+                }
+            }
+            if (!pick.isEmpty()) {
+                break;
+            }
+        }
+    }
+    if (!pick.isEmpty() && !emojiPainter_.load(pick)) {
+        qWarning("FusionCut Pro: emoji font %s did not load - emoji render via the platform font",
+                 qPrintable(pick));
+        pick = QString(); // the combo shows System default then
+    }
+    emojiFontPath_ = pick;
+    textPanel_->setEmojiFonts(emojiFonts_, pick);
+}
+
+void MainWindow::setEmojiFont(const QString &path) {
+    emojiFontPath_ = path;
+    QSettings settings;
+    if (path.isEmpty()) {
+        settings.remove("text/emojiFont");
+        emojiPainter_ = fc::EmojiPainter(); // drop the loaded font
+    } else {
+        settings.setValue("text/emojiFont", path);
+        if (!emojiPainter_.load(path)) {
+            statusBar()->showMessage(
+                tr("Could not load %1 - emoji keep rendering through the platform font.")
+                    .arg(QFileInfo(path).fileName()),
+                6000);
+        }
+    }
+    // The cached text layers embed the OLD font's bitmaps: drop them
+    // all and re-render the program monitor.
+    textLayerCache_.clear();
+    applyProgramFrame();
+}
+
+// ---------------------------------------------------------------------------
+// Captions: .srt cues in (one text clip per cue, caption styling),
+// text clips out (flattened plain text, frame times -> milliseconds).
+// ---------------------------------------------------------------------------
+
+namespace {
+// Caption defaults: centered white 56 px near the bottom of the frame
+// with a soft dark box - readable over almost any footage.
+constexpr int kCaptionSizePx = 56;
+
+double captionAnchorY() {
+    return 0.9;
+}
+} // namespace
+
+void MainWindow::importCaptions() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import Subtitles"), QString(), tr("SubRip subtitles (*.srt);;All files (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Import Subtitles"),
+                             tr("Could not open %1 for reading.").arg(path));
+        return;
+    }
+    const QByteArray raw = file.readAll();
+    const std::string body(raw.constData(), raw.constData() + raw.size());
+    std::vector<fc::SrtCue> cues;
+    std::string parseError;
+    if (!fc::parseSrt(body, cues, parseError)) {
+        QMessageBox::warning(
+            this, tr("Import Subtitles"),
+            tr("The file is not valid SubRip:%1").arg("\n" + QString::fromStdString(parseError)));
+        return;
+    }
+    if (cues.empty()) {
+        statusBar()->showMessage(tr("No caption cues found in %1.").arg(path), 6000);
+        return;
+    }
+
+    const int track = ensureTextTrack();
+    int added = 0;
+    int skipped = 0;
+    for (const fc::SrtCue &cue : cues) {
+        const int64_t start =
+            static_cast<int64_t>(std::llround(static_cast<double>(cue.startMs) * fps_ / 1000.0));
+        const int64_t duration = static_cast<int64_t>(
+            std::llround(static_cast<double>(cue.endMs - cue.startMs) * fps_ / 1000.0));
+        if (start < 0 || duration < 1) {
+            ++skipped; // zero-length or reversed cue
+            continue;
+        }
+        fc::TextDocument doc;
+        fc::TextRun run;
+        run.text = fc::stripSrtMarkup(cue.text);
+        run.style.size = kCaptionSizePx;
+        run.style.colorRgba = 0xFFFFFFFFu;
+        doc.runs.push_back(std::move(run));
+        doc.align = fc::TextAlign::Center;
+        doc.box.anchorX = 0.5;
+        doc.box.anchorY = captionAnchorY();
+        doc.box.wrap = 0.8;
+        doc.box.background = true; // classic caption backing box
+        if (model_.addTextClip(track, doc, start, duration) <= 0) {
+            ++skipped; // overlapped another caption (exact placement only)
+            continue;
+        }
+        ++added;
+    }
+    updateSequenceDuration();
+    timeline_->update();
+    markDirty();
+    applyProgramFrame(); // in case the playhead already sits on a caption
+    if (skipped > 0) {
+        statusBar()->showMessage(tr("Imported %1 caption(s) from %2 (%3 skipped - too short or "
+                                    "overlapping).")
+                                     .arg(added)
+                                     .arg(QFileInfo(path).fileName())
+                                     .arg(skipped),
+                                 8000);
+    } else {
+        statusBar()->showMessage(
+            tr("Imported %1 caption(s) from %2.").arg(added).arg(QFileInfo(path).fileName()), 8000);
+    }
+}
+
+void MainWindow::exportCaptions() {
+    // Collect every text clip as a cue: chronological, ties broken by
+    // track order (the loop walks the tracks in model order).
+    struct Pending {
+        int64_t start;
+        int trackIndex;
+        fc::SrtCue cue;
+    };
+    std::vector<Pending> pending;
+    for (const fc::Track &track : model_.tracks()) {
+        if (!track.isText) {
+            continue;
+        }
+        for (const fc::Clip &clip : model_.clips()) {
+            if (clip.trackIndex != track.index || !clip.isText) {
+                continue;
+            }
+            std::string text;
+            for (const fc::TextRun &run : clip.text.runs) {
+                text += run.text; // embedded '\n's are the cue's line breaks
+            }
+            if (text.empty()) {
+                continue; // blank clips produce no cue
+            }
+            fc::SrtCue cue;
+            cue.startMs = static_cast<int64_t>(
+                std::llround(static_cast<double>(clip.timelineStart) * 1000.0 / fps_));
+            cue.endMs = static_cast<int64_t>(
+                std::llround(static_cast<double>(clip.timelineEnd()) * 1000.0 / fps_));
+            cue.text = std::move(text);
+            pending.push_back(Pending{clip.timelineStart, track.index, std::move(cue)});
+        }
+    }
+    if (pending.empty()) {
+        statusBar()->showMessage(tr("No text clips on the timeline to export as subtitles."), 6000);
+        return;
+    }
+    std::stable_sort(pending.begin(), pending.end(),
+                     [](const Pending &a, const Pending &b) { return a.start < b.start; });
+    std::vector<fc::SrtCue> cues;
+    cues.reserve(pending.size());
+    for (Pending &p : pending) {
+        cues.push_back(std::move(p.cue));
+    }
+
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export Subtitles"), QString(), tr("SubRip subtitles (*.srt);;All files (*)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, tr("Export Subtitles"),
+                             tr("Could not open %1 for writing.").arg(path));
+        return;
+    }
+    const std::string out = fc::writeSrt(cues);
+    if (file.write(out.data(), static_cast<qint64>(out.size())) !=
+        static_cast<qint64>(out.size())) {
+        QMessageBox::warning(this, tr("Export Subtitles"),
+                             tr("Writing %1 failed (disk full or permissions?).").arg(path));
+        return;
+    }
+    statusBar()->showMessage(tr("Exported %1 subtitle cue(s) to %2.")
+                                 .arg(static_cast<int>(cues.size()))
+                                 .arg(QFileInfo(path).fileName()),
+                             8000);
 }
 
 void MainWindow::restoreLayout() {
@@ -1568,13 +1811,16 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     std::map<std::string, std::unique_ptr<fc::VideoDecoder>> decoders;
     std::map<std::string, double> nextPts;
     std::map<int64_t, QImage> held;
-    // Rendered text layers cached per clip (time-invariant) at the
-    // export resolution. The emoji painter is job-local: the bitmap
-    // cache is not thread-safe and the worker thread cannot touch the
-    // GUI-side painter.
+    // Rendered text layers cached per clip (time-invariant docs only)
+    // at the export resolution. Animated clips render per frame. The
+    // emoji painter is job-local: its caches are not thread-safe and
+    // the worker must not touch the GUI-side painter (the path is
+    // snapshotted when the job starts).
     std::map<int64_t, QImage> textLayers;
     fc::EmojiPainter exportEmoji;
-    exportEmoji.load(fc::emojiFontFilePath());
+    if (!emojiFontPath_.isEmpty()) {
+        exportEmoji.load(emojiFontPath_);
+    }
 
     auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
         const double srcSec =
@@ -1677,22 +1923,33 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         }
 
         // Composite the text stack ON TOP (same paint order as the
-        // program monitor: bottom text lane first). The text layer is
-        // rendered at the export resolution and cached; the text clip's
-        // own effect stack runs on a copy per frame so keyframed
-        // parameters resolve exactly like the preview.
+        // program monitor: bottom text lane first). A static text layer
+        // is rendered at the export resolution and cached; an ANIMATED
+        // clip re-renders per frame through the same evaluator the
+        // preview uses. The text clip's own effect stack runs on a copy
+        // per frame so keyframed parameters resolve exactly like the
+        // preview.
         for (const fc::Clip *textClip : model_.textClipsAt(f)) {
             if (!textClip || !textClip->isText) {
                 continue;
             }
-            auto layerIt = textLayers.find(textClip->id);
-            if (layerIt == textLayers.end()) {
-                layerIt = textLayers
-                              .emplace(textClip->id, fc::renderTextLayer(textClip->text, width,
-                                                                         height, &exportEmoji))
-                              .first;
+            const bool animated = fc::hasTextAnimation(textClip->text.animation);
+            QImage layer;
+            if (animated) {
+                layer =
+                    fc::renderTextLayer(textClip->text, width, height, f - textClip->timelineStart,
+                                        textClip->durationFrames(), &exportEmoji);
+            } else {
+                auto layerIt = textLayers.find(textClip->id);
+                if (layerIt == textLayers.end()) {
+                    layerIt =
+                        textLayers
+                            .emplace(textClip->id, fc::renderTextLayer(textClip->text, width,
+                                                                       height, -1, 0, &exportEmoji))
+                            .first;
+                }
+                layer = layerIt->second;
             }
-            QImage layer = layerIt->second;
             if (layer.isNull() || layer.format() != QImage::Format_RGBA8888 ||
                 layer.size() != out.size()) {
                 continue;

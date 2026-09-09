@@ -34,6 +34,8 @@ add_executable(FusionCutPro WIN32
     text_panel.h
     text_renderer.cpp
     text_renderer.h
+    system_fonts.cpp
+    system_fonts.h
     export_dialog.cpp
     export_dialog.h
     quick_mode_view.cpp
@@ -60,25 +62,6 @@ endif()
 # flat directory; CI runs windeployqt plus an ldd sweep for FFmpeg/MinGW
 # runtime DLLs during packaging.
 install(TARGETS FusionCutPro RUNTIME DESTINATION .)
-
-# The bundled color-emoji font (see THIRD_PARTY_NOTICES.md, SIL OFL 1.1)
-# rides along flat next to the exe: POST_BUILD puts it beside the
-# binary in build trees (dev runs and ctest invocations find it there),
-# install() puts it in the portable package. The app also probes
-# resources/fonts/ next to the exe, so both layouts work at runtime.
-# A missing font is not an error: text clips fall back to the platform
-# font for emoji (the emoji renderer simply stays unused).
-set(FC_EMOJI_FONT "${CMAKE_SOURCE_DIR}/resources/fonts/NotoColorEmoji.ttf")
-if(EXISTS "${FC_EMOJI_FONT}")
-    add_custom_command(TARGET FusionCutPro POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${FC_EMOJI_FONT}"
-            "$<TARGET_FILE_DIR:FusionCutPro>/NotoColorEmoji.ttf")
-    install(FILES "${FC_EMOJI_FONT}" DESTINATION .)
-else()
-    message(WARNING "resources/fonts/NotoColorEmoji.ttf not found - the "
-                    "portable build will render emoji through the platform font")
-endif()
 
 # ---------------------------------------------------------------------------
 # fcp-loader-check.exe is RETIRED. Its two-phase loader

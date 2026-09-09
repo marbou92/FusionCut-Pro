@@ -1,404 +1,711 @@
-// FusionCut Pro - color-emoji engine unit tests.
-// Pure table parsing + cluster shaping math; no Qt, no FFmpeg - runs
-// anywhere ctest runs. The expectations are pinned against the actual
-// bundled font bytes (resources/fonts/NotoColorEmoji.ttf, Noto Color
-// Emoji 2.047, CBDT/CBLC, sha256 72a635cb...): the file is committed,
-// so every number below is byte-stable. Covers: the strike/index
-// tables, the cmap, the GSUB ligature map (ZWJ chains, flags, keycaps,
-// skin tones), the FE0F presentation policy, bitmap record decoding,
-// the strike-scaling math, malformed-input robustness, and the layout
-// engine's cluster-atomicity rule.
+// FusionCut Pro - emoji cluster segmentation unit tests.
+// Pure Unicode policy: no fonts, no files - the codepoint tables below
+// pin every rule of emojiClusterLength (joiner chains, flag pairs,
+// keycaps, skin tones, variation selectors, tag sequences) and the
+// default-emoji-presentation set, plus the cluster-aware typewriter
+// truncation that buildTextDocument documents.
 
-#include <cstdint>
-#include <cstdio>
-#include <fstream>
+#include <algorithm>
+#include <cstring>
 #include <string>
 #include <vector>
 
-#include "emoji.h"
+#include "emoji_clusters.h"
 #include "test_harness.h"
 #include "text.h"
 
 using namespace fc;
 
-#ifndef FC_EMOJI_FONT_PATH
-#define FC_EMOJI_FONT_PATH "NotoColorEmoji.ttf"
-#endif
-
 // ---------------------------------------------------------------------------
-// Fixture: the real bundled font, loaded once.
+// Helpers.
 // ---------------------------------------------------------------------------
 
-static std::vector<uint8_t> loadFontBytes() {
-    std::ifstream in(FC_EMOJI_FONT_PATH, std::ios::binary);
-    if (!in) {
-        std::printf("FATAL: cannot open %s\n", FC_EMOJI_FONT_PATH);
-        return {};
-    }
-    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
-                                std::istreambuf_iterator<char>());
+// Builds a codepoint vector from an initializer list.
+static std::vector<uint32_t> cps(std::initializer_list<uint32_t> list) {
+    return std::vector<uint32_t>(list);
 }
 
-static const std::vector<uint8_t> &fontBytes() {
-    static const std::vector<uint8_t> bytes = loadFontBytes();
-    return bytes;
+// The cluster length at `pos` for the given codepoints.
+static int cl(const std::vector<uint32_t> &v, size_t pos) {
+    return emojiClusterLength(v.data(), v.size(), pos);
 }
 
-static EmojiFont &theFont() {
-    static EmojiFont font = [] {
-        EmojiFont f;
-        const std::vector<uint8_t> &b = fontBytes();
-        f.load(b.data(), b.size());
-        return f;
-    }();
-    return font;
-}
-
-// Codepoint helpers for readable cluster fixtures.
-static std::vector<uint32_t> cps(std::initializer_list<uint32_t> in) {
-    return std::vector<uint32_t>(in);
-}
-
-static void expectCluster(const char *what, const std::vector<uint32_t> &text, size_t pos,
-                          bool shouldResolve, uint16_t glyph, int clusterLen) {
-    const EmojiFont &font = theFont();
-    EmojiFont::Resolved r;
-    const bool ok = font.resolveCluster(text.data(), text.size(), pos, &r);
-    CHECK(ok == shouldResolve);
-    if (ok && shouldResolve) {
-        if (r.glyph != glyph || r.codepoints != clusterLen) {
-            std::printf("FAIL %s: glyph %u len %d, expected glyph %u len %d\n", what,
-                        unsigned(r.glyph), r.codepoints, unsigned(glyph), clusterLen);
-        }
-        CHECK(r.glyph == glyph);
-        CHECK(r.codepoints == clusterLen);
-    }
+static TextDocument docOf(const std::string &utf8) {
+    TextDocument doc;
+    TextRun run;
+    run.text = utf8;
+    doc.runs.push_back(run);
+    return doc;
 }
 
 // ---------------------------------------------------------------------------
-// Load + introspection
+// Single codepoints and forced presentation.
 // ---------------------------------------------------------------------------
 
-static void testLoad() {
-    const std::vector<uint8_t> &b = fontBytes();
-    CHECK(b.size() == 10673480); // the committed file, byte for byte
+static void testSingles() {
+    // Default emoji presentation: the cluster is the codepoint itself.
+    CHECK(cl(cps({0x1F600}), 0) == 1); // grinning face
+    CHECK(cl(cps({0x1F44D}), 0) == 1); // thumbs up
+    CHECK(cl(cps({0x231Au}), 0) == 1); // watch (BMP default)
+    CHECK(cl(cps({0x1F3F4}), 0) == 1); // black flag (no tags)
+    CHECK(cl(cps({0x1F1FA}), 0) == 1); // lone regional indicator
 
-    EmojiFont font;
-    CHECK(theFont().loaded());
-    CHECK(theFont().strikePpem() == 109);
-    CHECK(theFont().bitDepth() == 32);
-    CHECK(theFont().numGlyphs() == 4027);
-    CHECK(theFont().ligatureRuleCount() == 4166);
-    CHECK(theFont().maxLigatureSequence() == 9);
+    // Text-default symbols render as text without a forcing follower.
+    CHECK(cl(cps({0x2764u}), 0) == 0); // heavy heart, no FE0F
+    CHECK(cl(cps({0x2600u}), 0) == 0); // sun, no FE0F
+    CHECK(cl(cps({'a'}), 0) == 0);     // plain letter
+    CHECK(cl(cps({'1'}), 0) == 0);     // plain digit
+    CHECK(cl(cps({0x2122u}), 0) == 0); // trademark
 
-    // A default-constructed font resolves nothing.
-    EmojiFont empty;
-    EmojiFont::Resolved r;
-    const std::vector<uint32_t> t = cps({0x1F600u});
-    CHECK(!empty.resolveCluster(t.data(), t.size(), 0, &r));
-    CHECK(!empty.bitmapFor(883, nullptr));
-}
+    // Variation selectors force a cluster on the base.
+    CHECK(cl(cps({0x2764u, 0xFE0Fu}), 0) == 2); // heart + VS16
+    CHECK(cl(cps({0x2764u, 0xFE0Eu}), 0) == 2); // heart + VS15 (text form)
+    CHECK(cl(cps({0x2122u, 0xFE0Fu}), 0) == 2); // trademark + VS16
+    CHECK(cl(cps({'a', 0xFE0Fu}), 0) == 2);     // even a letter (harmless)
 
-static void testMalformed() {
-    const std::vector<uint8_t> &b = fontBytes();
+    // VS16 after a default-emoji codepoint: attaches, same cluster.
+    CHECK(cl(cps({0x1F600, 0xFE0Fu}), 0) == 2);
+    // Two variation selectors in a row both attach.
+    CHECK(cl(cps({0x1F600, 0xFE0Fu, 0xFE0Fu}), 0) == 3);
 
-    EmojiFont font;
-    CHECK(!font.load(nullptr, 0));
-    CHECK(!font.load(nullptr, 1000));
-    CHECK(!font.load(b.data(), 0));
-    CHECK(!font.load(b.data(), 12));           // header only
-    CHECK(!font.load(b.data(), 100));          // table directory cut off
-    CHECK(!font.load(b.data(), b.size() / 2)); // CBDT cut in half
-    CHECK(!font.loaded());
-
-    // Garbage that never parses: every load failure leaves the font in
-    // the resolve-nothing state (and never crashes).
-    std::vector<uint8_t> junk(1 << 20, 0xABu);
-    CHECK(!font.load(junk.data(), junk.size()));
-    EmojiFont::Resolved r;
-    std::vector<uint32_t> t = cps({0x1F600u});
-    CHECK(!font.resolveCluster(t.data(), t.size(), 0, &r));
-
-    std::vector<uint8_t> ones(1 << 16, 0xFFu);
-    CHECK(!font.load(ones.data(), ones.size()));
-
-    // A valid header with a lying table count must not walk the file.
-    std::vector<uint8_t> head(b.begin(), b.begin() + 12);
-    head[4] = 0xFFu; // numTables = 0xFFFF
-    head[5] = 0xFFu;
-    CHECK(!font.load(head.data(), head.size()));
-
-    // Reloading a good font over a failed one recovers.
-    CHECK(font.load(b.data(), b.size()));
-    CHECK(font.loaded());
+    // Joiner/selector codepoints never START a cluster.
+    CHECK(cl(cps({0xFE0Fu}), 0) == 0);
+    CHECK(cl(cps({0xFE0Eu}), 0) == 0);
+    CHECK(cl(cps({0x200Du}), 0) == 0);
+    CHECK(cl(cps({0x20E3u}), 0) == 0);
+    CHECK(cl(cps({0x1F3FBu}), 0) == 0);          // skin tone alone
+    CHECK(cl(cps({0xFE0Fu, 0x1F600u}), 0) == 0); // VS16 before emoji
 }
 
 // ---------------------------------------------------------------------------
-// cmap
+// Keycaps.
 // ---------------------------------------------------------------------------
 
-static void testCmap() {
-    const EmojiFont &font = theFont();
-    // Pinned glyph ids (byte-stable for the committed font).
-    CHECK(font.codepointGlyph(0x1F600u) == 883); // grinning face
-    CHECK(font.codepointGlyph(0x2764u) == 168);  // heavy black heart
-    CHECK(font.codepointGlyph(0x1F469u) == 597); // woman
-    CHECK(font.codepointGlyph(0x1F468u) == 596); // man
-    CHECK(font.codepointGlyph(0x1F467u) == 595); // girl
-    CHECK(font.codepointGlyph(0x1F466u) == 594); // boy
-    CHECK(font.codepointGlyph(0x1F1FAu) == 225); // regional indicator U
-    CHECK(font.codepointGlyph(0x1F1F8u) == 223); // regional indicator S
-    CHECK(font.codepointGlyph(0x1F1EBu) == 210); // regional indicator F
-    CHECK(font.codepointGlyph(0x1F1F4u) == 219); // regional indicator R
-    CHECK(font.codepointGlyph(0x1F1E9u) == 208); // regional indicator D
-    CHECK(font.codepointGlyph(0x1F1EAu) == 209); // regional indicator E
-    CHECK(font.codepointGlyph(0x200Du) == 18);   // zero-width joiner (mapped, no bitmap)
-    CHECK(font.codepointGlyph(0xFE0Fu) == 0);    // VS16: unmapped (it never renders)
-    CHECK(font.codepointGlyph(0x20E3u) == 21);   // combining enclosing keycap
-    CHECK(font.codepointGlyph(0x31u) == 7);      // digit 1 (keycap component)
-    CHECK(font.codepointGlyph(0x1F3FBu) == 487); // light skin tone
-    CHECK(font.codepointGlyph(0x263Au) == 79);   // white smiling face
-    CHECK(font.codepointGlyph(0x1F9D1u) == 1277);
-    CHECK(font.codepointGlyph(0x1FAF0u) == 1435);
-    CHECK(font.codepointGlyph(0x1F5A4u) == 857); // black heart
-
-    // Not in the emoji font at all -> plain text.
-    CHECK(font.codepointGlyph(0x41u) == 0);
-    CHECK(font.codepointGlyph(0x4E00u) == 0);
-    CHECK(font.codepointGlyph(0x1F777u) == 0);
-
-    // This font carries no format-14 non-default UVS mappings.
-    CHECK(font.variantGlyph(0x2764u, 0xFE0Fu) == 0);
-    CHECK(font.variantGlyph(0x1F600u, 0xFE0Fu) == 0);
+static void testKeycaps() {
+    CHECK(cl(cps({'1', 0xFE0F, 0x20E3}), 0) == 3); // 1 + VS16 + keycap
+    CHECK(cl(cps({'1', 0x20E3}), 0) == 2);         // keycap without VS16
+    CHECK(cl(cps({'#', 0xFE0F, 0x20E3}), 0) == 3);
+    CHECK(cl(cps({'*', 0x20E3}), 0) == 2);
+    CHECK(cl(cps({'9', 0xFE0F, 0x20E3}), 0) == 3);
+    // A keycap base without any forcing follower is plain text.
+    CHECK(cl(cps({'1', '2'}), 0) == 0);
+    CHECK(cl(cps({'#', ' '}), 0) == 0);
 }
 
 // ---------------------------------------------------------------------------
-// Ligature rules (the GSUB map)
+// Skin tones.
 // ---------------------------------------------------------------------------
 
-static void testLigatures() {
-    const EmojiFont &font = theFont();
-    const uint16_t us[] = {225, 223};
-    CHECK(font.ligatureFor(us, 2) == 1772); // US flag
-    const uint16_t fr[] = {210, 219};
-    CHECK(font.ligatureFor(fr, 2) == 1614); // FR flag
-    const uint16_t de[] = {208, 209};
-    CHECK(font.ligatureFor(de, 2) == 1596); // DE flag
-    const uint16_t keycap[] = {7, 21};
-    CHECK(font.ligatureFor(keycap, 2) == 1485); // keycap 1
-    const uint16_t skin[] = {569, 487};
-    CHECK(font.ligatureFor(skin, 2) == 1967); // thumbs up + light skin
-    const uint16_t family5[] = {596, 18, 597, 18, 595};
-    CHECK(font.ligatureFor(family5, 5) == 2022); // family: man, woman, girl
-    const uint16_t family7[] = {596, 18, 597, 18, 595, 18, 594};
-    CHECK(font.ligatureFor(family7, 7) == 2023); // family: man, woman, girl, boy
-    const uint16_t couple[] = {597, 18, 168, 18, 596};
-    CHECK(font.ligatureFor(couple, 5) == 2294); // couple with heart
-
-    // Non-rules: singles are not ligatures, and these sequences do not
-    // exist in this font's GSUB (invalid input classes).
-    const uint16_t single[] = {883};
-    CHECK(font.ligatureFor(single, 1) == 0);
-    const uint16_t pair[] = {883, 883};
-    CHECK(font.ligatureFor(pair, 2) == 0); // two grinning faces
-    const uint16_t mw[] = {597, 18, 596};
-    CHECK(font.ligatureFor(mw, 3) == 0); // woman ZWJ man: not an emoji
-    const uint16_t joined[] = {596, 18, 597};
-    CHECK(font.ligatureFor(joined, 3) == 0);
-    CHECK(font.ligatureFor(nullptr, 2) == 0);
+static void testSkinTones() {
+    CHECK(cl(cps({0x1F44D, 0x1F3FB}), 0) == 2); // thumbs up + light skin
+    CHECK(cl(cps({0x1F44D, 0x1F3FF}), 0) == 2); // thumbs up + dark skin
+    // Skin tone attaches to a default-emoji base.
+    CHECK(cl(cps({0x1F9D1, 0x1F3FC}), 0) == 2);
+    // A skin tone on a text-default base without VS16: no cluster.
+    CHECK(cl(cps({0x2764, 0x1F3FB}), 0) == 0);
+    // ... but with VS16 the whole sequence clusters.
+    CHECK(cl(cps({0x2764, 0xFE0F, 0x1F3FB}), 0) == 3);
 }
 
 // ---------------------------------------------------------------------------
-// Cluster resolution (the shaping policy)
+// Zero-width-joiner chains.
 // ---------------------------------------------------------------------------
 
-static void testResolveSingles() {
-    // SMP singles: default emoji presentation.
-    expectCluster("grin", cps({0x1F600u}), 0, true, 883, 1);
-    expectCluster("rocket", cps({0x1F680u}), 0, true, 963, 1);
-    expectCluster("skin swatch", cps({0x1F3FBu}), 0, true, 487, 1);
-
-    // VS16 forces presentation and is consumed by the cluster.
-    expectCluster("grin+VS16", cps({0x1F600u, 0xFE0Fu}), 0, true, 883, 2);
-    expectCluster("heart+VS16", cps({0x2764u, 0xFE0Fu}), 0, true, 168, 2);
-    expectCluster("smile+VS16", cps({0x263Au, 0xFE0Fu}), 0, true, 79, 2);
-    expectCluster("digit+VS16", cps({0x31u, 0xFE0Fu}), 0, true, 7, 2);
-
-    // Without VS16 these are TEXT presentation (Unicode's own rule) -
-    // the platform font renders them.
-    expectCluster("heart alone", cps({0x2764u}), 0, false, 0, 0);
-    expectCluster("smile alone", cps({0x263Au}), 0, false, 0, 0);
-    expectCluster("digit alone", cps({0x31u}), 0, false, 0, 0);
-    expectCluster("letter", cps({0x41u}), 0, false, 0, 0);
-    expectCluster("cjk", cps({0x4E00u}), 0, false, 0, 0);
-
-    // The joiner and VS16 alone are plain text (VS16 is unmapped).
-    expectCluster("lone ZWJ", cps({0x200Du}), 0, false, 0, 0);
-    expectCluster("lone VS16", cps({0xFE0Fu}), 0, false, 0, 0);
-
-    // Separators never start a cluster and terminate the scan.
-    expectCluster("space", cps({0x20u, 0x1F600u}), 0, false, 0, 0);
-    expectCluster("newline", cps({0x0Au, 0x1F600u}), 0, false, 0, 0);
-    expectCluster("tab", cps({0x09u, 0x1F600u}), 0, false, 0, 0);
+static void testJoinerChains() {
+    // Family: man + ZWJ + woman + ZWJ + girl.
+    CHECK(cl(cps({0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467}), 0) == 5);
+    // Family with a trailing VS16 on the last member.
+    CHECK(cl(cps({0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0xFE0F}), 0) == 6);
+    // Couple with heart: woman + ZWJ + heart(VS16) + ZWJ + man.
+    CHECK(cl(cps({0x1F469, 0x200D, 0x2764, 0xFE0F, 0x200D, 0x1F468}), 0) == 6);
+    // Kiss: man + ZWJ + kiss mark + ZWJ + man (no VS16 on the heart).
+    CHECK(cl(cps({0x1F468, 0x200D, 0x1F48B, 0x200D, 0x1F468}), 0) == 5);
+    // Handshake with skin tones on BOTH sides.
+    CHECK(cl(cps({0x1F91A, 0x1F3FB, 0x200D, 0x1F91A, 0x1F3FF}), 0) == 5);
+    // Dangling joiner at end of text: the cluster ends before it.
+    CHECK(cl(cps({0x1F468, 0x200D}), 0) == 1);
+    // Joiner followed by plain text: not consumed.
+    CHECK(cl(cps({0x1F600, 0x200D, 'a'}), 0) == 1);
+    // Joiner + text-default heart (no VS16): not a cluster start, stops.
+    CHECK(cl(cps({0x1F600, 0x200D, 0x2764}), 0) == 1);
+    // Two adjacent families scan as two five-codepoint clusters.
+    const std::vector<uint32_t> two =
+        cps({0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467});
+    CHECK(cl(two, 0) == 5);
+    CHECK(cl(two, 5) == 5);
 }
 
-static void testResolveSequences() {
-    // Flags: regional indicator pairs are ligature rules; two adjacent
-    // pairs resolve independently (US then FR - no 4-glyph rule).
-    expectCluster("US flag", cps({0x1F1FAu, 0x1F1F8u}), 0, true, 1772, 2);
-    expectCluster("US+FR", cps({0x1F1FAu, 0x1F1F8u, 0x1F1EBu, 0x1F1F4u}), 0, true, 1772, 2);
-    expectCluster("FR tail", cps({0x1F1FAu, 0x1F1F8u, 0x1F1EBu, 0x1F1F4u}), 2, true, 1614, 2);
+// ---------------------------------------------------------------------------
+// Regional indicators (flags).
+// ---------------------------------------------------------------------------
 
-    // Keycaps: VS16 inside the sequence is skipped by glyph matching
-    // and consumed by the cluster.
-    expectCluster("keycap 1", cps({0x31u, 0xFE0Fu, 0x20E3u}), 0, true, 1485, 3);
-    expectCluster("keycap 1 no VS", cps({0x31u, 0x20E3u}), 0, true, 1485, 2);
+static void testFlags() {
+    // US flag: 1F1FA + 1F1F8.
+    CHECK(cl(cps({0x1F1FA, 0x1F1F8}), 0) == 2);
+    // The second indicator of a pair is not a continuation of a NEW scan
+    // starting there when it consumed one already: a lone indicator
+    // after a pair starts its own (single) cluster.
+    const std::vector<uint32_t> three = cps({0x1F1FA, 0x1F1F8, 0x1F1EB});
+    CHECK(cl(three, 0) == 2);
+    CHECK(cl(three, 2) == 1);
+    // Four indicators: two flag pairs.
+    const std::vector<uint32_t> four = cps({0x1F1FA, 0x1F1F8, 0x1F1EB, 0x1F1F7});
+    CHECK(cl(four, 0) == 2);
+    CHECK(cl(four, 2) == 2);
+    // Indicator followed by a non-indicator: single cluster.
+    CHECK(cl(cps({0x1F1FA, 'x'}), 0) == 1);
+    // Indicator + VS16 (some files carry flags with VS16): attaches.
+    CHECK(cl(cps({0x1F1FA, 0xFE0F, 0x1F1F8}), 0) == 3);
+}
 
-    // Skin tone modifier.
-    expectCluster("skin", cps({0x1F44Du, 0x1F3FBu}), 0, true, 1967, 2);
+// ---------------------------------------------------------------------------
+// Tag sequences (subdivision flags).
+// ---------------------------------------------------------------------------
 
-    // ZWJ chains.
-    expectCluster("family 5", cps({0x1F468u, 0x200Du, 0x1F469u, 0x200Du, 0x1F467u}), 0, true, 2022,
-                  5);
-    expectCluster("family 7",
-                  cps({0x1F468u, 0x200Du, 0x1F469u, 0x200Du, 0x1F467u, 0x200Du, 0x1F466u}), 0, true,
-                  2023, 7);
-    // The heart of the couple carries a VS16 in the wild; it is
-    // swallowed mid-sequence.
-    expectCluster("couple with VS16", cps({0x1F469u, 0x200Du, 0x2764u, 0xFE0Fu, 0x200Du, 0x1F468u}),
-                  0, true, 2294, 6);
-    // A trailing VS16 after a matched sequence joins the cluster.
-    expectCluster("family 7 + VS16",
-                  cps({0x1F468u, 0x200Du, 0x1F469u, 0x200Du, 0x1F467u, 0x200Du, 0x1F466u, 0xFE0Fu}),
-                  0, true, 2023, 8);
+static void testTags() {
+    // England: 1F3F4 + E0067 E0062 E0065 E006E E0067 E007F.
+    const std::vector<uint32_t> eng =
+        cps({0x1F3F4, 0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067, 0xE007F});
+    CHECK(cl(eng, 0) == 7);
+    // Scotland: 1F3F4 + E0067 E0062 E0073 E0063 E0074 E007F.
+    const std::vector<uint32_t> sco =
+        cps({0x1F3F4, 0xE0067, 0xE0062, 0xE0073, 0xE0063, 0xE0074, 0xE007F});
+    CHECK(cl(sco, 0) == 7);
+    // Tag characters directly after a NON-flag base are plain text.
+    CHECK(cl(cps({'a', 0xE0067}), 0) == 0);
+    // A malformed tag run (no terminator) is still swallowed.
+    CHECK(cl(cps({0x1F3F4, 0xE0067, 0xE0062, 'x'}), 0) == 3);
+    // Stray tag characters alone do not cluster.
+    CHECK(cl(cps({0xE0067}), 0) == 0);
+}
 
-    // Invalid sequence classes: the man resolves alone; the stray
-    // joiner and woman render as text.
-    expectCluster("man ZWJ woman", cps({0x1F468u, 0x200Du, 0x1F469u}), 0, true, 596, 1);
-    expectCluster("two grins", cps({0x1F600u, 0x1F600u}), 0, true, 883, 1);
-    expectCluster("two grins tail", cps({0x1F600u, 0x1F600u}), 1, true, 883, 1);
+// ---------------------------------------------------------------------------
+// Mixed streams and boundaries.
+// ---------------------------------------------------------------------------
 
-    // The sequence stops at a separator.
-    expectCluster("grin space grin", cps({0x1F600u, 0x20u, 0x1F600u}), 0, true, 883, 1);
-    // ... and at an unmapped codepoint.
-    expectCluster("grin letter", cps({0x1F600u, 0x41u}), 0, true, 883, 1);
-
+static void testMixedStreams() {
+    // Plain text, cluster, plain text: three separate scans.
+    const std::vector<uint32_t> mix = cps({'a', 'b', 0x1F600, 'c'});
+    CHECK(cl(mix, 0) == 0);
+    CHECK(cl(mix, 1) == 0);
+    CHECK(cl(mix, 2) == 1);
+    CHECK(cl(mix, 3) == 0);
+    // Newlines are plain separators, never cluster members.
+    const std::vector<uint32_t> nl = cps({0x1F600, 0x0A, 0x1F600});
+    CHECK(cl(nl, 0) == 1);
+    CHECK(cl(nl, 1) == 0);
+    CHECK(cl(nl, 2) == 1);
+    // Space between two emoji: two clusters.
+    const std::vector<uint32_t> sp = cps({0x1F600, ' ', 0x1F44D});
+    CHECK(cl(sp, 0) == 1);
+    CHECK(cl(sp, 1) == 0);
+    CHECK(cl(sp, 2) == 1);
+    // Text + keycap + text.
+    const std::vector<uint32_t> key = cps({'x', '1', 0xFE0F, 0x20E3, 'y'});
+    CHECK(cl(key, 0) == 0);
+    CHECK(cl(key, 1) == 3);
+    CHECK(cl(key, 2) == 0); // continuation positions report plain
+    CHECK(cl(key, 4) == 0);
     // Degenerate calls.
+    CHECK(emojiClusterLength(nullptr, 3, 0) == 0);
+    CHECK(emojiClusterLength(mix.data(), 0, 0) == 0);
+    CHECK(emojiClusterLength(mix.data(), mix.size(), mix.size()) == 0);
+    CHECK(emojiClusterLength(mix.data(), mix.size(), 99) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Default emoji presentation policy.
+// ---------------------------------------------------------------------------
+
+static void testDefaultPresentation() {
+    // SMP emoji range: wholesale.
+    CHECK(isDefaultEmojiPresentation(0x1F000));
+    CHECK(isDefaultEmojiPresentation(0x1F600));
+    CHECK(isDefaultEmojiPresentation(0x1FAFF));
+    CHECK(!isDefaultEmojiPresentation(0x1FB00));
+    CHECK(!isDefaultEmojiPresentation(0x10FFFF));
+    // BMP defaults (the stable Emoji_Presentation set).
+    CHECK(isDefaultEmojiPresentation(0x231A));
+    CHECK(isDefaultEmojiPresentation(0x23E9));
+    CHECK(isDefaultEmojiPresentation(0x25B6));
+    CHECK(isDefaultEmojiPresentation(0x2648));
+    CHECK(isDefaultEmojiPresentation(0x26BD));
+    CHECK(isDefaultEmojiPresentation(0x2705));
+    CHECK(isDefaultEmojiPresentation(0x2757));
+    CHECK(isDefaultEmojiPresentation(0x27BF));
+    CHECK(isDefaultEmojiPresentation(0x2B50));
+    // BMP text-default symbols (need VS16).
+    CHECK(!isDefaultEmojiPresentation(0x2764));
+    CHECK(!isDefaultEmojiPresentation(0x2600));
+    CHECK(!isDefaultEmojiPresentation(0x00A9));
+    CHECK(!isDefaultEmojiPresentation(0x203C));
+    CHECK(!isDefaultEmojiPresentation(0x2194));
+    // 0x231C sits in the gap right after the watch pair (231A-231B).
+    CHECK(!isDefaultEmojiPresentation(0x231C));
+    CHECK(isDefaultEmojiPresentation(0x231B));
+    // Modifiers and regional indicators fall inside the wholesale SMP
+    // range (over-inclusive on purpose); the SCANNER rules (never lead
+    // a cluster, pair up, attach as continuations) are what keep them
+    // in line, not the presentation table.
+    CHECK(isDefaultEmojiPresentation(0x1F3FB));
+    CHECK(isDefaultEmojiPresentation(0x1F3FF));
+    CHECK(isDefaultEmojiPresentation(0x1F1FA));
+    // ... and they still never START clusters:
+    CHECK(cl(cps({0x1F3FB}), 0) == 0);
+    CHECK(cl(cps({0x1F3FB, 0x1F3FC}), 0) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Cluster-aware typewriter truncation.
+// ---------------------------------------------------------------------------
+
+static void testTruncate() {
+    // Plain text: exact codepoint cut.
+    TextDocument out;
+    truncateTextDocument(docOf("Hello"), 3, out);
+    CHECK(out.runs.size() == 1);
+    CHECK(out.runs[0].text == "Hel");
+    // Budget beyond the text: full copy.
+    truncateTextDocument(docOf("Hello"), 99, out);
+    CHECK(out.runs.size() == 1);
+    CHECK(out.runs[0].text == "Hello");
+    // Zero/negative budget: the document truncates to nothing (zero
+    // runs - nothing visible).
+    truncateTextDocument(docOf("Hello"), 0, out);
+    CHECK(out.runs.empty());
+    // Negative budget clamps to zero.
+    truncateTextDocument(docOf("Hello"), -5, out);
+    CHECK(out.runs.empty());
+
+    // Astral codepoints count once: "Hi \xF0\x9F\x98\x80!" (Hi grin!)
+    // = H i space grin ! = 5 codepoints.
+    const std::string grin = "Hi \xF0\x9F\x98\x80!";
+    truncateTextDocument(docOf(grin), 3, out);
+    CHECK(out.runs.size() == 1);
+    CHECK(out.runs[0].text == "Hi ");
+    truncateTextDocument(docOf(grin), 4, out);
+    CHECK(out.runs[0].text == "Hi \xF0\x9F\x98\x80");
+    truncateTextDocument(docOf(grin), 5, out);
+    CHECK(out.runs[0].text == grin);
+
+    // A cut INSIDE a family emoji shrinks to the cluster start.
+    const std::string family = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D"
+                               "\xF0\x9F\x91\xA7"; // 5 codepoints
+    truncateTextDocument(docOf(family), 3, out);
+    CHECK(out.runs.empty());
+    truncateTextDocument(docOf(family), 5, out);
+    CHECK(out.runs[0].text == family);
+    // Text + family: cut at 6 keeps the text + nothing (family needs 5
+    // more); cut at 7 keeps everything.
+    const std::string mix = "ab" + family;
+    truncateTextDocument(docOf(mix), 6, out);
+    CHECK(out.runs[0].text == "ab");
+    truncateTextDocument(docOf(mix), 7, out);
+    CHECK(out.runs[0].text == mix);
+
+    // Multi-run documents: the budget spans runs; box + align + the
+    // animation carry over verbatim. Runs AFTER the cut point are
+    // dropped entirely (not even an empty stub remains).
+    TextDocument two = docOf("one ");
+    TextRun second;
+    second.text = "two";
+    two.runs.push_back(second);
+    two.align = TextAlign::Left;
+    two.box.anchorX = 0.25;
+    truncateTextDocument(two, 5, out);
+    CHECK(out.runs.size() == 2);
+    CHECK(out.runs[0].text == "one ");
+    CHECK(out.runs[1].text == "t");
+    CHECK(out.align == TextAlign::Left);
+    CHECK(out.box.anchorX == 0.25);
+    // Everything after the cut is dropped entirely.
+    truncateTextDocument(two, 2, out);
+    CHECK(out.runs.size() == 1);
+    CHECK(out.runs[0].text == "on");
+    truncateTextDocument(two, 4, out);
+    CHECK(out.runs.size() == 1);
+    CHECK(out.runs[0].text == "one ");
+    // Newlines count as codepoints.
+    truncateTextDocument(docOf("a\nb"), 2, out);
+    CHECK(out.runs[0].text == "a\n");
+}
+
+static void testCount() {
+    CHECK(countTextCodepoints(docOf("Hello")) == 5);
+    CHECK(countTextCodepoints(docOf("")) == 0);
+    CHECK(countTextCodepoints(docOf("Hi \xF0\x9F\x98\x80")) == 4); // astral = 1
+    TextDocument two = docOf("ab");
+    TextRun second;
+    second.text = "c\nd";
+    two.runs.push_back(second);
+    CHECK(countTextCodepoints(two) == 5);
+    // Invalid bytes decode to U+FFFD (one per maximal prefix).
+    CHECK(countTextCodepoints(docOf("\xFF\xFE")) == 2);
+    CHECK(countTextCodepoints(docOf("\xE0\x80")) == 2);
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic emoji fonts: the parsers + shaper + probes pinned against
+// hand-built bytes (a minimal CBDT face, a minimal sbix face, and a
+// TrueType Collection wrapping a junk face + the CBDT face). No font
+// file is needed - the suite stays hermetic.
+// ---------------------------------------------------------------------------
+
+#include "emoji.h"
+#include "emoji_fixture.h"
+
+static void testCbdtFixtureLoad() {
+    const std::vector<uint8_t> f = fixture::buildCbdtFont(
+        fixture::fakePng(8), fixture::fakePng(7), fixture::fakePng(12), fixture::fakePng(10));
+    EmojiFont font;
+    CHECK(font.load(f.data(), f.size()));
+    CHECK(font.loaded());
+    CHECK(font.numGlyphs() == 8);
+    CHECK(font.strikePpem() == 10);
+    CHECK(font.bitDepth() == 32);
+    CHECK(font.ligatureRuleCount() == 1);
+    CHECK(font.maxLigatureSequence() == 2);
+    CHECK(!font.isSbix());
+    CHECK(font.codepointGlyph(0x1F600) == 1);
+    CHECK(font.codepointGlyph(0x1F44D) == 2);
+    CHECK(font.codepointGlyph(0x1F1FA) == 3);
+    CHECK(font.codepointGlyph(0x1F1F8) == 4);
+    CHECK(font.codepointGlyph(0x2764) == 6);
+    CHECK(font.codepointGlyph(0x41) == 8);
+    CHECK(font.codepointGlyph(0x1F601) == 0); // not mapped
+    CHECK(font.variantGlyph(0x2764, 0xFE0F) == 7);
+    CHECK(font.variantGlyph(0x2764, 0xFE0E) == 0);
+    const uint16_t flag[2] = {3, 4};
+    CHECK(font.ligatureFor(flag, 2) == 5);
+    const uint16_t tooLong[3] = {3, 4, 9};
+    CHECK(font.ligatureFor(tooLong, 3) == 0);
+    const uint16_t single[1] = {3};
+    CHECK(font.ligatureFor(single, 1) == 0);
+}
+
+static void testCbdtBitmaps() {
+    const std::vector<uint8_t> grin = fixture::fakePng(8);
+    const std::vector<uint8_t> thumbs = fixture::fakePng(7);
+    const std::vector<uint8_t> flag = fixture::fakePng(12);
+    const std::vector<uint8_t> heart = fixture::fakePng(10);
+    const std::vector<uint8_t> f = fixture::buildCbdtFont(grin, thumbs, flag, heart);
+    EmojiFont font;
+    CHECK(font.load(f.data(), f.size()));
+    EmojiFont::Bitmap bm;
+    CHECK(font.bitmapFor(1, &bm));
+    CHECK(bm.metrics.width == 10);
+    CHECK(bm.metrics.height == 10);
+    CHECK(bm.metrics.bearingX == 1);
+    CHECK(bm.metrics.bearingY == 9);
+    CHECK(bm.metrics.advance == 10);
+    CHECK(bm.ppem == 10);
+    CHECK(bm.format == 0);
+    CHECK(bm.dataLen == grin.size());
+    CHECK(bm.data != nullptr);
+    CHECK(std::memcmp(bm.data, grin.data(), grin.size()) == 0);
+    CHECK(bm.mirror == false);
+    CHECK(font.bitmapFor(2, &bm));
+    CHECK(bm.metrics.width == 9 && bm.metrics.height == 9 && bm.metrics.advance == 9);
+    CHECK(bm.dataLen == thumbs.size());
+    CHECK(font.bitmapFor(5, &bm));
+    CHECK(bm.metrics.width == 12 && bm.metrics.height == 8 && bm.metrics.advance == 12);
+    CHECK(bm.dataLen == flag.size());
+    CHECK(font.bitmapFor(7, &bm));
+    CHECK(bm.metrics.width == 6 && bm.metrics.height == 6 && bm.metrics.advance == 6);
+    CHECK(bm.dataLen == heart.size());
+    // Missing classes: mapped glyphs without records, glyph 0, past
+    // numGlyphs, and a degenerate call.
+    CHECK(!font.bitmapFor(3, &bm)); // regional-U: no record
+    CHECK(!font.bitmapFor(4, &bm)); // regional-S: no record
+    CHECK(!font.bitmapFor(6, &bm)); // heart base: no record
+    CHECK(!font.bitmapFor(8, &bm)); // 'A': mapped, never a bitmap
+    CHECK(!font.bitmapFor(0, &bm)); // .notdef
+    CHECK(!font.bitmapFor(9, &bm)); // == numGlyphs
+    CHECK(!font.bitmapFor(1, nullptr));
+}
+
+static void testCbdtResolve() {
+    const std::vector<uint8_t> f = fixture::buildCbdtFont(
+        fixture::fakePng(8), fixture::fakePng(7), fixture::fakePng(12), fixture::fakePng(10));
+    EmojiFont font;
+    CHECK(font.load(f.data(), f.size()));
     EmojiFont::Resolved r;
-    const std::vector<uint32_t> t = cps({0x1F600u});
-    CHECK(!theFont().resolveCluster(nullptr, 1, 0, &r));
-    CHECK(!theFont().resolveCluster(t.data(), t.size(), 1, &r)); // pos past end
-    CHECK(!theFont().resolveCluster(t.data(), 0, 0, &r));
-    CHECK(!theFont().resolveCluster(t.data(), t.size(), 0, nullptr));
+    // A single default-emoji-presentation codepoint.
+    const uint32_t grin[1] = {0x1F600};
+    CHECK(font.resolveCluster(grin, 1, 0, &r));
+    CHECK(r.glyph == 1);
+    CHECK(r.codepoints == 1);
+    // The flag ligature.
+    const uint32_t flag[2] = {0x1F1FA, 0x1F1F8};
+    CHECK(font.resolveCluster(flag, 2, 0, &r));
+    CHECK(r.glyph == 5);
+    CHECK(r.codepoints == 2);
+    // The flag ligature with a TRAILING VS16 (consumed into the cluster).
+    const uint32_t flagVs[3] = {0x1F1FA, 0x1F1F8, 0xFE0F};
+    CHECK(font.resolveCluster(flagVs, 3, 0, &r));
+    CHECK(r.glyph == 5);
+    CHECK(r.codepoints == 3);
+    // VS16 forcing presentation via the fmt14 variant mapping.
+    const uint32_t heart[2] = {0x2764, 0xFE0F};
+    CHECK(font.resolveCluster(heart, 2, 0, &r));
+    CHECK(r.glyph == 7);
+    CHECK(r.codepoints == 2);
+    // Text presentation selector does NOT force emoji.
+    const uint32_t heartText[2] = {0x2764, 0xFE0E};
+    CHECK(!font.resolveCluster(heartText, 2, 0, &r));
+    // Plain text and separators never resolve.
+    const uint32_t letter[1] = {0x41};
+    CHECK(!font.resolveCluster(letter, 1, 0, &r));
+    const uint32_t space[1] = {0x20};
+    CHECK(!font.resolveCluster(space, 1, 0, &r));
+    // An unmapped skin-tone modifier after a mapped base: the cluster
+    // ends at the base (the modifier is text the caller handles).
+    const uint32_t skin[2] = {0x1F44D, 0x1F3FB};
+    CHECK(font.resolveCluster(skin, 2, 0, &r));
+    CHECK(r.glyph == 2);
+    CHECK(r.codepoints == 1);
+    // Degenerate calls.
+    CHECK(!font.resolveCluster(nullptr, 1, 0, &r));
+    CHECK(!font.resolveCluster(grin, 1, 1, &r));
+    CHECK(!font.resolveCluster(grin, 0, 0, &r));
+    CHECK(!font.resolveCluster(grin, 1, 0, nullptr));
 }
 
-// ---------------------------------------------------------------------------
-// Bitmap records
-// ---------------------------------------------------------------------------
+static void testSbixFixture() {
+    const std::vector<uint8_t> png = fixture::fakePng(20);
+    const std::vector<uint8_t> f = fixture::buildSbixFont(png);
+    EmojiFont font;
+    CHECK(font.load(f.data(), f.size()));
+    CHECK(font.loaded());
+    CHECK(font.isSbix());
+    CHECK(font.numGlyphs() == 6);
+    CHECK(font.strikePpem() == 20);
+    CHECK(font.ligatureRuleCount() == 0); // no GSUB table at all
+    CHECK(font.codepointGlyph(0x1F600) == 1);
+    CHECK(font.codepointGlyph(0x1F601) == 2);
+    CHECK(font.codepointGlyph(0x1F602) == 3);
+    CHECK(font.codepointGlyph(0x1F603) == 4);
+    CHECK(font.codepointGlyph(0x1F604) == 5);
+    CHECK(font.codepointGlyph(0x1F605) == 0);
 
-static void testBitmaps() {
-    const EmojiFont &font = theFont();
+    // glyph 1: the 'png ' record with hmtx-scaled advance.
+    EmojiFont::Bitmap bm;
+    CHECK(font.bitmapFor(1, &bm));
+    CHECK(bm.format == 0x706E6720u); // 'png '
+    CHECK(bm.metrics.width == 0);    // decode-dependent, unknown here
+    CHECK(bm.metrics.height == 0);
+    CHECK(bm.metrics.bearingX == 1); // originOffsetX
+    CHECK(bm.metrics.advance == 20); // hmtx 1000 units * 20 / 1000
+    CHECK(bm.ppem == 20);
+    CHECK(bm.originY == -2); // originOffsetY
+    CHECK(bm.mirror == false);
+    CHECK(bm.dataLen == png.size());
+    CHECK(std::memcmp(bm.data, png.data(), png.size()) == 0);
+    // glyph 2: 'dupe' -> glyph 1's record.
+    CHECK(font.bitmapFor(2, &bm));
+    CHECK(bm.format == 0x706E6720u);
+    CHECK(bm.metrics.bearingX == 1);
+    CHECK(bm.metrics.advance == 20); // dupe resolves THEN scales hmtx
+    CHECK(bm.dataLen == png.size());
+    CHECK(bm.mirror == false);
+    // glyph 3: 'flip' + 'dupe' -> mirrored glyph 1.
+    CHECK(font.bitmapFor(3, &bm));
+    CHECK(bm.format == 0x706E6720u);
+    CHECK(bm.mirror == true);
+    CHECK(bm.dataLen == png.size());
+    // glyph 4 (zero-length) / glyph 5 ('tiff') / degenerates: missing.
+    CHECK(!font.bitmapFor(4, &bm));
+    CHECK(!font.bitmapFor(5, &bm));
+    CHECK(!font.bitmapFor(0, &bm));
+    CHECK(!font.bitmapFor(6, &bm)); // == numGlyphs
 
-    EmojiFont::Bitmap b;
-    CHECK(font.bitmapFor(883, &b)); // grinning face
-    CHECK(b.metrics.width == 136);
-    CHECK(b.metrics.height == 128);
-    CHECK(b.metrics.bearingX == 0);
-    CHECK(b.metrics.bearingY == 101);
-    CHECK(b.metrics.advance == 136);
-    CHECK(b.ppem == 109);
-    CHECK(b.pngLen == 3390);
-    // The payload IS a PNG (the acceptance rule for every record).
-    CHECK(b.png != nullptr);
-    CHECK(b.png[0] == 0x89 && b.png[1] == 0x50 && b.png[2] == 0x4E && b.png[3] == 0x47);
-    CHECK(b.png[4] == 0x0D && b.png[5] == 0x0A && b.png[6] == 0x1A && b.png[7] == 0x0A);
-
-    // A ligature glyph's bitmap (family of four).
-    CHECK(font.bitmapFor(2023, &b));
-    CHECK(b.pngLen == 1645);
-    CHECK(b.metrics.width == 136 && b.metrics.height == 128);
-
-    // Flag and heart records.
-    CHECK(font.bitmapFor(1772, &b)); // the US flag ligature glyph
-    CHECK(b.pngLen > 0);
-    CHECK(b.metrics.width == 136 && b.metrics.height == 128);
-    CHECK(b.png[0] == 0x89 && b.png[1] == 0x50); // PNG signature
-    CHECK(font.bitmapFor(168, &b));
-    CHECK(b.pngLen == 1145);
-
-    // Glyphs without bitmaps: .notdef, the joiner, the range gap, and
-    // ids outside the font.
-    CHECK(!font.bitmapFor(0, &b));
-    CHECK(!font.bitmapFor(18, &b));   // ZWJ glyph: mapped, never drawn
-    CHECK(!font.bitmapFor(1444, &b)); // hole between subtable ranges
-    CHECK(!font.bitmapFor(4027, &b)); // == numGlyphs: out of range
-    CHECK(!font.bitmapFor(5000, &b));
-    CHECK(!font.bitmapFor(883, nullptr));
+    // No GSUB: the shaper resolves SINGLES only (a family sequence
+    // falls back to per-codepoint bitmaps in the app layer).
+    EmojiFont::Resolved r;
+    const uint32_t grin[1] = {0x1F600};
+    CHECK(font.resolveCluster(grin, 1, 0, &r));
+    CHECK(r.glyph == 1);
+    CHECK(r.codepoints == 1);
+    const uint32_t duo[2] = {0x1F600, 0x1F601};
+    CHECK(font.resolveCluster(duo, 2, 0, &r)); // base single, then stops
+    CHECK(r.glyph == 1);
+    CHECK(r.codepoints == 1);
+    const uint32_t unmapped[1] = {0x1F1FA};
+    CHECK(!font.resolveCluster(unmapped, 1, 0, &r));
 }
 
-// ---------------------------------------------------------------------------
-// Strike scaling
-// ---------------------------------------------------------------------------
+static void testSbixDegenerate() {
+    const std::vector<uint8_t> png = fixture::fakePng(20);
+    const std::vector<uint8_t> f = fixture::buildSbixFont(png);
+    // Rename 'hmtx' in the directory: the sbix route then refuses to
+    // load (no advances, no placement math).
+    {
+        std::vector<uint8_t> g = f;
+        bool patched = false;
+        for (size_t i = 12; i + 16 <= g.size(); i += 16) {
+            if (std::memcmp(g.data() + i, "hmtx", 4) == 0) {
+                g[i + 3] = 'z';
+                patched = true;
+                break;
+            }
+        }
+        CHECK(patched);
+        EmojiFont font;
+        CHECK(!font.load(g.data(), g.size()));
+    }
+    // Self-referencing 'dupe' cycle: the depth guard reads it as
+    // missing (never hangs, never garbage).
+    {
+        std::vector<uint8_t> g = f;
+        const uint8_t pat[4] = {'d', 'u', 'p', 'e'};
+        const auto it = std::search(g.begin(), g.end(), pat, pat + 4);
+        CHECK(it != g.end());
+        const size_t target = size_t(it - g.begin()) + 4; // u16 right after the tag
+        CHECK(g[target] == 0 && g[target + 1] == 1);
+        g[target + 1] = 2; // dupe -> glyph 2 (itself)
+        EmojiFont font;
+        CHECK(font.load(g.data(), g.size()));
+        EmojiFont::Bitmap bm;
+        CHECK(!font.bitmapFor(2, &bm)); // cycle: missing
+        CHECK(font.bitmapFor(1, &bm));  // untouched
+    }
+    // Truncations: load fails (never crashes).
+    {
+        for (size_t cut : {size_t(0), size_t(11), size_t(12), size_t(64), f.size() / 2}) {
+            EmojiFont font;
+            std::vector<uint8_t> g(f.begin(), f.begin() + long(std::min(cut, f.size())));
+            const bool ok = font.load(g.data(), g.size());
+            CHECK(ok == (cut == f.size()));
+            CHECK(font.codepointGlyph(0x1F600) == 0 || cut == f.size());
+        }
+        EmojiFont font;
+        CHECK(font.load(f.data(), f.size())); // recovery: a good re-load works
+    }
+}
+
+static void testTtcAndProbes() {
+    const std::vector<uint8_t> cbdt = fixture::buildCbdtFont(
+        fixture::fakePng(8), fixture::fakePng(7), fixture::fakePng(12), fixture::fakePng(10));
+    const std::vector<uint8_t> sbix = fixture::buildSbixFont(fixture::fakePng(20));
+    const std::vector<uint8_t> junk = fixture::buildJunkSfnt();
+    const std::vector<uint8_t> ttc = fixture::wrapTtc(junk, cbdt);
+
+    // The collection: load skips the junk face and keeps the emoji one.
+    EmojiFont font;
+    CHECK(font.load(ttc.data(), ttc.size()));
+    CHECK(font.codepointGlyph(0x1F600) == 1);
+    CHECK(font.ligatureRuleCount() == 1);
+    CHECK(font.bitmapFor(1, nullptr) == false);
+    EmojiFont::Bitmap bm;
+    CHECK(font.bitmapFor(5, &bm));
+    CHECK(bm.metrics.advance == 12);
+
+    // A collection whose EVERY sub-font is junk fails outright.
+    const std::vector<uint8_t> ttcJunk = fixture::wrapTtc(junk, junk);
+    EmojiFont none;
+    CHECK(!none.load(ttcJunk.data(), ttcJunk.size()));
+
+    // The light directory probe.
+    CHECK(sfntBitmapEmojiFormat(cbdt.data(), cbdt.size()) == EmojiFontFormat::Cbdt);
+    // A short HEAD with the real file size as the limit: the tables
+    // sit past the head, but the directory knows they exist (this is
+    // exactly how discovery probes a 10 MB font with a 64 KB read).
+    CHECK(sfntBitmapEmojiFormat(cbdt.data(), 160, int64_t(cbdt.size())) == EmojiFontFormat::Cbdt);
+    CHECK(sfntBitmapEmojiFormat(sbix.data(), 160, int64_t(sbix.size())) == EmojiFontFormat::Sbix);
+    // Without the limit, a short head sees tables "past the file".
+    CHECK(sfntBitmapEmojiFormat(cbdt.data(), 160) == EmojiFontFormat::None);
+    CHECK(sfntBitmapEmojiFormat(sbix.data(), sbix.size()) == EmojiFontFormat::Sbix);
+    CHECK(sfntBitmapEmojiFormat(ttc.data(), ttc.size()) == EmojiFontFormat::Cbdt);
+    CHECK(sfntBitmapEmojiFormat(junk.data(), junk.size()) == EmojiFontFormat::None);
+    CHECK(sfntBitmapEmojiFormat(nullptr, 0) == EmojiFontFormat::None);
+    const std::vector<uint8_t> garbage(64, 0xAB);
+    CHECK(sfntBitmapEmojiFormat(garbage.data(), garbage.size()) == EmojiFontFormat::None);
+    // A lying numTables: the light probe is lenient (a match stops the
+    // scan before the records run past the file); the full load
+    // rejects it - the malformed battery pins that).
+    {
+        std::vector<uint8_t> g = cbdt;
+        g[4] = 0;
+        g[5] = 250; // numTables = 250, way past the file
+        CHECK(sfntBitmapEmojiFormat(g.data(), g.size()) == EmojiFontFormat::Cbdt);
+    }
+
+    // Family names.
+    CHECK(sfntFamilyName(cbdt.data(), cbdt.size()) == "Fixture CBDT");
+    CHECK(sfntFamilyName(sbix.data(), sbix.size()) == "Fixture SBIX");
+    CHECK(sfntFamilyName(ttc.data(), ttc.size()) == "Fixture CBDT");
+    CHECK(sfntFamilyName(junk.data(), junk.size()).empty());
+    CHECK(sfntFamilyName(nullptr, 0).empty());
+}
+
+static void testCbdtMalformedBattery() {
+    const std::vector<uint8_t> f = fixture::buildCbdtFont(
+        fixture::fakePng(8), fixture::fakePng(7), fixture::fakePng(12), fixture::fakePng(10));
+    // Truncation at strategic offsets never crashes; lookups fail.
+    for (size_t cut : {size_t(0), size_t(11), size_t(12), size_t(28), size_t(100), size_t(200),
+                       f.size() / 3, f.size() / 2}) {
+        EmojiFont font;
+        std::vector<uint8_t> g(f.begin(), f.begin() + long(std::min(cut, f.size())));
+        font.load(g.data(), g.size());
+        CHECK(font.codepointGlyph(0x1F600) == 0);
+        CHECK(font.ligatureRuleCount() == 0);
+        EmojiFont::Bitmap bm;
+        CHECK(!font.bitmapFor(1, &bm));
+        EmojiFont::Resolved r;
+        const uint32_t grin[1] = {0x1F600};
+        CHECK(!font.resolveCluster(grin, 1, 0, &r));
+    }
+    // All-0xFF and a lying header.
+    {
+        std::vector<uint8_t> g(f.size(), 0xFF);
+        EmojiFont font;
+        CHECK(!font.load(g.data(), g.size()));
+    }
+    {
+        std::vector<uint8_t> g = f;
+        g[5] = 250; // numTables beyond the file
+        EmojiFont font;
+        CHECK(!font.load(g.data(), g.size()));
+    }
+    // Recovery: after any failure, a good load on the SAME object works.
+    {
+        EmojiFont font;
+        std::vector<uint8_t> bad(f.size(), 0xFF);
+        CHECK(!font.load(bad.data(), bad.size()));
+        CHECK(font.load(f.data(), f.size()));
+        CHECK(font.codepointGlyph(0x1F600) == 1);
+    }
+    // Degenerate load arguments.
+    {
+        EmojiFont font;
+        CHECK(!font.load(nullptr, 100));
+        CHECK(!font.load(f.data(), 0));
+        CHECK(!font.load(nullptr, 0));
+    }
+}
 
 static void testScaling() {
-    // (v * size + ppem/2) / ppem, floored at 0 - hand-derived.
-    CHECK(emojiScaleStrike(136, 72, 109) == 90); // (9792+54)/109
-    CHECK(emojiScaleStrike(101, 72, 109) == 67); // (7272+54)/109
-    CHECK(emojiScaleStrike(27, 72, 109) == 18);  // (1944+54)/109
-    CHECK(emojiScaleStrike(136, 109, 109) == 136);
-    CHECK(emojiScaleStrike(136, 54, 109) == 67); // (7344+54)/109 = 67
-    CHECK(emojiScaleStrike(136, 1, 109) == 1);
-    CHECK(emojiScaleStrike(50, 218, 109) == 100); // (10900+54)/109
-    CHECK(emojiScaleStrike(0, 72, 109) == 0);
-    CHECK(emojiScaleStrike(136, 0, 109) == 0);
-    CHECK(emojiScaleStrike(136, 72, 0) == 0);
-    CHECK(emojiScaleStrike(136, -5, 109) == 0);
-    // Font-math consistency: the strike advance (136 px at ppem 109)
-    // equals the hmtx advance (2550/2048 em) evaluated at 109 px:
-    // 2550*109/2048 = 135.7 -> 136; scaling the STRIKE to the same
-    // size is the identity, which is the property the renderer relies
-    // on (one scale factor, metrics and pixels agree).
-    CHECK(emojiScaleStrike(136, 109, 109) == 136);
+    CHECK(emojiScaleStrike(0, 40, 20) == 0);
+    CHECK(emojiScaleStrike(20, 40, 20) == 40);
+    CHECK(emojiScaleStrike(10, 40, 10) == 40);
+    CHECK(emojiScaleStrike(11, 40, 10) == 44);   // (440 + 5) / 10
+    CHECK(emojiScaleStrike(100, 25, 200) == 13); // (2500 + 100) / 200
+    CHECK(emojiScaleStrike(-5, 40, 10) == 0);
+    CHECK(emojiScaleStrike(5, 40, 0) == 0);
+    CHECK(emojiScaleStrike(5, 0, 10) == 0);
 }
 
 // ---------------------------------------------------------------------------
-// Presentation policy
+// Layout cluster atomicity: the ShapedRun annotations keep the layout
+// engine from splitting a cluster mid-sequence, and mismatched
+// annotation tables make a run unshapable (the same rule as mismatched
+// advance tables).
 // ---------------------------------------------------------------------------
 
-static void testPresentationPolicy() {
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x1F600u));
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x1F1E6u)); // lone regional indicator
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x1F3FBu));
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x1FAFFu));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x1FB00u));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x1EFFFu));
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x231Au)); // watch
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x2615u)); // coffee
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x2648u)); // zodiac
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x2653u));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x2654u));
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x2B50u)); // star
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x2705u));
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x2757u));
-    CHECK(EmojiFont::isDefaultEmojiPresentation(0x26A1u));
-    // Text-presentation BMP symbols need VS16 (Unicode's rule).
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x2764u));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x263Au));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x41u));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0xFE0Fu));
-    CHECK(!EmojiFont::isDefaultEmojiPresentation(0x200Du));
-}
-
-// ---------------------------------------------------------------------------
-// Layout: clusters are atomic under hard splits
-// ---------------------------------------------------------------------------
-
-// A shaped run of n codepoints with the given advances + cluster
-// annotation (a single cluster covering [0, n) when clustered=true).
 static ShapedRun shapeClustered(int n, const std::vector<int> &advances, bool clustered) {
     ShapedRun run;
     run.runIndex = 0;
-    run.codepoints.resize(n);
+    run.codepoints.resize(size_t(n));
     for (int i = 0; i < n; ++i) {
         run.codepoints[size_t(i)] = 0x100u + uint32_t(i); // plain non-space codepoints
     }
@@ -470,8 +777,7 @@ static void testLayoutClusterAtomic() {
         CHECK(lay.slices[0].cpCount == 1);
         CHECK(lay.slices[1].cpCount == 2);
     }
-    // A cluster that FITS the wrap width: no split either way (the
-    // annotation changes nothing).
+    // A cluster that FITS the wrap width: no split either way.
     {
         TextDocument d = oneRunDoc();
         d.box.wrap = 0.1;
@@ -511,25 +817,40 @@ static void testLayoutClusterAtomic() {
         CHECK(lay.lineCount == 1);
         CHECK(lay.textWidth == 90);
     }
+    // emojiGlyphs alone (no clusterStarts) is legal too: every
+    // codepoint is its own cluster, the bitmap positions ride along.
+    {
+        TextDocument d = oneRunDoc();
+        std::vector<ShapedRun> shaped;
+        shaped.push_back(shapeClustered(3, {50, 40, 0}, false));
+        shaped[0].emojiGlyphs.assign(3, 0);
+        shaped[0].emojiGlyphs[1] = 42;
+        const TextLayout lay = layoutText(d, shaped, 600, 100);
+        CHECK(lay.lineCount == 1);
+        CHECK(lay.textWidth == 90);
+        CHECK(lay.slices.size() == 1);
+    }
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
-
 int main() {
-    if (fontBytes().empty()) {
-        return 1; // loadFontBytes already printed the fatal message
-    }
-    testLoad();
-    testMalformed();
-    testCmap();
-    testLigatures();
-    testResolveSingles();
-    testResolveSequences();
-    testBitmaps();
+    testSingles();
+    testKeycaps();
+    testSkinTones();
+    testJoinerChains();
+    testFlags();
+    testTags();
+    testMixedStreams();
+    testDefaultPresentation();
+    testTruncate();
+    testCount();
+    testCbdtFixtureLoad();
+    testCbdtBitmaps();
+    testCbdtResolve();
+    testSbixFixture();
+    testSbixDegenerate();
+    testTtcAndProbes();
+    testCbdtMalformedBattery();
     testScaling();
-    testPresentationPolicy();
     testLayoutClusterAtomic();
     return testExitCode("emoji");
 }

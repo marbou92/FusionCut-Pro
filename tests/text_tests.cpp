@@ -1099,6 +1099,233 @@ static void testProjectTextRejections() {
 }
 
 // ---------------------------------------------------------------------------
+// Animation: the evaluator (progress, easing, clamping) and the block
+// rect the box animations anchor to. Hand-derived expectations from the
+// exact formulas: smoothstep(t) = t^2 (3-2t), easeOutBack(0.5) =
+// 1 + 2.70158*(-0.125) + 1.70158*0.25 = 1.087697.
+// ---------------------------------------------------------------------------
+
+static void testAnimationIdentity() {
+    TextAnimation none;
+    CHECK(!hasTextAnimation(none));
+    const TextAnimState st = textAnimationAt(none, 0, 100, 10);
+    CHECK(st.alpha == 1.0);
+    CHECK(st.offsetX == 0.0);
+    CHECK(st.offsetY == 0.0);
+    CHECK(st.scale == 1.0);
+    CHECK(st.revealCodepoints == -1);
+    CHECK(st.wipe == 1.0);
+
+    // A kind with zero duration is inert.
+    TextAnimation inert;
+    inert.inKind = TextAnimKind::Fade;
+    inert.outKind = TextAnimKind::Slide;
+    CHECK(!hasTextAnimation(inert));
+    const TextAnimState st2 = textAnimationAt(inert, 5, 100, 10);
+    CHECK(st2.alpha == 1.0);
+    CHECK(st2.offsetX == 0.0);
+
+    // clipFrame < 0 renders the settled state.
+    TextAnimation fade;
+    fade.inKind = TextAnimKind::Fade;
+    fade.inFrames = 10;
+    const TextAnimState st3 = textAnimationAt(fade, -1, 100, 10);
+    CHECK(st3.alpha == 0.0); // clamped: before the clip = pre-animation
+    // duration 0 = identity.
+    const TextAnimState st4 = textAnimationAt(fade, 5, 0, 10);
+    CHECK(st4.alpha == 1.0);
+}
+
+static void testAnimationFade() {
+    TextAnimation anim;
+    anim.inKind = TextAnimKind::Fade;
+    anim.inFrames = 10;
+    anim.outKind = TextAnimKind::Fade;
+    anim.outFrames = 10;
+    const int64_t dur = 100;
+
+    // Entrance: alpha = smoothstep(frame/10).
+    CHECK(textAnimationAt(anim, 0, dur, 0).alpha == 0.0);
+    CHECK(std::fabs(textAnimationAt(anim, 5, dur, 0).alpha - 0.5) < 1.0e-12);
+    CHECK(textAnimationAt(anim, 10, dur, 0).alpha == 1.0);
+    CHECK(textAnimationAt(anim, 50, dur, 0).alpha == 1.0);
+    // Exit: alpha = smoothstep((dur-frame)/10) at the tail.
+    CHECK(textAnimationAt(anim, 95, dur, 0).alpha == 0.5);
+    CHECK(textAnimationAt(anim, 100, dur, 0).alpha == 0.0);
+    // Fifth of the entrance: smoothstep(0.2) = 0.04 * 2.6 = 0.104.
+    CHECK(std::fabs(textAnimationAt(anim, 2, dur, 0).alpha - 0.104) < 1.0e-12);
+    // Both sides multiply: frame 5 with a 10-frame exit window from 15.
+    TextAnimation both;
+    both.inKind = TextAnimKind::Fade;
+    both.inFrames = 10;
+    both.outKind = TextAnimKind::Fade;
+    both.outFrames = 10;
+    // inT at frame 7 = 0.7 -> smoothstep = 0.49*1.6 = 0.784; outT=1.
+    CHECK(std::fabs(textAnimationAt(both, 7, dur, 0).alpha - 0.784) < 1.0e-12);
+}
+
+static void testAnimationSlide() {
+    TextAnimation anim;
+    anim.inKind = TextAnimKind::Slide;
+    anim.inFrames = 10;
+    anim.outKind = TextAnimKind::Slide;
+    anim.outFrames = 10;
+    anim.dir = TextAnimDir::Left;
+    const int64_t dur = 100;
+
+    // Enter from the LEFT: offset starts one full frame-width left.
+    const TextAnimState s0 = textAnimationAt(anim, 0, dur, 0);
+    CHECK(s0.offsetX == -1.0);
+    CHECK(s0.offsetY == 0.0);
+    // Halfway (smoothstep 0.5): half a frame off.
+    CHECK(std::fabs(textAnimationAt(anim, 5, dur, 0).offsetX + 0.5) < 1.0e-12);
+    // Settled.
+    CHECK(textAnimationAt(anim, 10, dur, 0).offsetX == 0.0);
+    // Exit toward the OPPOSITE (right) edge.
+    CHECK(std::fabs(textAnimationAt(anim, 95, dur, 0).offsetX - 0.5) < 1.0e-12);
+    CHECK(textAnimationAt(anim, 100, dur, 0).offsetX == 1.0);
+
+    // Direction map: Right mirrors X; Up enters from BELOW (+Y);
+    // Down enters from above (-Y).
+    anim.dir = TextAnimDir::Right;
+    CHECK(textAnimationAt(anim, 0, dur, 0).offsetX == 1.0);
+    CHECK(textAnimationAt(anim, 0, dur, 0).offsetY == 0.0);
+    anim.dir = TextAnimDir::Up;
+    CHECK(textAnimationAt(anim, 0, dur, 0).offsetY == 1.0);
+    CHECK(textAnimationAt(anim, 0, dur, 0).offsetX == 0.0);
+    anim.dir = TextAnimDir::Down;
+    CHECK(textAnimationAt(anim, 0, dur, 0).offsetY == -1.0);
+    // Exit toward the opposite edge of Up = downward is... Up's opposite
+    // is Down: exit offset = -(+1) = -1 at the very end.
+    anim.dir = TextAnimDir::Up;
+    CHECK(textAnimationAt(anim, 100, dur, 0).offsetY == -1.0);
+}
+
+static void testAnimationPop() {
+    TextAnimation anim;
+    anim.inKind = TextAnimKind::Pop;
+    anim.inFrames = 10;
+    anim.outKind = TextAnimKind::Pop;
+    anim.outFrames = 10;
+    const int64_t dur = 100;
+
+    CHECK(textAnimationAt(anim, 10, dur, 0).scale == 1.0);
+    // easeOutBack(0) is 1 - c3 + c1, which cancels to 0 in exact math
+    // but leaves a tiny float residual - compare with tolerance.
+    CHECK(std::fabs(textAnimationAt(anim, 0, dur, 0).scale) < 1.0e-9);
+    // The overshoot: easeOutBack(0.5) > 1.
+    const double mid = textAnimationAt(anim, 5, dur, 0).scale;
+    CHECK(std::fabs(mid - 1.087697) < 1.0e-5);
+    CHECK(mid > 1.0);
+    // Pop-out shrinks smoothly (no undershoot).
+    CHECK(textAnimationAt(anim, 95, dur, 0).scale == 0.5);
+    CHECK(textAnimationAt(anim, 100, dur, 0).scale == 0.0);
+    // In+out multiply (settled in, half out).
+    CHECK(std::fabs(textAnimationAt(anim, 50, dur, 0).scale - 1.0) < 1.0e-12);
+}
+
+static void testAnimationTypewriter() {
+    TextAnimation anim;
+    anim.inKind = TextAnimKind::Typewriter;
+    anim.inFrames = 10;
+    anim.outKind = TextAnimKind::Typewriter;
+    anim.outFrames = 5;
+    const int64_t dur = 20;
+    const int64_t total = 20;
+
+    // Entrance: linear reveal.
+    CHECK(textAnimationAt(anim, 0, dur, total).revealCodepoints == 0);
+    CHECK(textAnimationAt(anim, 5, dur, total).revealCodepoints == 10);
+    CHECK(textAnimationAt(anim, 10, dur, total).revealCodepoints == -1); // all
+    CHECK(textAnimationAt(anim, 15, dur, total).revealCodepoints == -1);
+    // Exit: characters vanish from the end backward (fraction of total).
+    CHECK(textAnimationAt(anim, 18, dur, total).revealCodepoints == 8);
+    CHECK(textAnimationAt(anim, 19, dur, total).revealCodepoints == 4);
+    CHECK(textAnimationAt(anim, 20, dur, total).revealCodepoints == 0);
+    // Both sides: the minimum fraction wins (in 10, out 5, frame 2:
+    // inT=0.2 -> 4 codepoints; outT = 18/5 clamped to 1).
+    CHECK(textAnimationAt(anim, 2, dur, total).revealCodepoints == 4);
+    // Non-integer reveal rounds: total 7, inT 0.5 -> llround(3.5) = 4.
+    CHECK(textAnimationAt(anim, 5, dur, 7).revealCodepoints == 4);
+    // The reveal never sets alpha/wipe/scale.
+    const TextAnimState st = textAnimationAt(anim, 5, dur, total);
+    CHECK(st.alpha == 1.0 && st.wipe == 1.0 && st.scale == 1.0);
+    CHECK(st.offsetX == 0.0 && st.offsetY == 0.0);
+}
+
+static void testAnimationWipe() {
+    TextAnimation anim;
+    anim.inKind = TextAnimKind::Wipe;
+    anim.inFrames = 10;
+    anim.outKind = TextAnimKind::Wipe;
+    anim.outFrames = 10;
+    const int64_t dur = 100;
+
+    CHECK(textAnimationAt(anim, 0, dur, 0).wipe == 0.0);
+    CHECK(textAnimationAt(anim, 5, dur, 0).wipe == 0.5);
+    CHECK(textAnimationAt(anim, 10, dur, 0).wipe == 1.0);
+    CHECK(textAnimationAt(anim, 95, dur, 0).wipe == 0.5);
+    CHECK(textAnimationAt(anim, 100, dur, 0).wipe == 0.0);
+}
+
+static void testAnimationDocumentEquality() {
+    TextDocument a = singleRunDoc("Hi");
+    TextDocument b = singleRunDoc("Hi");
+    CHECK(a == b);
+    b.animation.inKind = TextAnimKind::Fade;
+    b.animation.inFrames = 12;
+    CHECK(a != b);
+    a.animation.inKind = TextAnimKind::Fade;
+    a.animation.inFrames = 12;
+    CHECK(a == b);
+    a.animation.dir = TextAnimDir::Up;
+    CHECK(a != b);
+    b.animation.dir = TextAnimDir::Up;
+    a.animation.outKind = TextAnimKind::Pop;
+    a.animation.outFrames = 6;
+    CHECK(a != b);
+}
+
+static void testLayoutBlockRect() {
+    // Without a background the block rect is the text rect itself.
+    {
+        TextDocument doc = singleRunDoc("AB");
+        std::vector<ShapedRun> shaped;
+        shaped.push_back(shapeMono("AB"));
+        const TextLayout lay = layoutText(doc, shaped, 100, 100);
+        CHECK(lay.blockW == lay.textWidth);
+        CHECK(lay.blockH == lay.textHeight);
+        CHECK(lay.blockX + lay.blockW / 2 == 100 * 0.5); // centered anchor
+        CHECK(lay.bgW == 0);                             // bg fields stay background-gated
+    }
+    // With a background the block rect includes the padding (600/60=10).
+    {
+        TextDocument doc = singleRunDoc("AB");
+        doc.box.background = true;
+        std::vector<ShapedRun> shaped;
+        shaped.push_back(shapeMono("AB"));
+        const TextLayout lay = layoutText(doc, shaped, 600, 600);
+        CHECK(lay.blockW == lay.bgW);
+        CHECK(lay.blockH == lay.bgH);
+        CHECK(lay.blockX == lay.bgX);
+        CHECK(lay.blockY == lay.bgY);
+        CHECK(lay.bgW == lay.textWidth + 20);
+        CHECK(lay.bgH == lay.textHeight + 20);
+    }
+    // Off-frame anchor: the block rect follows without clamping.
+    {
+        TextDocument doc = singleRunDoc("AB");
+        doc.box.anchorX = 0.0;
+        doc.box.anchorY = 0.0;
+        std::vector<ShapedRun> shaped;
+        shaped.push_back(shapeMono("AB"));
+        const TextLayout lay = layoutText(doc, shaped, 100, 100);
+        CHECK(lay.blockX == 0 - lay.blockW / 2);
+        CHECK(lay.blockY == 0 - lay.blockH / 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 int main() {
     testUtf8Valid();
@@ -1122,5 +1349,13 @@ int main() {
     testProjectTextRoundTrip();
     testProjectOldFormat();
     testProjectTextRejections();
+    testAnimationIdentity();
+    testAnimationFade();
+    testAnimationSlide();
+    testAnimationPop();
+    testAnimationTypewriter();
+    testAnimationWipe();
+    testAnimationDocumentEquality();
+    testLayoutBlockRect();
     return testExitCode("text");
 }
