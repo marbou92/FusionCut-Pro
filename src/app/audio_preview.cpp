@@ -7,19 +7,37 @@
 #include <thread>
 #include <vector>
 
-namespace fc {
-
-#ifdef Q_OS_WIN
-
+// SYSTEM HEADERS MUST STAY AT GLOBAL SCOPE (portable-build engineering
+// find - this file's Windows path had NEVER been compiled when it broke
+// the first portable run: an #include inside a namespace pastes the
+// whole header INTO it, so the original placement below "namespace fc {"
+// defined fc::std::mutex, fc::std::condition_variable and the entire
+// WASAPI surface inside the project namespace). The Linux build gates
+// could never catch that - the platform gate is closed there - and no
+// MinGW compile of this file existed before that run; the first one
+// rejected the libstdc++ headers instantiated inside fc (gcc resolves
+// std names through fc::std first there, where half of them do not
+// exist). The winmock offline audit now covers this file, so the class
+// of error cannot reach CI silently again. The gate is _WIN32 - the
+// compiler's own predefined macro, NOT Q_OS_WIN (which only a Qt header
+// can define, and after the unused QString include was removed this
+// file includes none). Standard headers come FIRST: Win32 headers are
+// macro-heavy, std first keeps them clean.
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
-#include <audioclient.h>
-#include <mmdeviceapi.h>
-#include <windows.h>
-
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+
+#include <audioclient.h>
+#include <mmdeviceapi.h>
+#include <windows.h>
+#endif
+
+namespace fc {
+
+#if defined(_WIN32)
 
 namespace {
 
@@ -386,7 +404,7 @@ double AudioPreview::playedSeconds() const {
     return double(impl_->playedFrames.load()) / double(impl_->rate);
 }
 
-#else // !Q_OS_WIN
+#else // !_WIN32
 
 struct AudioPreview::Impl {};
 
@@ -413,6 +431,6 @@ double AudioPreview::playedSeconds() const {
     return 0.0;
 }
 
-#endif // Q_OS_WIN
+#endif // _WIN32
 
 } // namespace fc

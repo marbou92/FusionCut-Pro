@@ -141,6 +141,24 @@ repo).
 - Light font probing needs the REAL file length: table records
   routinely point past any short head, so offset bounds checks use
   the file size, not the bytes actually read.
+- The portable (MinGW) build died on `audio_preview.cpp`, and the
+  failure class explains why only it could: the WASAPI and `<mutex>`
+  includes sat INSIDE `namespace fc`, pasting the entire headers into
+  the project namespace (`fc::std::mutex`, `fc::IUnknown`), after
+  which gcc resolves std names through `fc::std` first - where half
+  of them do not exist. No Linux build could ever see it (the
+  platform gate is closed there), and the file had never reached a
+  MinGW compile before: it was the first new Windows-API source since
+  the winmock offline-audit discipline existed, and that discipline
+  was not extended to it. Fixed by hoisting every system include to
+  global scope; the platform gate became `_WIN32` (the compiler's own
+  macro) instead of `Q_OS_WIN` (which only a Qt header can define -
+  the unused `QString` include that incidentally provided it is gone,
+  and platform detection must not hang on an accidental include);
+  winmock now carries the WASAPI surface so this file's Windows path
+  is audited offline together with the crash-handler/diag/shim
+  files, and a namespace-pollution check on the object file (zero
+  `fc::std` / COM symbols) backs it.
 
 ### Known scope
 

@@ -5,8 +5,6 @@
 #include <functional>
 #include <memory>
 
-#include <QString>
-
 namespace fc {
 
 // ---------------------------------------------------------------------------
