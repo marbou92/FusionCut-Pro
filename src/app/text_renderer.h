@@ -82,15 +82,27 @@ int textPixelSizeClamped(const TextStyle &style);
 class EmojiPainter {
 public:
     // Reads the font file and parses it (any CBDT or sbix emoji font,
-    // a plain sfnt or a .ttc collection). Returns false (and leaves
-    // the painter empty) when the file is missing or malformed; emoji
-    // then render through the platform font stack - exactly the
+    // a plain sfnt or a .ttc collection). A file with NO bitmap tables
+    // but a readable family name (an OUTLINE emoji face, discovered by
+    // its cmap coverage) also succeeds: it contributes no bitmaps, but
+    // its family routes emoji clusters through the platform text stack
+    // (see emojiFamily). Returns false (and leaves the painter empty)
+    // when the file is missing, malformed, or nameless; emoji then
+    // render through the platform font stack - exactly the
     // no-selection behavior.
     bool load(const QString &path);
 
     bool loaded() const { return font_.loaded(); }
     const EmojiFont *font() const { return &font_; }
     QString filePath() const { return path_; }
+
+    // The picked font's own family name (empty when unknown). The
+    // shaper/renderer route emoji clusters that have no bitmap
+    // through a QFont of this family - for an outline pick that is the
+    // whole point (monochrome emoji from the picked font), for a
+    // color pick it is a tighter fallback than Qt's own for the
+    // clusters the bitmaps miss.
+    QString emojiFamily() const { return emojiFamily_; }
 
     // The decoded image for a glyph at its native (strike) size -
     // decodes CBDT PNG and sbix png/jpg payloads via QImage::fromData
@@ -113,6 +125,7 @@ private:
     std::vector<uint8_t> bytes_;
     EmojiFont font_;
     QString path_;
+    QString emojiFamily_;
     std::map<uint16_t, QImage> raw_;                    // decoded at strike size
     std::map<std::pair<uint16_t, int>, QImage> scaled_; // scaled to text size
 };

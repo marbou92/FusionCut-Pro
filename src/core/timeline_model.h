@@ -40,6 +40,17 @@ struct Clip {
     bool isText = false;
     TextDocument text;
 
+    // Audio clip fades, in timeline FRAMES at the project rate (the
+    // Effect Controls panel edits them for the selected audio clip).
+    // Linear ramps at the clip's own head/tail - click-free cuts and
+    // simple audio dissolves between adjacent clips. 0 = no fade
+    // (default; the project writer omits the keys so old files round-trip
+    // byte-identically). Applied to every clip kind's AUDIO contribution
+    // (a video+audio import yields separate clips; the fade rides the
+    // audio one).
+    int64_t fadeInFrames = 0;
+    int64_t fadeOutFrames = 0;
+
     int64_t durationFrames() const;
     int64_t timelineEnd() const { return timelineStart + durationFrames(); }
 };
@@ -56,6 +67,12 @@ struct Track {
     bool locked = false;
     bool muted = false;
     bool solo = false;
+    // Audio-strip state (the Mixer panel edits these): linear gain in
+    // dB applied to every clip on the track, pan position [-1..1]
+    // (-1 = hard left, 0 = center, +1 = hard right). The values bake
+    // into the flattened audio spans at mix time (see audio_timeline).
+    double gainDb = 0.0;
+    double pan = 0.0;
 };
 
 // one transition placed on the shared boundary of two ADJACENT
@@ -105,14 +122,37 @@ struct TransitionSample {
 // transition invariants (adjacent pair, duration within the left clip) -
 // broken pairs are dropped, shrunk left clips clamp the duration, and
 // splitting the left clip re-targets the transition to the half that owns
-// the cut. Multi-source compositing beyond topmost-wins and audio mixing
-// arrive later.
+// the cut. Audio mixing (track strips, clip fades, master) is model
+// state here and mixes in the media layer's window engine.
 class TimelineModel {
 public:
     TimelineModel() = default;
 
     void setFps(double fps);
     double fps() const { return fps_; }
+
+    // ---- audio mixing state ----
+
+    // Master fader in dB (the Mixer panel's master strip; applied after
+    // every track sum, before the hard clip). Default 0.
+    void setMasterGainDb(double db);
+    double masterGainDb() const { return masterGainDb_; }
+
+    // Sets an AUDIO track's strip state (gain/pan; the mute/solo flags
+    // ride setTrackState). Returns false on an unknown track index or a
+    // non-audio track (video/text strips carry no fader).
+    bool setTrackAudio(int index, double gainDb, double pan);
+
+    // Sets a clip's audio fades (timeline frames, >= 0). Returns false
+    // on an unknown clip. Fades beyond the clip's length clamp to the
+    // length (a fade can never extend past its own clip).
+    bool setClipAudioFades(int64_t clipId, int64_t fadeInFrames, int64_t fadeOutFrames);
+
+    // Monotonic change counter: every successful mutation (clips,
+    // tracks, transitions, audio state, fps) bumps it. Views that cache
+    // a derived form of the model (the preview's flattened audio
+    // timeline) compare this instead of re-deriving on every tick.
+    uint64_t revision() const { return revision_; }
 
     int addTrack(const std::string &name, bool isAudio);
     // inserts a track at `position` (clamped to [0,
@@ -278,6 +318,8 @@ private:
     std::vector<Clip> clips_;
     std::vector<Transition> transitions_;
     int64_t nextId_ = 1;
+    double masterGainDb_ = 0.0;
+    uint64_t revision_ = 0;
 };
 
 } // namespace fc

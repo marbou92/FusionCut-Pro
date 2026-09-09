@@ -35,6 +35,14 @@ add_executable(fc_srt_tests srt_tests.cpp)
 target_link_libraries(fc_srt_tests PRIVATE fc_core)
 add_test(NAME srt COMMAND fc_srt_tests)
 
+# Audio math (the mixing primitives every path evaluates through:
+# dB, the constant-power pan law, fades, clipping) plus the emoji
+# coverage battery and the cmap/name-table blob parsers the font
+# discovery scan counts with.
+add_executable(fc_audio_tests audio_tests.cpp)
+target_link_libraries(fc_audio_tests PRIVATE fc_core)
+add_test(NAME audio COMMAND fc_audio_tests)
+
 if(TARGET fc_media)
     add_executable(fc_media_tests
         media_tests.cpp

@@ -17,7 +17,67 @@ int64_t Clip::durationFrames() const {
 void TimelineModel::setFps(double fps) {
     if (fps > 1.0) {
         fps_ = fps;
+        ++revision_;
     }
+}
+
+void TimelineModel::setMasterGainDb(double db) {
+    if (db != masterGainDb_) {
+        masterGainDb_ = db;
+        ++revision_;
+    }
+}
+
+bool TimelineModel::setTrackAudio(int index, double gainDb, double pan) {
+    Track *track = trackAt(index);
+    if (!track || !track->isAudio) {
+        return false; // video/text strips carry no fader
+    }
+    if (pan < -1.0) {
+        pan = -1.0;
+    } else if (pan > 1.0) {
+        pan = 1.0;
+    }
+    if (track->gainDb == gainDb && track->pan == pan) {
+        return true; // no change, no bump
+    }
+    track->gainDb = gainDb;
+    track->pan = pan;
+    ++revision_;
+    return true;
+}
+
+bool TimelineModel::setClipAudioFades(int64_t clipId, int64_t fadeInFrames, int64_t fadeOutFrames) {
+    Clip *clip = clipById(clipId);
+    if (!clip) {
+        return false;
+    }
+    if (fadeInFrames < 0) {
+        fadeInFrames = 0;
+    }
+    if (fadeOutFrames < 0) {
+        fadeOutFrames = 0;
+    }
+    // A fade can never extend past its own clip.
+    const int64_t dur = clip->durationFrames();
+    if (dur > 0) {
+        if (fadeInFrames > dur) {
+            fadeInFrames = dur;
+        }
+        if (fadeOutFrames > dur) {
+            fadeOutFrames = dur;
+        }
+    } else {
+        fadeInFrames = 0;
+        fadeOutFrames = 0;
+    }
+    if (clip->fadeInFrames == fadeInFrames && clip->fadeOutFrames == fadeOutFrames) {
+        return true; // no change, no bump
+    }
+    clip->fadeInFrames = fadeInFrames;
+    clip->fadeOutFrames = fadeOutFrames;
+    ++revision_;
+    return true;
 }
 
 int TimelineModel::addTrack(const std::string &name, bool isAudio) {
@@ -52,6 +112,7 @@ int TimelineModel::insertTrack(int position, const std::string &name, bool isAud
             ++t.trackIndex;
         }
     }
+    ++revision_;
     return position;
 }
 
@@ -74,6 +135,7 @@ bool TimelineModel::setTrackState(int index, bool locked, bool muted, bool solo)
         track->locked = locked;
         track->muted = muted;
         track->solo = solo;
+        ++revision_;
         return true;
     }
     return false;
@@ -109,6 +171,7 @@ int64_t TimelineModel::addClip(int trackIndex, const std::string &sourcePath,
     clip.rate = rate;
     clip.trackIndex = trackIndex;
     clips_.push_back(clip);
+    ++revision_;
     return clip.id;
 }
 
@@ -142,6 +205,7 @@ int64_t TimelineModel::addTextClip(int trackIndex, const TextDocument &doc, int6
     clip.rate = 1.0;
     clip.trackIndex = trackIndex;
     clips_.push_back(clip);
+    ++revision_;
     return clip.id;
 }
 
@@ -183,6 +247,7 @@ void TimelineModel::replaceAll(double fps, std::vector<Track> tracks, std::vecto
         nextId_ = std::max(nextId_, t.id + 1);
     }
     pruneTransitions(); // belt and braces: the file's invariants hold
+    ++revision_;
 }
 
 bool TimelineModel::removeClip(int64_t id) {
@@ -190,6 +255,7 @@ bool TimelineModel::removeClip(int64_t id) {
         if (it->id == id) {
             clips_.erase(it);
             pruneTransitions();
+            ++revision_;
             return true;
         }
     }
@@ -249,6 +315,7 @@ bool TimelineModel::splitAt(int64_t frame, int trackIndex) {
     }
     if (split) {
         pruneTransitions(); // clamps durations that no longer fit
+        ++revision_;
     }
     return split;
 }
@@ -260,6 +327,7 @@ bool TimelineModel::moveClip(int64_t id, int64_t newTimelineStart) {
     if (Clip *clip = clipById(id)) {
         clip->timelineStart = newTimelineStart;
         pruneTransitions();
+        ++revision_;
         return true;
     }
     return false;
@@ -301,6 +369,7 @@ bool TimelineModel::moveClipTo(int64_t id, int newTrackIndex, int64_t newTimelin
     clip->trackIndex = newTrackIndex;
     clip->timelineStart = newTimelineStart;
     pruneTransitions();
+    ++revision_;
     return true;
 }
 
@@ -404,6 +473,7 @@ bool TimelineModel::trimClipStart(int64_t id, int64_t deltaFrames) {
         clip->sourceOutFrames = newSourceOut;
         clip->timelineStart = newStart;
         pruneTransitions();
+        ++revision_;
         return true;
     }
     const int64_t sourceDelta =
@@ -422,6 +492,7 @@ bool TimelineModel::trimClipStart(int64_t id, int64_t deltaFrames) {
     // transition survives with its boundary intact; the shrunken duration
     // may clamp it.
     pruneTransitions();
+    ++revision_;
     return true;
 }
 
@@ -438,6 +509,7 @@ bool TimelineModel::trimClipEnd(int64_t id, int64_t deltaFrames) {
     }
     clip->sourceOutFrames = newSourceOut;
     pruneTransitions();
+    ++revision_;
     return true;
 }
 
@@ -460,6 +532,7 @@ bool TimelineModel::rippleDelete(int64_t id) {
     // Transitions of later pairs survive the shift (both sides move
     // together); pruning again is idempotent.
     pruneTransitions();
+    ++revision_;
     return true;
 }
 
@@ -493,6 +566,7 @@ bool TimelineModel::rippleTrimClipEnd(int64_t id, int64_t deltaFrames) {
         }
     }
     pruneTransitions(); // clamps the duration to the new left extent
+    ++revision_;
     return true;
 }
 
@@ -529,6 +603,7 @@ bool TimelineModel::rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrame
         right->sourceOutFrames -= deltaFrames;
         right->timelineStart += deltaFrames;
         pruneTransitions();
+        ++revision_;
         return true;
     }
     const int64_t leftSrcDelta =
@@ -555,6 +630,7 @@ bool TimelineModel::rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrame
     // The boundary moved with BOTH clips (still adjacent); a transition on
     // it survives, its duration clamped to the new left extent.
     pruneTransitions();
+    ++revision_;
     return true;
 }
 
@@ -667,6 +743,7 @@ int64_t TimelineModel::addTransition(int64_t leftClipId, int64_t rightClipId,
     t.kind = kind;
     t.durationFrames = durationFrames;
     transitions_.push_back(t);
+    ++revision_;
     return t.id;
 }
 
@@ -674,6 +751,7 @@ bool TimelineModel::removeTransition(int64_t id) {
     for (auto it = transitions_.begin(); it != transitions_.end(); ++it) {
         if (it->id == id) {
             transitions_.erase(it);
+            ++revision_;
             return true;
         }
     }
@@ -696,6 +774,7 @@ bool TimelineModel::setTransitionDuration(int64_t id, int64_t durationFrames) {
     for (Transition &tr : transitions_) {
         if (tr.id == id) {
             tr.durationFrames = durationFrames;
+            ++revision_;
             return true;
         }
     }

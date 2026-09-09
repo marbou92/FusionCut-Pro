@@ -161,6 +161,13 @@ public:
     // codepoints (no FE0F) - the shared table in emoji_clusters.h.
     static bool isDefaultEmojiPresentation(uint32_t cp);
 
+    // True when a SINGLE codepoint maps to a glyph that also has a
+    // decodable bitmap record (any strike). The discovery scan uses it
+    // to reject bitmap-tagged faces whose strikes are empty: a font
+    // counts as a COLOR emoji font only when the battery's emoji
+    // actually paint.
+    bool codepointHasBitmap(uint32_t cp) const;
+
 private:
     struct SubTable {
         uint16_t first = 0;
@@ -249,5 +256,23 @@ EmojiFontFormat sfntBitmapEmojiFormat(const uint8_t *data, size_t size, int64_t 
 // empty string when the font has no readable name). Works on sfnt
 // files and collections (first sub-font with a name wins).
 std::string sfntFamilyName(const uint8_t *data, size_t size);
+
+// Family name from a 'name' TABLE BLOB directly (the same record
+// priority as sfntFamilyName; the discovery scan slices just this one
+// table out of a file instead of reading the whole font). Offsets
+// inside the blob are table-relative, exactly as the spec defines
+// them. Empty string = no readable name.
+std::string sfntNameFamily(const uint8_t *name, size_t size);
+
+// Counts how many of the emoji coverage battery's codepoints
+// (emoji_clusters.h) map to a NONZERO glyph through a 'cmap' TABLE
+// BLOB (formats 4 and 12; every encoding record is consulted,
+// malformed subtables are skipped, never failed - a damaged table
+// reports less coverage, not garbage). This is the discovery scan's
+// "does this font have emojis at all" test for faces without bitmap
+// tables: the outline emoji fonts (Segoe UI Symbol, Symbola, Noto
+// Emoji) carry no CBDT/sbix, so their emoji-ness lives in the cmap.
+// Compare against kEmojiCoverageMinimum.
+int sfntCmapEmojiCoverage(const uint8_t *cmap, size_t size);
 
 } // namespace fc

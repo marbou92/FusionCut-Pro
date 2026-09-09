@@ -10,6 +10,9 @@
 
 #include "test_harness.h"
 
+#include "audio_decoder.h"
+#include "audio_math.h"
+#include "audio_mixer.h"
 #include "exporter.h"
 #include "media_probe.h"
 #include "proxy_generator.h"
@@ -421,6 +424,334 @@ void testProxyCancellation() {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Audio: decoder, window mixer, and the export's AAC track. The
+// synthetic generator writes a 440 Hz tone at 0.4 amplitude, 48 kHz
+// stereo - every assertion below leans on that.
+// ---------------------------------------------------------------------------
+
+// Goertzel magnitude at `freqHz` over the first n samples (per channel
+// 0 of an interleaved stereo buffer).
+static double goertzel(const std::vector<float> &stereo, double freqHz, int rate) {
+    const size_t n = stereo.size() / 2;
+    const double k = std::round(n * freqHz / rate);
+    const double w = 2.0 * 3.141592653589793 * k / n;
+    const double coeff = 2.0 * std::cos(w);
+    double q1 = 0.0, q2 = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double v = stereo[2 * i];
+        const double q0 = coeff * q1 - q2 + v;
+        q2 = q1;
+        q1 = q0;
+    }
+    return std::sqrt(q1 * q1 + q2 * q2 - coeff * q1 * q2) / (n * 0.2);
+}
+
+// RMS amplitude of an interleaved stereo window.
+static double rms(const std::vector<float> &stereo) {
+    if (stereo.empty()) {
+        return 0.0;
+    }
+    double acc = 0.0;
+    for (float v : stereo) {
+        acc += double(v) * double(v);
+    }
+    return std::sqrt(acc / stereo.size());
+}
+
+void testAudioDecoder() {
+    const std::string file = pathOf("audio_src.mp4");
+    std::string error;
+    fc::TestMediaSpec spec;
+    spec.width = 320;
+    spec.height = 180;
+    spec.fps = 24;
+    spec.seconds = 3.0;
+    spec.audioHz = 440;
+    CHECK(fc::generateTestVideo(file, spec, error));
+
+    // Geometry: converted to the requested rate/channels.
+    fc::AudioDecoder decoder;
+    CHECK(decoder.open(file, 48000, 2, error));
+    CHECK(decoder.sampleRate() == 48000);
+    CHECK(decoder.channels() == 2);
+
+    // Read everything forward: ~3 s of samples, tone-shaped.
+    std::vector<float> all;
+    double firstPts = -1.0;
+    double lastPts = 0.0;
+    fc::DecodedAudio chunk;
+    int chunks = 0;
+    while (decoder.readSamples(chunk, error)) {
+        CHECK(chunk.frames > 0);
+        CHECK(chunk.samples.size() == size_t(chunk.frames) * 2);
+        CHECK(chunk.samples.size() % 2 == 0);
+        if (firstPts < 0.0) {
+            firstPts = chunk.ptsSeconds;
+        }
+        lastPts = chunk.ptsSeconds + double(chunk.frames) / 48000.0;
+        all.insert(all.end(), chunk.samples.begin(), chunk.samples.end());
+        ++chunks;
+    }
+    CHECK(error.empty());               // clean end of stream
+    CHECK(chunks >= 100);               // AAC frames of ~1024 samples over 3 s
+    CHECK(all.size() >= 2 * 48000 * 2); // at least 2 seconds of samples
+    CHECK(all.size() <= 2 * 48000 * 4);
+    CHECK(std::fabs(firstPts) < 0.2);
+    CHECK(std::fabs(lastPts - 3.0) < 0.3);
+    CHECK(rms(all) > 0.15); // the 0.4-amplitude tone survives
+    CHECK(rms(all) < 0.6);
+    CHECK(goertzel(all, 440.0, 48000) > 0.5); // the tone dominates
+
+    // A different target rate resamples: 44.1 kHz also finds the tone.
+    fc::AudioDecoder resampled;
+    CHECK(resampled.open(file, 44100, 2, error));
+    std::vector<float> mixed441;
+    while (resampled.readSamples(chunk, error)) {
+        mixed441.insert(mixed441.end(), chunk.samples.begin(), chunk.samples.end());
+    }
+    CHECK(mixed441.size() >= 2 * 44100 * 2);
+    CHECK(goertzel(mixed441, 440.0, 44100) > 0.5);
+
+    // Mono folds both channels.
+    fc::AudioDecoder mono;
+    CHECK(mono.open(file, 48000, 1, error));
+    CHECK(mono.readSamples(chunk, error));
+    CHECK(chunk.samples.size() == size_t(chunk.frames) * 1);
+
+    // Seek mid-file: the stream resumes near the target.
+    fc::AudioDecoder seeking;
+    CHECK(seeking.open(file, 48000, 2, error));
+    CHECK(seeking.seekToSeconds(2.0, error));
+    CHECK(seeking.readSamples(chunk, error));
+    CHECK(chunk.ptsSeconds >= 1.9);
+    CHECK(chunk.ptsSeconds < 2.1);
+
+    // Files without an audio stream refuse to open.
+    fc::TestMediaSpec noAudio = spec;
+    noAudio.withAudio = false;
+    const std::string silent = pathOf("audio_none.mp4");
+    CHECK(fc::generateTestVideo(silent, noAudio, error));
+    fc::AudioDecoder none;
+    CHECK(!none.open(silent, 48000, 2, error));
+    CHECK(!error.empty());
+}
+
+void testAudioWindowMixer() {
+    const std::string file = pathOf("mix_src.mp4");
+    std::string error;
+    fc::TestMediaSpec spec;
+    spec.width = 320;
+    spec.height = 180;
+    spec.fps = 24;
+    spec.seconds = 2.0;
+    spec.audioHz = 440;
+    CHECK(fc::generateTestVideo(file, spec, error));
+
+    std::vector<fc::AudioSpan> spans;
+    fc::AudioSpan span;
+    span.path = file;
+    span.srcStartSec = 0.0;
+    span.startSec = 0.0;
+    span.endSec = 1.0;
+    span.gain = 1.0;
+    spans.push_back(span);
+
+    // Silence outside the span.
+    fc::AudioWindowMixer mixer(48000, 2);
+    std::vector<float> window(2 * 4800, 1.0f);                   // 100 ms, poisoned
+    CHECK(mixer.pull(spans, 48000, 4800, window.data(), error)); // [1.0, 1.1) s
+    for (float v : window) {
+        CHECK(v == 0.0f);
+    }
+
+    // Inside the span: the tone is there.
+    std::vector<float> in(2 * 4800);
+    CHECK(mixer.pull(spans, 24000, 4800, in.data(), error)); // [0.5, 0.6) s
+    CHECK(rms(in) > 0.1);
+    CHECK(goertzel(in, 440.0, 48000) > 0.4);
+
+    // Sequential monotonic windows keep working (rolling decode):
+    // [0.6, 1.0) s in 4 steps, all inside the span.
+    for (int w = 0; w < 4; ++w) {
+        CHECK(mixer.pull(spans, 28800 + w * 4800, 4800, in.data(), error));
+        CHECK(rms(in) > 0.1);
+    }
+
+    // A backwards jump re-seeks (the same span again).
+    CHECK(mixer.pull(spans, 4800, 4800, in.data(), error));
+    CHECK(rms(in) > 0.1);
+
+    // Gain 0.5 halves the amplitude.
+    fc::AudioWindowMixer half(48000, 2);
+    spans[0].gain = 0.5;
+    CHECK(half.pull(spans, 0, 4800, in.data(), error));
+    const double full = [&]() {
+        fc::AudioWindowMixer one(48000, 2);
+        spans[0].gain = 1.0;
+        std::vector<float> ref(2 * 4800);
+        CHECK(one.pull(spans, 0, 4800, ref.data(), error));
+        return rms(ref);
+    }();
+    spans[0].gain = 0.5;
+    CHECK(half.pull(spans, 0, 4800, in.data(), error));
+    CHECK(std::fabs(rms(in) - full * 0.5) < 0.06);
+
+    // Hard-left pan silences the right channel.
+    spans[0].gain = 1.0;
+    spans[0].pan = -1.0;
+    fc::AudioWindowMixer panned(48000, 2);
+    CHECK(panned.pull(spans, 0, 4800, in.data(), error));
+    double leftRms = 0.0, rightRms = 0.0;
+    for (size_t i = 0; i < in.size() / 2; ++i) {
+        leftRms += double(in[2 * i]) * double(in[2 * i]);
+        rightRms += double(in[2 * i + 1]) * double(in[2 * i + 1]);
+    }
+    leftRms = std::sqrt(leftRms / (in.size() / 2));
+    rightRms = std::sqrt(rightRms / (in.size() / 2));
+    CHECK(leftRms > 0.1);
+    CHECK(rightRms < 0.02);
+
+    // Fade-in ramps from silence.
+    spans[0].pan = 0.0;
+    spans[0].fadeInSec = 1.0;
+    fc::AudioWindowMixer fading(48000, 2);
+    CHECK(fading.pull(spans, 0, 2400, in.data(), error)); // first 50 ms
+    const double early = rms(std::vector<float>(in.begin(), in.begin() + 2 * 2400));
+    CHECK(fading.pull(spans, 45600, 2400, in.data(), error)); // [0.95, 1.0) s
+    const double late = rms(std::vector<float>(in.begin(), in.begin() + 2 * 2400));
+    CHECK(early < late * 0.2);
+    spans[0].fadeInSec = 0.0;
+
+    // Master gain + the hard clip.
+    spans[0].gain = 8.0; // 0.4 * 8 = 3.2 -> clipped
+    fc::AudioWindowMixer loud(48000, 2);
+    loud.setMasterGain(1.0);
+    CHECK(loud.pull(spans, 0, 4800, in.data(), error));
+    for (float v : in) {
+        CHECK(v <= 1.0f && v >= -1.0f);
+    }
+    double clippedRms = 0.0;
+    for (float v : in) {
+        clippedRms += double(v) * double(v);
+    }
+    clippedRms = std::sqrt(clippedRms / in.size());
+    CHECK(clippedRms > 0.5); // heavy limiting, not silence
+
+    // Missing file: silence + an error note, never a failed window.
+    fc::AudioSpan missing;
+    missing.path = pathOf("does_not_exist.mp4");
+    missing.startSec = 0.0;
+    missing.endSec = 1.0;
+    std::vector<fc::AudioSpan> bad = {missing};
+    fc::AudioWindowMixer tolerant(48000, 2);
+    std::string mixedError;
+    CHECK(tolerant.pull(bad, 0, 4800, in.data(), mixedError));
+    for (size_t i = 0; i < in.size(); ++i) {
+        CHECK(in[i] == 0.0f);
+    }
+    CHECK(!mixedError.empty());
+
+    // reset() drops the decoders (a fresh pull works after).
+    tolerant.reset();
+    CHECK(tolerant.pull(bad, 0, 4800, in.data(), mixedError)); // still silent
+}
+
+void testExportWithAudio() {
+    const std::string dst = pathOf("export_audio.mp4");
+    std::string error;
+
+    fc::ExportConfig config;
+    config.width = 64;
+    config.height = 36;
+    config.fps = 12.0;
+    config.totalFrames = 24; // 2 seconds
+    config.crf = 26;
+
+    // A 440 Hz provider in the audio windows (the same formula the
+    // synthetic generator uses, so the round-trip compares like with
+    // like).
+    const int rate = config.sampleRate; // 48000
+    double phase = 0.0;
+    const double step = 2.0 * 3.141592653589793 * 440.0 / rate;
+    fc::ExportAudioProvider audio = [&](int64_t startSample, int sampleCount, float *dstOut) {
+        CHECK(startSample >= 0);
+        CHECK(sampleCount > 0);
+        for (int i = 0; i < sampleCount; ++i) {
+            const float v = 0.4f * float(std::sin(phase));
+            phase += step;
+            dstOut[2 * i] = v;
+            dstOut[2 * i + 1] = v;
+        }
+        return true;
+    };
+
+    double lastProgress = -1.0;
+    const bool ok = fc::Exporter::run(
+        dst, config,
+        [](int64_t frame, uint8_t *rgba) {
+            fillExportFrame(frame, rgba, 64, 36);
+            return true;
+        },
+        [&](double fraction) {
+            CHECK(fraction >= lastProgress - 1e-9);
+            lastProgress = fraction;
+            return true;
+        },
+        error, audio);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("audio export failed: %s\n", error.c_str());
+        return;
+    }
+
+    // The output carries an AAC stereo track at the config rate.
+    fc::MediaInfo info;
+    CHECK(fc::MediaProbe::probe(dst, info, error));
+    CHECK(info.hasVideo);
+    CHECK(!info.audioStreams.empty());
+    if (!info.audioStreams.empty()) {
+        CHECK(info.audioStreams[0].codecName == "aac");
+        CHECK(info.audioStreams[0].channels == 2);
+        CHECK(info.audioStreams[0].sampleRate == 48000);
+    }
+    // The audio duration tracks the video (within one AAC frame + the
+    // muxer's start padding).
+    CHECK(std::fabs(info.durationSeconds() - 2.0) < 0.4);
+
+    // Decode the audio back: sample count ~ 2 s, the tone dominates.
+    fc::AudioDecoder decoder;
+    CHECK(decoder.open(dst, 48000, 2, error));
+    std::vector<float> all;
+    fc::DecodedAudio chunk;
+    while (decoder.readSamples(chunk, error)) {
+        all.insert(all.end(), chunk.samples.begin(), chunk.samples.end());
+    }
+    CHECK(all.size() >= 2 * 48000 * 1); // at least 1 s survived the round-trip
+    CHECK(all.size() <= 2 * 48000 * 3);
+    CHECK(rms(all) > 0.1);
+    CHECK(goertzel(all, 440.0, 48000) > 0.4);
+
+    // Cancellation through the AUDIO provider still removes the file.
+    const std::string cancelDst = pathOf("export_audio_cancel.mp4");
+    bool pulled = false;
+    const bool cancelled = fc::Exporter::run(
+        cancelDst, config,
+        [](int64_t, uint8_t *rgba) {
+            fillExportFrame(0, rgba, 64, 36);
+            return true;
+        },
+        [](double) { return true; }, error,
+        [&](int64_t, int, float *) {
+            pulled = true;
+            return false; // cancel on the first audio window
+        });
+    CHECK(!cancelled);
+    CHECK(error.empty());
+    CHECK(pulled);
+    CHECK(!fs::exists(cancelDst));
+}
+
 int main() {
     std::printf("FFmpeg: %s\n", fc::ffmpegVersionInfo().c_str());
 
@@ -432,6 +763,9 @@ int main() {
     testProxyCancellation();
     testExport();
     testExportOddDimsAndCancellation();
+    testAudioDecoder();
+    testAudioWindowMixer();
+    testExportWithAudio();
 
     return testExitCode("media");
 }

@@ -141,6 +141,90 @@ std::vector<size_t> fontDirectories(const uint8_t *data, size_t size) {
     return dirs;
 }
 
+// Family name from a 'name' TABLE blob (offsets are table-relative,
+// exactly as the spec defines them; the whole-file sfntFamilyName
+// slices the table out and lands here, and the discovery scan feeds
+// the sliced table directly). Empty string = no readable name.
+std::string nameFamilyFromTable(const uint8_t *table, size_t tableLen) {
+    if (table == nullptr || tableLen < 6) {
+        return std::string();
+    }
+    uint16_t format = 0, count = 0, strOff = 0;
+    if (!probeU16(table, tableLen, 0, &format) || format > 1 ||
+        !probeU16(table, tableLen, 2, &count) || !probeU16(table, tableLen, 4, &strOff) ||
+        count > 4096) {
+        return std::string();
+    }
+    // Find the best-scoring nameID-1 record (deterministic: the first
+    // record at the best priority wins). Priority: Windows en-US,
+    // Windows any language, Unicode UTF-16, Mac Roman.
+    int bestScore = 0;
+    size_t bestRec = 0, bestLen = 0;
+    int bestPlatform = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        const size_t rec = 6 + size_t(i) * 12;
+        if (rec + 12 > tableLen) {
+            break;
+        }
+        uint16_t platform = 0, encoding = 0, language = 0, nameId = 0, length = 0, stroff = 0;
+        if (!probeU16(table, tableLen, rec, &platform) ||
+            !probeU16(table, tableLen, rec + 2, &encoding) ||
+            !probeU16(table, tableLen, rec + 4, &language) ||
+            !probeU16(table, tableLen, rec + 6, &nameId) ||
+            !probeU16(table, tableLen, rec + 8, &length) ||
+            !probeU16(table, tableLen, rec + 10, &stroff)) {
+            continue;
+        }
+        if (nameId != 1 || length == 0 || length > 2048) {
+            continue;
+        }
+        int score = 0;
+        if (platform == 3 && (encoding == 1 || encoding == 10)) {
+            score = language == 0x409 ? 4 : 3;
+        } else if (platform == 0 && (encoding == 1 || encoding == 3)) {
+            score = 2;
+        } else if (platform == 1 && encoding == 0) {
+            score = 1;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            bestRec = size_t(strOff) + size_t(stroff);
+            bestLen = size_t(length);
+            bestPlatform = platform;
+        }
+    }
+    if (bestScore == 0 || bestRec + bestLen > tableLen) {
+        return std::string();
+    }
+    std::string out;
+    out.reserve(bestLen);
+    if (bestPlatform == 1) { // Mac Roman bytes
+        for (size_t b = 0; b < bestLen; ++b) {
+            const uint8_t byte = table[bestRec + b];
+            appendUtf8(out, byte < 0x80 ? uint32_t(byte) : uint32_t(kMacRoman[byte - 0x80]));
+        }
+    } else { // UTF-16BE (Windows / Unicode platform)
+        for (size_t b = 0; b + 1 < bestLen; b += 2) {
+            const uint16_t u =
+                uint16_t((uint16_t(table[bestRec + b]) << 8) | uint16_t(table[bestRec + b + 1]));
+            if (u >= 0xD800 && u <= 0xDBFF && b + 3 < bestLen) {
+                const uint16_t v = uint16_t((uint16_t(table[bestRec + b + 2]) << 8) |
+                                            uint16_t(table[bestRec + b + 3]));
+                if (v >= 0xDC00 && v <= 0xDFFF) {
+                    appendUtf8(out, 0x10000u + (uint32_t(u - 0xD800) << 10) + uint32_t(v - 0xDC00));
+                    // Skip the LOW surrogate unit as well: +2 here plus
+                    // the loop's +2 steps a whole pair (a lone ++b would
+                    // re-read the pair's second byte as a new unit).
+                    b += 2;
+                    continue;
+                }
+            }
+            appendUtf8(out, (u >= 0xD800 && u <= 0xDFFF) ? 0xFFFDu : uint32_t(u));
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 // ---- bounds-checked readers ----
@@ -1158,6 +1242,18 @@ bool EmojiFont::isDefaultEmojiPresentation(uint32_t cp) {
     return fc::isDefaultEmojiPresentation(cp);
 }
 
+bool EmojiFont::codepointHasBitmap(uint32_t cp) const {
+    if (!loaded_) {
+        return false;
+    }
+    const uint16_t glyph = codepointGlyph(cp);
+    if (glyph == 0) {
+        return false;
+    }
+    Bitmap bm;
+    return bitmapFor(glyph, &bm);
+}
+
 // ---- standalone helpers ----
 
 EmojiFontFormat sfntBitmapEmojiFormat(const uint8_t *data, size_t size, int64_t fileSize) {
@@ -1181,83 +1277,162 @@ std::string sfntFamilyName(const uint8_t *data, size_t size) {
         if (!probeTable(data, size, dirBase, size, "name", &off, &len) || len < 6) {
             continue;
         }
-        const size_t base = size_t(off);
-        uint16_t format = 0, count = 0, strOff = 0;
-        if (!probeU16(data, size, base, &format) || format > 1 ||
-            !probeU16(data, size, base + 2, &count) || !probeU16(data, size, base + 4, &strOff) ||
-            count > 4096) {
-            continue;
-        }
-        // Find the best-scoring nameID-1 record (deterministic: the
-        // first record at the best priority wins). Priority: Windows
-        // en-US, Windows any language, Unicode UTF-16, Mac Roman.
-        int bestScore = 0;
-        size_t bestRec = 0, bestLen = 0;
-        int bestPlatform = 0;
-        for (uint16_t i = 0; i < count; ++i) {
-            const size_t rec = base + 6 + size_t(i) * 12;
-            if (rec + 12 > base + size_t(len)) {
-                break;
-            }
-            uint16_t platform = 0, encoding = 0, language = 0, nameId = 0, length = 0, stroff = 0;
-            if (!probeU16(data, size, rec, &platform) ||
-                !probeU16(data, size, rec + 2, &encoding) ||
-                !probeU16(data, size, rec + 4, &language) ||
-                !probeU16(data, size, rec + 6, &nameId) ||
-                !probeU16(data, size, rec + 8, &length) ||
-                !probeU16(data, size, rec + 10, &stroff)) {
-                continue;
-            }
-            if (nameId != 1 || length == 0 || length > 2048) {
-                continue;
-            }
-            int score = 0;
-            if (platform == 3 && (encoding == 1 || encoding == 10)) {
-                score = language == 0x409 ? 4 : 3;
-            } else if (platform == 0 && (encoding == 1 || encoding == 3)) {
-                score = 2;
-            } else if (platform == 1 && encoding == 0) {
-                score = 1;
-            }
-            if (score > bestScore) {
-                bestScore = score;
-                bestRec = base + size_t(strOff) + size_t(stroff);
-                bestLen = size_t(length);
-                bestPlatform = platform;
-            }
-        }
-        if (bestScore == 0 || bestRec + bestLen > size) {
-            continue;
-        }
-        std::string out;
-        out.reserve(bestLen);
-        if (bestPlatform == 1) { // Mac Roman bytes
-            for (size_t b = 0; b < bestLen; ++b) {
-                const uint8_t byte = data[bestRec + b];
-                appendUtf8(out, byte < 0x80 ? uint32_t(byte) : uint32_t(kMacRoman[byte - 0x80]));
-            }
-        } else { // UTF-16BE (Windows / Unicode platform)
-            for (size_t b = 0; b + 1 < bestLen; b += 2) {
-                const uint16_t u =
-                    uint16_t((uint16_t(data[bestRec + b]) << 8) | uint16_t(data[bestRec + b + 1]));
-                if (u >= 0xD800 && u <= 0xDBFF && b + 3 < bestLen) {
-                    const uint16_t v = uint16_t((uint16_t(data[bestRec + b + 2]) << 8) |
-                                                uint16_t(data[bestRec + b + 3]));
-                    if (v >= 0xDC00 && v <= 0xDFFF) {
-                        appendUtf8(out,
-                                   0x10000u + (uint32_t(u - 0xD800) << 10) + uint32_t(v - 0xDC00));
-                        ++b;
-                        continue;
-                    }
-                }
-                appendUtf8(out, (u >= 0xD800 && u <= 0xDFFF) ? 0xFFFDu : uint32_t(u));
-            }
-        }
-        if (!out.empty()) {
-            return out;
+        std::string name = nameFamilyFromTable(data + size_t(off), size_t(len));
+        if (!name.empty()) {
+            return name;
         }
     }
     return std::string();
+}
+
+std::string sfntNameFamily(const uint8_t *name, size_t size) {
+    if (name == nullptr || size < 6) {
+        return std::string();
+    }
+    return nameFamilyFromTable(name, size);
+}
+
+// Counts battery codepoints mapped by a 'cmap' TABLE blob. Standalone
+// bounds-checked readers (the blob is not part of any EmojiFont).
+namespace {
+
+inline bool covU16(const uint8_t *p, size_t size, size_t off, uint16_t *v) {
+    if (off + 2 > size) {
+        return false;
+    }
+    *v = uint16_t((uint16_t(p[off]) << 8) | uint16_t(p[off + 1]));
+    return true;
+}
+
+inline bool covU32(const uint8_t *p, size_t size, size_t off, uint32_t *v) {
+    if (off + 4 > size) {
+        return false;
+    }
+    *v = (uint32_t(p[off]) << 24) | (uint32_t(p[off + 1]) << 16) | (uint32_t(p[off + 2]) << 8) |
+         uint32_t(p[off + 3]);
+    return true;
+}
+
+// True when the format-4 subtable at `sub` maps `cp` to a nonzero glyph.
+bool covFormat4(const uint8_t *p, size_t size, size_t sub, uint32_t cp) {
+    uint16_t segX2 = 0;
+    if (!covU16(p, size, sub + 6, &segX2) || segX2 == 0 || (segX2 & 1) != 0) {
+        return false;
+    }
+    const size_t segCount = segX2 / 2;
+    const size_t endCode = sub + 14;
+    const size_t startCode = endCode + segCount * 2 + 2;
+    const size_t idDelta = startCode + segCount * 2;
+    const size_t idRange = idDelta + segCount * 2;
+    if (idRange > size) {
+        return false;
+    }
+    for (size_t i = 0; i < segCount; ++i) {
+        uint16_t end = 0;
+        if (!covU16(p, size, endCode + i * 2, &end) || end < cp) {
+            continue;
+        }
+        uint16_t start = 0;
+        if (!covU16(p, size, startCode + i * 2, &start) || cp < start) {
+            return false; // past every segment covering cp: unmapped
+        }
+        uint16_t delta = 0, rangeOff = 0;
+        if (!covU16(p, size, idDelta + i * 2, &delta) ||
+            !covU16(p, size, idRange + i * 2, &rangeOff)) {
+            return false;
+        }
+        if (rangeOff == 0) {
+            return uint16_t(cp + delta) != 0;
+        }
+        const size_t gidAddr = idRange + i * 2 + size_t(rangeOff) + size_t(cp - start) * 2;
+        uint16_t gid = 0;
+        if (!covU16(p, size, gidAddr, &gid)) {
+            return false;
+        }
+        return gid != 0 && uint16_t(gid + delta) != 0;
+    }
+    return false;
+}
+
+// True when the format-12 subtable at `sub` maps `cp` to a nonzero glyph.
+bool covFormat12(const uint8_t *p, size_t size, size_t sub, uint32_t cp) {
+    uint32_t nGroups = 0;
+    if (sub + 16 > size || !covU32(p, size, sub + 12, &nGroups) || nGroups > 100000) {
+        return false;
+    }
+    // Groups are sorted by spec; a font that violates that still gets a
+    // linear scan (same recovery philosophy as EmojiFont::parseCmap).
+    for (uint32_t g = 0; g < nGroups; ++g) {
+        const size_t gr = sub + 16 + size_t(g) * 12;
+        if (gr + 12 > size) {
+            break;
+        }
+        uint32_t start = 0, end = 0, firstGlyph = 0;
+        if (!covU32(p, size, gr, &start) || !covU32(p, size, gr + 4, &end) ||
+            !covU32(p, size, gr + 8, &firstGlyph)) {
+            continue;
+        }
+        if (end < start) {
+            continue;
+        }
+        if (cp >= start && cp <= end) {
+            return uint16_t(firstGlyph + (cp - start)) != 0;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+int sfntCmapEmojiCoverage(const uint8_t *cmap, size_t size) {
+    if (cmap == nullptr || size < 4) {
+        return 0;
+    }
+    const uint32_t *battery = emojiCoverageBattery();
+    const size_t batterySize = emojiCoverageBatterySize();
+    uint16_t numTables = 0;
+    if (!covU16(cmap, size, 2, &numTables)) {
+        return 0;
+    }
+    int hits = 0;
+    for (size_t b = 0; b < batterySize; ++b) {
+        const uint32_t cp = battery[b];
+        bool mapped = false;
+        for (uint16_t i = 0; i < numTables && !mapped; ++i) {
+            const size_t rec = 4 + size_t(i) * 8;
+            if (rec + 8 > size) {
+                break;
+            }
+            uint16_t platform = 0, encoding = 0;
+            uint32_t off = 0;
+            if (!covU16(cmap, size, rec, &platform) || !covU16(cmap, size, rec + 2, &encoding) ||
+                !covU32(cmap, size, rec + 4, &off)) {
+                continue;
+            }
+            if (off == 0) {
+                continue;
+            }
+            const size_t sub = size_t(off);
+            if (sub + 2 > size) {
+                continue;
+            }
+            uint16_t fmt = 0;
+            if (!covU16(cmap, size, sub, &fmt)) {
+                continue;
+            }
+            // The BMP battery codepoints resolve through format 4; the
+            // SMP ones need format 12. Either answer counts.
+            if (fmt == 4) {
+                mapped = covFormat4(cmap, size, sub, cp);
+            } else if (fmt == 12) {
+                mapped = covFormat12(cmap, size, sub, cp);
+            }
+        }
+        if (mapped) {
+            ++hits;
+        }
+    }
+    return hits;
 }
 
 } // namespace fc

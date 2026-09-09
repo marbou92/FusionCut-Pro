@@ -737,6 +737,60 @@ static TextDocument oneRunDoc() {
     return doc;
 }
 
+// ---------------------------------------------------------------------------
+// Coverage + name-table slice parsers + the bitmap-backed lookup the
+// font discovery scan counts with.
+// ---------------------------------------------------------------------------
+
+static void testCoverageHelpers() {
+    const std::vector<uint8_t> cbdt = fixture::buildCbdtFont(
+        fixture::fakePng(8), fixture::fakePng(7), fixture::fakePng(12), fixture::fakePng(10));
+
+    // codepointHasBitmap: a mapped codepoint whose glyph carries a
+    // record, an unmapped one, and a not-even-loaded font.
+    EmojiFont font;
+    CHECK(font.load(cbdt.data(), cbdt.size()));
+    CHECK(font.codepointHasBitmap(0x1F600)); // grin -> glyph 1, record
+    CHECK(font.codepointHasBitmap(0x1F44D)); // thumbs -> glyph 2, record
+    CHECK(!font.codepointHasBitmap(0x2600)); // battery member, not mapped
+    CHECK(!font.codepointHasBitmap(0x0041));
+    EmojiFont unloaded;
+    CHECK(!unloaded.codepointHasBitmap(0x1F600));
+
+    // sfntNameFamily: the table BLOB directly (the discovery scan
+    // slices exactly this out of a file instead of reading it whole).
+    const std::vector<uint8_t> name = fixture::nameTable("Slice Family");
+    CHECK(sfntNameFamily(name.data(), name.size()) == "Slice Family");
+    // The whole-file path agrees (sfntFamilyName finds the same table).
+    CHECK(sfntFamilyName(cbdt.data(), cbdt.size()) == "Fixture CBDT");
+
+    // The astral-plane regression: a family name with a surrogate pair
+    // decodes whole (an off-by-one in the pair skip used to re-read the
+    // pair's second byte as a fresh unit and corrupt everything after).
+    {
+        std::vector<uint8_t> table;
+        auto u16 = [&table](uint16_t v) {
+            table.push_back(uint8_t(v >> 8));
+            table.push_back(uint8_t(v));
+        };
+        u16(0);      // format
+        u16(1);      // count
+        u16(6 + 12); // stringOffset
+        u16(3);      // platform: Windows
+        u16(1);      // encoding: UTF-16BE
+        u16(0x409);  // language: en-US
+        u16(1);      // nameID: family
+        u16(16);     // length: 8 code units
+        u16(0);      // strings at stringOffset + 0
+        const uint16_t units[] = {'A', 0xD83D, 0xDE00, 'B', 'C', 'D', 'E', 'F'};
+        for (uint16_t u : units) {
+            u16(u);
+        }
+        CHECK(sfntNameFamily(table.data(), table.size()) == "A\xF0\x9F\x98\x80"
+                                                            "BCDEF");
+    }
+}
+
 static void testLayoutClusterAtomic() {
     const TextDocument doc = oneRunDoc();
 
@@ -852,5 +906,7 @@ int main() {
     testCbdtMalformedBattery();
     testScaling();
     testLayoutClusterAtomic();
+    testCoverageHelpers();
+
     return testExitCode("emoji");
 }

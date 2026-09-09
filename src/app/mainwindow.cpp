@@ -52,6 +52,9 @@
 #include "text.h"
 #include "text_panel.h"
 #include "text_renderer.h"
+
+#include "audio_math.h"
+#include "audio_mixer.h"
 #include "timeline_panel.h"
 #include "transitions.h"
 #include "transitions_panel.h"
@@ -116,7 +119,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     playClock_ = new QTimer(this);
     playClock_->setTimerType(Qt::CoarseTimer);
     connect(playClock_, &QTimer::timeout, this, [this] {
-        playhead_ += 1.0 / fps_;
+        // While the preview audio device runs, ITS consumed position is
+        // the playhead's clock (a QTimer drifts with load; the audio
+        // stream cannot). Without audio the wall tick advances as
+        // before. Track edits made during playback land in the mix via
+        // the revision check.
+        if (audioPreview_ && audioPreview_->running()) {
+            if (model_.revision() != audioSpansRevision_) {
+                rebuildAudioSnapshot();
+            }
+            playhead_ = audioStartSeconds_ + audioPreview_->playedSeconds();
+        } else {
+            playhead_ += 1.0 / fps_;
+        }
         if (playhead_ >= duration_) {
             playhead_ = duration_;
             requestFrameAt(playhead_);
@@ -142,6 +157,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 }
 
 MainWindow::~MainWindow() {
+    // Join the audio render thread before the members it reads
+    // (previewMixer_) unwind - the unique_ptrs destruct in reverse
+    // order and the mixer is declared AFTER the preview.
+    stopAudioPreview();
     if (decodeThreadB_) {
         decodeThreadB_->quit();
         decodeThreadB_->wait(3000);
@@ -185,7 +204,8 @@ void MainWindow::buildDecodeThread() {
 
     connect(decodeThread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(worker_, &DecodeWorker::mediaInfo, this,
-            [this](const QString &summary, double duration, double fps, int64_t frameCount) {
+            [this](const QString &summary, double duration, double fps, int64_t frameCount,
+                   bool hasAudio) {
                 duration_ = duration;
                 fps_ = fps > 1.0 ? fps : 24.0;
                 model_.setFps(fps_);
@@ -197,7 +217,7 @@ void MainWindow::buildDecodeThread() {
                         frameCount > 0 ? frameCount
                                        : static_cast<int64_t>(std::llround(duration_ * fps_)),
                         static_cast<int64_t>(std::llround(5.0 * fps_)));
-                    addPendingClip(pendingAddClipPath_, sourceOut);
+                    addPendingClip(pendingAddClipPath_, sourceOut, hasAudio);
                     pendingAddClipPath_.clear();
                 }
                 // a program-source switch was queued during a seek -
@@ -313,10 +333,16 @@ void MainWindow::buildProWorkspace() {
 
     // Bottom zone: Timeline | Audio Mixer (tabbed).
     timeline_ = new TimelinePanel(this);
+    audioPreview_ = std::make_unique<fc::AudioPreview>();
     mixer_ = new MixerPanel(this);
     auto *bottomTabs = new QTabWidget(this);
     bottomTabs->addTab(timeline_, tr("Timeline"));
     bottomTabs->addTab(mixer_, tr("Audio Mixer"));
+    mixer_->refreshFromModel(&model_);
+    connect(mixer_, &MixerPanel::mixerChanged, this, [this] {
+        markDirty();
+        rebuildAudioSnapshot(); // fader/pan/mute/solo land in the live mix
+    });
     auto *bottomDock = makeDock(tr("Timeline"), bottomTabs, this);
     addDockWidget(Qt::BottomDockWidgetArea, bottomDock);
 
@@ -380,16 +406,35 @@ void MainWindow::buildProWorkspace() {
     connect(timeline_, &TimelinePanel::clipSelected, this, [this](int64_t id) {
         selectedClipId_ = id;
         // the Effect Controls + Color panels edit the SELECTED clip.
+        // An AUDIO-track clip gets the audio-fade editor instead of
+        // the (video) effect stack.
         const fc::Clip *clip = id > 0 ? model_.clipById(id) : nullptr;
+        const fc::Track *track = clip ? model_.trackAt(clip->trackIndex) : nullptr;
         const std::vector<fc::EffectInstance> stack =
             clip ? clip->effectStack : std::vector<fc::EffectInstance>();
-        effectControls_->setStack(id, stack);
-        colorPanel_->setClip(id, stack);
+        if (track && track->isAudio) {
+            effectControls_->setAudioFades(id, clip ? clip->fadeInFrames : 0,
+                                           clip ? clip->fadeOutFrames : 0,
+                                           clip ? clip->durationFrames() : 1);
+            colorPanel_->setClip(id, std::vector<fc::EffectInstance>());
+        } else {
+            effectControls_->setStack(id, stack);
+            colorPanel_->setClip(id, stack);
+        }
         // the Text panel edits the selected clip's document (null for
         // non-text clips clears it).
         textPanel_->setClip(id, clip && clip->isText ? &clip->text : nullptr);
         updateKeyframePanels();
     });
+    connect(effectControls_, &EffectControlsPanel::audioFadesChanged, this,
+            [this](int64_t clipId, int64_t fadeIn, int64_t fadeOut) {
+                if (!model_.setClipAudioFades(clipId, fadeIn, fadeOut)) {
+                    return;
+                }
+                markDirty();
+                rebuildAudioSnapshot(); // the mix follows the fades live
+                timeline_->update();
+            });
 
     // ---- effects wiring ----
     connect(effectsPanel_, &EffectsPanel::effectAddRequested, this,
@@ -663,6 +708,38 @@ void MainWindow::importMedia() {
         item.path = file;
         item.displayName = QFileInfo(file).completeBaseName();
         projectPanel_->addMedia(item);
+
+        // Probe once up front: a file with audio but NO video becomes
+        // an audio clip directly (the video decode path cannot open
+        // it); a file with video follows the existing worker flow,
+        // which places its video clip AND - when the probe found a
+        // sound track - a matching audio clip on the audio lane.
+        fc::MediaInfo info;
+        std::string probeError;
+        const bool probed = fc::MediaProbe::probe(file.toStdString(), info, probeError);
+        const bool hasAudio = probed && !info.audioStreams.empty();
+        const bool hasVideo = probed && info.hasVideo;
+        if (hasAudio && !hasVideo) {
+            startPlayback(false);
+            const int audioTrack = ensureAudioTrack();
+            const int64_t frames = std::max<int64_t>(
+                1, static_cast<int64_t>(std::llround(info.durationSeconds() * fps_)));
+            const int64_t start = static_cast<int64_t>(std::llround(playhead_ * fps_));
+            const QString label = QFileInfo(file).completeBaseName();
+            if (model_.addClip(audioTrack, file.toStdString(), label.toStdString(), 0, frames,
+                               start) > 0) {
+                statusBar()->showMessage(
+                    tr("Imported audio-only file: %1 (clip on the audio track)")
+                        .arg(item.displayName),
+                    8000);
+            }
+            updateSequenceDuration();
+            timeline_->setModel(&model_);
+            timeline_->update();
+            markDirty();
+            rebuildAudioSnapshot();
+            continue;
+        }
         if (first) {
             loadClip(file);
             first = false;
@@ -684,13 +761,23 @@ void MainWindow::loadClip(const QString &sourcePath) {
     QMetaObject::invokeMethod(worker_, "open", Q_ARG(QString, path));
 }
 
-void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFrames) {
+void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFrames,
+                                bool withAudio) {
     // place on V1 (track index 1) at the playhead; first 5s or full.
     const int64_t start = static_cast<int64_t>(std::llround(playhead_ * fps_));
     const int64_t out = std::max<int64_t>(1, sourceOutFrames);
     const QString label = QFileInfo(sourcePath).completeBaseName();
     model_.addClip(1, sourcePath.toStdString(), label.toStdString(), 0, out, start);
+    if (withAudio) {
+        // The sound track rides along: an audio clip with the SAME
+        // source range and placement on the audio lane under the video
+        // clip (moves/trims independently - the audio fades editor
+        // lives in Effect Controls while it is selected).
+        const int audioTrack = ensureAudioTrack();
+        model_.addClip(audioTrack, sourcePath.toStdString(), label.toStdString(), 0, out, start);
+    }
     updateSequenceDuration();
+    rebuildAudioSnapshot();
 }
 
 void MainWindow::splitAtPlayhead() {
@@ -860,8 +947,10 @@ void MainWindow::startPlayback(bool playing) {
             requestFrameAt(0.0);
         }
         playClock_->start(static_cast<int>(1000.0 / fps_));
+        startAudioPreview();
     } else {
         playClock_->stop();
+        stopAudioPreview();
     }
 }
 
@@ -879,6 +968,16 @@ void MainWindow::stepFrames(int frames) {
 
 void MainWindow::requestFrameAt(double seconds) {
     playhead_ = seconds;
+    // A seek/scrub while playing moves the playhead out from under
+    // the running audio stream - re-anchor the preview at the new
+    // position (the audio thread is the clock, so it cannot follow on
+    // its own).
+    if (playing_ && audioPreview_ && audioPreview_->running()) {
+        const double audioPos = audioStartSeconds_ + audioPreview_->playedSeconds();
+        if (std::abs(audioPos - playhead_) > 0.30) {
+            startAudioPreview();
+        }
+    }
     // keyframed parameters display at the playhead's position
     // inside the SELECTED clip.
     updateKeyframePanels();
@@ -1249,6 +1348,72 @@ double captionAnchorY() {
     return 0.9;
 }
 } // namespace
+
+int MainWindow::ensureAudioTrack() {
+    for (const fc::Track &track : model_.tracks()) {
+        if (track.isAudio) {
+            return track.index;
+        }
+    }
+    const int index = model_.addTrack("A1", true);
+    timeline_->setModel(&model_); // the lane appears in the timeline UI
+    return index;
+}
+
+void MainWindow::rebuildAudioSnapshot() {
+    audioSpansRevision_ = model_.revision();
+    // Proxy resolution: the decode path for every source (the same
+    // rule the video path uses; runs on the GUI thread - the audio
+    // thread only reads the published snapshot).
+    auto resolver = [this](const std::string &src) -> std::string {
+        const QString source = QString::fromStdString(src);
+        const int index = projectPanel_->library().indexOfPath(source);
+        return (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                   ? projectPanel_->library().at(index)->proxyPath.toStdString()
+                   : src;
+    };
+    audioSpans_.publish(fc::flattenAudioSpans(model_, fps_, resolver),
+                        fc::audioDbToLinear(model_.masterGainDb()));
+}
+
+void MainWindow::startAudioPreview() {
+    stopAudioPreview();
+    rebuildAudioSnapshot();
+    if (!audioSpans_.hasAudio()) {
+        return; // nothing to hear: no device, no mixer, the tick keeps time
+    }
+    int rate = 0, channels = 0;
+    if (!audioPreview_->probe(rate, channels)) {
+        return; // no usable audio output on this machine
+    }
+    previewMixer_ = std::make_unique<fc::AudioWindowMixer>(rate, channels);
+    previewMixer_->setMasterGain(fc::audioDbToLinear(model_.masterGainDb()));
+    audioStartSeconds_ = playhead_;
+    audioStartSample_ = static_cast<int64_t>(std::llround(playhead_ * double(rate)));
+    audioPulled_ = 0;
+    fc::AudioWindowMixer *mixer = previewMixer_.get();
+    const int64_t startSample = audioStartSample_;
+    audioPreview_->begin([this, mixer, startSample, rate](float *dst, int frames) {
+        // Audio render thread: ONLY thread-safe state is touched here
+        // (the snapshot mutex + the mixer, which this thread alone
+        // owns while running).
+        std::vector<fc::AudioSpan> spans;
+        double master = 1.0;
+        audioSpans_.take(spans, master);
+        mixer->setMasterGain(master); // live fader moves
+        const int64_t position = startSample + audioPulled_.load();
+        std::string pullError;
+        mixer->pull(spans, position, frames, dst, pullError);
+        audioPulled_ += frames;
+    });
+}
+
+void MainWindow::stopAudioPreview() {
+    if (audioPreview_) {
+        audioPreview_->stop();
+    }
+    previewMixer_.reset();
+}
 
 void MainWindow::importCaptions() {
     const QString path = QFileDialog::getOpenFileName(
@@ -1652,6 +1817,8 @@ void MainWindow::openProject() {
     colorPanel_->setClip(-1, {});
     colorPanel_->setClipFrame(-1);
     textPanel_->setClip(-1, nullptr);
+    mixer_->refreshFromModel(&model_); // the loaded project's strips
+    rebuildAudioSnapshot();
 
     // Rebuild the media library from the clip sources (order of first
     // use); proxies survive when their generated file still exists.
@@ -1778,14 +1945,15 @@ void MainWindow::exportMedia() {
     const int height = dialog.outputHeight();
     const int crf = dialog.crf();
     const QString preset = dialog.preset();
+    const bool withAudio = dialog.includeAudio();
     exportDialog_->show();
-    QMetaObject::invokeMethod(worker_, [this, path, width, height, crf, preset] {
-        runExportJob(path, width, height, crf, preset);
+    QMetaObject::invokeMethod(worker_, [this, path, width, height, crf, preset, withAudio] {
+        runExportJob(path, width, height, crf, preset, withAudio);
     });
 }
 
 void MainWindow::runExportJob(const QString &path, int width, int height, int crf,
-                              const QString &preset) {
+                              const QString &preset, bool withAudio) {
     // ---- Runs on the decode worker's thread. The modal progress dialog
     // blocks all UI input, so the timeline model is effectively frozen
     // while this job reads it. ----
@@ -1820,6 +1988,43 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     fc::EmojiPainter exportEmoji;
     if (!emojiFontPath_.isEmpty()) {
         exportEmoji.load(emojiFontPath_);
+    }
+
+    // ---- Audio: the timeline flattened ONCE (frozen for the job's
+    // lifetime, like every other model read here) into a job-local
+    // mixer at 48 kHz stereo. The provider mirrors the video side's
+    // tolerance: a broken source mixes as silence and names itself in
+    // the note surfaced after the job.
+    std::unique_ptr<fc::AudioWindowMixer> audioMixer;
+    std::vector<fc::AudioSpan> audioSpans;
+    fc::ExportAudioProvider audioProvider;
+    exportAudioNote_.clear();
+    if (withAudio) {
+        auto resolver = [this](const std::string &src) -> std::string {
+            const QString source = QString::fromStdString(src);
+            const int index = projectPanel_->library().indexOfPath(source);
+            return (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                       ? projectPanel_->library().at(index)->proxyPath.toStdString()
+                       : src;
+        };
+        audioSpans = fc::flattenAudioSpans(model_, fps_, resolver);
+        if (!audioSpans.empty()) {
+            audioMixer = std::make_unique<fc::AudioWindowMixer>(48000, 2);
+            audioMixer->setMasterGain(fc::audioDbToLinear(model_.masterGainDb()));
+            fc::AudioWindowMixer *mixer = audioMixer.get();
+            QString *note = &exportAudioNote_;
+            audioProvider = [mixer, &audioSpans, note](int64_t startSample, int sampleCount,
+                                                       float *dst) -> bool {
+                std::string pullError;
+                if (!mixer->pull(audioSpans, startSample, sampleCount, dst, pullError)) {
+                    return false; // invalid arguments - treat as cancellation
+                }
+                if (!pullError.empty() && note->isEmpty()) {
+                    *note = QString::fromStdString(pullError);
+                }
+                return true;
+            };
+        }
     }
 
     auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
@@ -1983,7 +2188,8 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     };
 
     std::string error;
-    const bool ok = fc::Exporter::run(path.toStdString(), config, provider, progressCb, error);
+    const bool ok =
+        fc::Exporter::run(path.toStdString(), config, provider, progressCb, error, audioProvider);
     const QString errorText = QString::fromStdString(error);
     QMetaObject::invokeMethod(
         this, [this, ok, errorText, path] { finishExport(ok, errorText, path); },
@@ -1998,6 +2204,10 @@ void MainWindow::updateExportProgress(int percent) {
 }
 
 void MainWindow::finishExport(bool ok, const QString &error, const QString &path) {
+    // A successful export may still carry an audio note (a source that
+    // would not decode mixed as silence instead of killing the job).
+    const QString audioNote = exportAudioNote_;
+    exportAudioNote_.clear();
     exportRunning_ = false;
     if (exportDialog_) {
         exportDialog_->deleteLater();
@@ -2005,7 +2215,12 @@ void MainWindow::finishExport(bool ok, const QString &error, const QString &path
         exportBar_ = nullptr;
     }
     if (ok) {
-        statusBar()->showMessage(tr("Export complete: %1").arg(path), 8000);
+        if (!audioNote.isEmpty()) {
+            statusBar()->showMessage(
+                tr("Export complete: %1 (audio note: %2)").arg(path, audioNote), 12000);
+        } else {
+            statusBar()->showMessage(tr("Export complete: %1").arg(path), 8000);
+        }
     } else if (error.isEmpty()) {
         statusBar()->showMessage(tr("Export cancelled - no file was written."), 6000);
     } else {

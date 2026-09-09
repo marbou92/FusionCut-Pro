@@ -511,6 +511,64 @@ inline std::vector<uint8_t> buildSbixFont(const std::vector<uint8_t> &pngGrin) {
     return assembleSfnt(tables);
 }
 
+// An OUTLINE emoji face: a plain sfnt with a cmap covering the given
+// codepoints and a name table, NO bitmap tables (the discovery scan's
+// outline class - Segoe UI Symbol / Symbola / Noto Emoji shapes). The
+// glyphs themselves are never rendered through this engine; only the
+// cmap coverage and the family name matter.
+inline std::vector<uint8_t> buildOutlineFont(const std::vector<uint32_t> &cps, const char *family) {
+    std::vector<TableRec> tables;
+    TableRec maxp;
+    maxp.tag = "maxp";
+    maxp.payload = maxpTable(uint16_t(cps.size() + 1));
+    TableRec head;
+    head.tag = "head";
+    head.payload = headTable(1000);
+    TableRec hhea;
+    hhea.tag = "hhea";
+    hhea.payload = hheaTable(uint16_t(cps.size() + 1));
+    TableRec hmtx;
+    hmtx.tag = "hmtx";
+    std::vector<uint16_t> advances(cps.size() + 1, 500);
+    hmtx.payload = hmtxTable(advances);
+    // cmap: one group per codepoint, glyph ids 1..n.
+    std::vector<std::vector<uint32_t>> groups;
+    for (size_t i = 0; i < cps.size(); ++i) {
+        groups.push_back({cps[i], cps[i], uint32_t(i + 1)});
+    }
+    TableRec cmap;
+    cmap.tag = "cmap";
+    cmap.payload = cmapTable(groups, {});
+    TableRec name;
+    name.tag = "name";
+    name.payload = nameTable(family);
+    // glyf + loca: glyph 0 is a contour-less header (numberOfContours
+    // 0 + its bbox - FreeType's legal blank), every other glyph EMPTY
+    // (equal consecutive loca offsets). Enough for the face to
+    // register with the platform font stack; the ink is the
+    // platform's business.
+    TableRec loca;
+    loca.tag = "loca";
+    Bytes locaB;
+    locaB.u16(0);  // glyph 0 starts at 0
+    locaB.u16(10); // glyph 0 is 10 bytes long
+    for (size_t i = 1; i <= cps.size(); ++i) {
+        locaB.u16(10); // every other glyph: empty
+    }
+    loca.payload = locaB.b;
+    TableRec glyf;
+    glyf.tag = "glyf";
+    Bytes glyfB;
+    glyfB.u16(0);   // numberOfContours = 0
+    glyfB.s16(0);   // xMin
+    glyfB.s16(0);   // yMin
+    glyfB.s16(500); // xMax
+    glyfB.s16(500); // yMax
+    glyf.payload = glyfB.b;
+    tables = {maxp, head, hhea, hmtx, cmap, name, loca, glyf};
+    return assembleSfnt(tables);
+}
+
 // ---- the collection wrapper ----
 
 // A 12-byte "font" with zero tables (parseFontAt refuses it; the

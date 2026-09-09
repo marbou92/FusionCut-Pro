@@ -51,7 +51,8 @@ void DecodeWorker::open(const QString &path) {
     }
 
     const fc::MediaInfo &info = d->decoder.info();
-    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount);
+    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount,
+                   !info.audioStreams.empty());
     requestFrame(0.0);
 }
 
@@ -70,7 +71,8 @@ void DecodeWorker::openQuiet(const QString &path) {
     }
 
     const fc::MediaInfo &info = d->decoder.info();
-    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount);
+    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount,
+                   !info.audioStreams.empty());
 }
 
 void DecodeWorker::requestFrame(double seconds) {

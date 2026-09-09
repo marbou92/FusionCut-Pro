@@ -67,4 +67,28 @@ bool isDefaultEmojiPresentation(uint32_t cp);
 // itself start a cluster; otherwise the cluster ends before the joiner.
 int emojiClusterLength(const uint32_t *cps, size_t count, size_t pos);
 
+// ---------------------------------------------------------------------------
+// Emoji coverage battery - the representative codepoints the font
+// scanner counts to decide whether a font "has emojis".
+//
+// The battery spans the emoji blocks the way real emoji fonts do:
+// smileys (SMP + the BMP legacy set), hearts and hands, activity, food,
+// travel, objects, and the Dingbats/Misc-Symbols BMP block that old
+// monochrome emoji fonts (Segoe UI Symbol, Symbola) cover. A plain
+// text or symbol font maps a stray codepoint or two at most; a real
+// emoji face covers dozens. Pure data, no state.
+// ---------------------------------------------------------------------------
+
+// The battery's codepoints, in ascending order. Pointer + size (not a
+// std::initializer_list) so the table stays a plain compile-time
+// constant with C linkage-free usage in app code.
+const uint32_t *emojiCoverageBattery();
+size_t emojiCoverageBatterySize();
+
+// How many battery hits a font needs before the scanner calls it
+// emoji-capable. Chosen so that one or two accidental mappings in a
+// symbol font can never qualify, while genuine faces (color or
+// outline, Microsoft / Apple / Google / Symbola) pass with room.
+constexpr size_t kEmojiCoverageMinimum = 8;
+
 } // namespace fc

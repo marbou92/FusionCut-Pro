@@ -36,6 +36,10 @@ add_executable(FusionCutPro WIN32
     text_renderer.h
     system_fonts.cpp
     system_fonts.h
+    audio_timeline.cpp
+    audio_timeline.h
+    audio_preview.cpp
+    audio_preview.h
     export_dialog.cpp
     export_dialog.h
     quick_mode_view.cpp
@@ -52,10 +56,12 @@ target_link_libraries(FusionCutPro PRIVATE
 
 # Crash handler: MessageBoxA + Toolhelp32 (module snapshot) live in
 # user32 / kernel32 respectively. kernel32 is auto-linked on Windows;
-# user32 is NOT for a WIN32 exe under MinGW/MSVC unless we ask. Guarded
-# so the Linux Qt compile path (the qt-app-ubuntu CI leg) is unaffected.
+# user32 is NOT for a WIN32 exe under MinGW/MSVC unless we ask. ole32
+# covers the WASAPI preview player's COM calls (CoInitializeEx /
+# CoCreateInstance / CLSIDFromString). Guarded so the Linux Qt compile
+# path (the qt-app-ubuntu CI leg) is unaffected.
 if(WIN32)
-    target_link_libraries(FusionCutPro PRIVATE user32)
+    target_link_libraries(FusionCutPro PRIVATE user32 ole32)
 endif()
 
 # Portable layout: the executable and its dependencies all land in one

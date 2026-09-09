@@ -10,6 +10,8 @@ add_library(fc_core STATIC
     emoji.h
     emoji_clusters.cpp
     emoji_clusters.h
+    audio_math.cpp
+    audio_math.h
     srt.cpp
     srt.h
     project_format.cpp)

@@ -764,16 +764,6 @@ bool parseTextDocument(const JsonValue &node, TextDocument &doc, std::string &er
     return true;
 }
 
-bool getObject(const JsonValue *node, const std::vector<std::pair<std::string, JsonValue>> *&out,
-               std::string &error, const char *field) {
-    if (!node || node->type != JsonValue::Type::Object) {
-        error = std::string("field '") + field + "' missing or not an object";
-        return false;
-    }
-    out = &node->objectValue;
-    return true;
-}
-
 // Rebuilds one EffectInstance from its JSON object. Known effects load
 // "params" by key into descriptor order (missing keys fall back to
 // defaults); unknown effects keep a positional "values" copy so they
@@ -896,6 +886,12 @@ std::string serializeProject(const TimelineModel &model) {
     appendInt(out, kProjectFormatVersion);
     out += ",\"fps\":";
     appendDouble(out, model.fps());
+    // Master fader rides the root only when it is not the default 0 dB
+    // (files written before the mixer existed re-save byte-identical).
+    if (model.masterGainDb() != 0.0) {
+        out += ",\"masterGainDb\":";
+        appendDouble(out, model.masterGainDb());
+    }
 
     out += ",\"tracks\":[";
     bool first = true;
@@ -917,6 +913,16 @@ std::string serializeProject(const TimelineModel &model) {
         appendBool(out, track.muted);
         out += ",\"solo\":";
         appendBool(out, track.solo);
+        // Mixer strip state rides the track only when not default (the
+        // same additive rule as the master fader).
+        if (track.gainDb != 0.0) {
+            out += ",\"gainDb\":";
+            appendDouble(out, track.gainDb);
+        }
+        if (track.pan != 0.0) {
+            out += ",\"pan\":";
+            appendDouble(out, track.pan);
+        }
         out += '}';
     }
     out += ']';
@@ -957,6 +963,15 @@ std::string serializeProject(const TimelineModel &model) {
             appendInt(out, clip.timelineStart);
             out += ",\"rate\":";
             appendDouble(out, clip.rate);
+            // Audio fades ride the clip only when not default.
+            if (clip.fadeInFrames != 0) {
+                out += ",\"fadeIn\":";
+                appendInt(out, clip.fadeInFrames);
+            }
+            if (clip.fadeOutFrames != 0) {
+                out += ",\"fadeOut\":";
+                appendInt(out, clip.fadeOutFrames);
+            }
         }
 
         out += ",\"effects\":[";
@@ -1091,6 +1106,19 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
         return false;
     }
 
+    // Master fader (optional; files written before the mixer existed
+    // load at the default 0 dB). Present means a sane number.
+    double masterGainDb = 0.0;
+    if (const JsonValue *masterNode = root.find("masterGainDb")) {
+        if (!getNumber(masterNode, masterGainDb, error, "masterGainDb") || masterGainDb < -60.0 ||
+            masterGainDb > 12.0) {
+            if (error.empty()) {
+                error = "master gain out of range";
+            }
+            return false;
+        }
+    }
+
     // ---- tracks ----
     const std::vector<JsonValue> *trackNodes = nullptr;
     if (!getArray(root.find("tracks"), trackNodes, error, "tracks")) {
@@ -1115,6 +1143,26 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
         // means it must be a valid boolean.
         if (const JsonValue *textNode = node.find("text")) {
             if (!getBool(textNode, track.isText, error, "track.text")) {
+                return false;
+            }
+        }
+        // Mixer strip state (optional; the same additive rule - present
+        // means in range).
+        if (const JsonValue *gainNode = node.find("gainDb")) {
+            if (!getNumber(gainNode, track.gainDb, error, "track.gainDb") || track.gainDb < -60.0 ||
+                track.gainDb > 12.0) {
+                if (error.empty()) {
+                    error = "track gain out of range";
+                }
+                return false;
+            }
+        }
+        if (const JsonValue *panNode = node.find("pan")) {
+            if (!getNumber(panNode, track.pan, error, "track.pan") || track.pan < -1.0 ||
+                track.pan > 1.0) {
+                if (error.empty()) {
+                    error = "track pan out of range";
+                }
                 return false;
             }
         }
@@ -1210,6 +1258,25 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
             if (clip.timelineStart < 0) {
                 error = "clip start must be >= 0";
                 return false;
+            }
+            // Audio fades (optional; present means a sane frame count).
+            if (const JsonValue *fadeNode = node.find("fadeIn")) {
+                if (!getIntegral(fadeNode, clip.fadeInFrames, error, "clip.fadeIn") ||
+                    clip.fadeInFrames < 0 || clip.fadeInFrames > 1000000000LL) {
+                    if (error.empty()) {
+                        error = "clip fadeIn out of range";
+                    }
+                    return false;
+                }
+            }
+            if (const JsonValue *fadeNode = node.find("fadeOut")) {
+                if (!getIntegral(fadeNode, clip.fadeOutFrames, error, "clip.fadeOut") ||
+                    clip.fadeOutFrames < 0 || clip.fadeOutFrames > 1000000000LL) {
+                    if (error.empty()) {
+                        error = "clip fadeOut out of range";
+                    }
+                    return false;
+                }
             }
         }
         if (clip.id <= 0) {
@@ -1311,6 +1378,7 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
 
     // Everything validated: swap the whole model in one step.
     model.replaceAll(fps, std::move(tracks), std::move(clips), std::move(transitions));
+    model.setMasterGainDb(masterGainDb);
     return true;
 }
 

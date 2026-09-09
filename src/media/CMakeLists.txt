@@ -1,4 +1,5 @@
-# fc_media: FFmpeg-backed media I/O layer (probe / decode / proxy).
+# fc_media: FFmpeg-backed media I/O layer (probe / decode / proxy /
+# export / audio mixing).
 # PkgConfig::FFMPEG is discovered once in the top-level CMakeLists (see the
 # directory-scoping note there) and is visible here.
 
@@ -6,6 +7,8 @@ add_library(fc_media STATIC
     ffmpeg_wrappers.cpp
     media_probe.cpp
     video_decoder.cpp
+    audio_decoder.cpp
+    audio_mixer.cpp
     proxy_generator.cpp
     exporter.cpp)
 

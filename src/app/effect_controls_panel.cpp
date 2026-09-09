@@ -6,6 +6,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
@@ -89,8 +90,53 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
     transLayout->addWidget(transitionRemove_);
 
     pages_ = new QStackedWidget(this);
+    // ---- Audio fade editor page ----
+    fadesPage_ = new QWidget(this);
+    fadesLabel_ = new QLabel(tr("No audio clip selected"), fadesPage_);
+    fadesLabel_->setWordWrap(true);
+    fadeInSpin_ = new QSpinBox(fadesPage_);
+    fadeInSpin_->setRange(0, 1);
+    fadeOutSpin_ = new QSpinBox(fadesPage_);
+    fadeOutSpin_->setRange(0, 1);
+    fadeOutSpin_->setValue(0);
+    fadeInSpin_->setValue(0);
+    auto *fadeInRow = new QWidget(fadesPage_);
+    auto *inLayout = new QHBoxLayout(fadeInRow);
+    inLayout->setContentsMargins(0, 0, 0, 0);
+    inLayout->addWidget(new QLabel(tr("Fade in (frames):"), fadeInRow));
+    inLayout->addWidget(fadeInSpin_, 1);
+    auto *fadeOutRow = new QWidget(fadesPage_);
+    auto *outLayout = new QHBoxLayout(fadeOutRow);
+    outLayout->setContentsMargins(0, 0, 0, 0);
+    outLayout->addWidget(new QLabel(tr("Fade out (frames):"), fadeOutRow));
+    outLayout->addWidget(fadeOutSpin_, 1);
+    auto *fadesNote = new QLabel(
+        tr("Linear ramps at the clip's own head and tail - click-free cuts and simple audio "
+           "dissolves. Applied identically in the preview and the export mix."),
+        fadesPage_);
+    fadesNote->setWordWrap(true);
+    fadesNote->setStyleSheet("QLabel { color: #999; }");
+    auto *fadesLayout = new QVBoxLayout(fadesPage_);
+    fadesLayout->setContentsMargins(8, 8, 8, 8);
+    fadesLayout->addWidget(fadesLabel_);
+    fadesLayout->addWidget(fadeInRow);
+    fadesLayout->addWidget(fadeOutRow);
+    fadesLayout->addWidget(fadesNote);
+    fadesLayout->addStretch(1);
+    connect(fadeInSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int frames) {
+        if (clipId_ > 0) {
+            emit audioFadesChanged(clipId_, int64_t(frames), int64_t(fadeOutSpin_->value()));
+        }
+    });
+    connect(fadeOutSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int frames) {
+        if (clipId_ > 0) {
+            emit audioFadesChanged(clipId_, int64_t(fadeInSpin_->value()), int64_t(frames));
+        }
+    });
+
     pages_->addWidget(stackPage_);
     pages_->addWidget(transitionPage_);
+    pages_->addWidget(fadesPage_);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6, 6, 6, 6);
@@ -173,6 +219,42 @@ void EffectControlsPanel::setStack(int64_t clipId, const std::vector<fc::EffectI
     }
     rebuildParams();
     pages_->setCurrentWidget(stackPage_);
+}
+
+void EffectControlsPanel::setAudioFades(int64_t clipId, int64_t fadeIn, int64_t fadeOut,
+                                        int64_t maxFrames) {
+    clipId_ = clipId;
+    if (fadeIn < 0) {
+        fadeIn = 0;
+    }
+    if (fadeOut < 0) {
+        fadeOut = 0;
+    }
+    if (maxFrames < 1) {
+        maxFrames = 1;
+    }
+    const int hi = int(std::min<int64_t>(maxFrames, 100000));
+    fadeInSpin_->setRange(0, hi);
+    fadeOutSpin_->setRange(0, hi);
+    if (clipId < 0) {
+        fadesLabel_->setText(tr("No audio clip selected"));
+        fadeInSpin_->blockSignals(true);
+        fadeInSpin_->setValue(0);
+        fadeInSpin_->blockSignals(false);
+        fadeOutSpin_->blockSignals(true);
+        fadeOutSpin_->setValue(0);
+        fadeOutSpin_->blockSignals(false);
+        pages_->setCurrentWidget(fadesPage_);
+        return;
+    }
+    fadesLabel_->setText(tr("Clip %1 - audio fades").arg(qlonglong(clipId)));
+    fadeInSpin_->blockSignals(true);
+    fadeInSpin_->setValue(int(std::min(fadeIn, int64_t(hi))));
+    fadeInSpin_->blockSignals(false);
+    fadeOutSpin_->blockSignals(true);
+    fadeOutSpin_->setValue(int(std::min(fadeOut, int64_t(hi))));
+    fadeOutSpin_->blockSignals(false);
+    pages_->setCurrentWidget(fadesPage_);
 }
 
 void EffectControlsPanel::setClipFrame(int64_t frame) {

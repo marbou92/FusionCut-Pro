@@ -8,7 +8,10 @@
 
 #include <atomic>
 #include <map>
+#include <memory>
 
+#include "audio_preview.h"
+#include "audio_timeline.h"
 #include "media_item.h"
 #include "system_fonts.h"
 #include "text_renderer.h"
@@ -63,7 +66,7 @@ private:
     // Media + playback flow.
     void importMedia();
     void loadClip(const QString &sourcePath);
-    void addPendingClip(const QString &sourcePath, int64_t sourceOutFrames);
+    void addPendingClip(const QString &sourcePath, int64_t sourceOutFrames, bool withAudio);
     void splitAtPlayhead();
     void deleteSelectedClip();
     void generateProxy(const QString &sourcePath);
@@ -85,7 +88,8 @@ private:
     // frame through the exact program-monitor pipeline (effects with
     // keyframes + transitions); finishExport() marshals back.
     void exportMedia();
-    void runExportJob(const QString &path, int width, int height, int crf, const QString &preset);
+    void runExportJob(const QString &path, int width, int height, int crf, const QString &preset,
+                      bool withAudio);
     void finishExport(bool ok, const QString &error, const QString &path);
     void updateExportProgress(int percent);
 
@@ -121,6 +125,20 @@ private:
     void setEmojiFont(const QString &path);
     void importCaptions();
     void exportCaptions();
+
+    // ---- timeline audio ----
+    // First audio-track index (creates A1 lazily when a file with an
+    // audio stream is imported into a project that has none).
+    int ensureAudioTrack();
+    // Re-flattens the audio-track clips into the thread-safe snapshot
+    // the preview player and the export provider mix from (GUI thread;
+    // the audio thread only ever reads the snapshot).
+    void rebuildAudioSnapshot();
+    // Opens the WASAPI preview device, builds the mixer at the device's
+    // rate, and starts pulling the mixed timeline from the playhead.
+    void startAudioPreview();
+    // Stops the preview stream and joins its thread.
+    void stopAudioPreview();
 
     // cut transitions - add/remove/duration routing for the
     // panels, the held-frame fetch for the incoming clip, and the
@@ -225,6 +243,22 @@ private:
     fc::EmojiPainter emojiPainter_;
     QString emojiFontPath_;
     QVector<fc::SystemEmojiFont> emojiFonts_;
+
+    // Timeline audio state: the snapshot handoff (GUI publishes, the
+    // audio render thread takes), the preview player, the per-run
+    // mixer (device-rate), the run's anchor position, and the revision
+    // the snapshot was last built from (checked while playing so track
+    // edits land in the mix without a restart).
+    fc::AudioTimelineSnapshot audioSpans_;
+    std::unique_ptr<fc::AudioPreview> audioPreview_;
+    std::unique_ptr<fc::AudioWindowMixer> previewMixer_;
+    double audioStartSeconds_ = 0.0;
+    int64_t audioStartSample_ = 0;
+    std::atomic<int64_t> audioPulled_{0};
+    uint64_t audioSpansRevision_ = 0;
+    // First mixing problem of the current export (surfaced after the
+    // job; the mix itself is failure-tolerant).
+    QString exportAudioNote_;
 
     // Export state (the cancel flag is read from the worker thread;
     // everything else stays on the UI thread).

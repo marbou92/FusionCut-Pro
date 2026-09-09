@@ -109,13 +109,15 @@ bool setupAudioEncoder(AVCodecContext *&ctx, const AVCodec *&codec, int sampleRa
 
 // Configures a resampler from a decoded frame's layout to the encoder's
 // stereo FLTP target. Returns an unset pointer on failure.
+// NOTE: both swr_alloc_set_opts* variants take the OUTPUT geometry
+// FIRST, then the input's.
 SwrContextPtr makeResampler(const AVFrame *src, const AVCodecContext *enc) {
     SwrContext *raw = nullptr;
 #ifdef FC_HAVE_CH_LAYOUT
     AVChannelLayout inLayout;
     av_channel_layout_default(&inLayout, src->ch_layout.nb_channels);
-    if (swr_alloc_set_opts2(&raw, &inLayout, static_cast<AVSampleFormat>(src->format),
-                            src->sample_rate, &enc->ch_layout, enc->sample_fmt, enc->sample_rate, 0,
+    if (swr_alloc_set_opts2(&raw, &enc->ch_layout, enc->sample_fmt, enc->sample_rate, &inLayout,
+                            static_cast<AVSampleFormat>(src->format), src->sample_rate, 0,
                             nullptr) < 0) {
         return SwrContextPtr();
     }

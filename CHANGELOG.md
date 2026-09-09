@@ -41,8 +41,31 @@ version stays at 0.1.0 until the first public build.
 - **Captions:** strict SubRip (.srt) parser + canonical writer; import
   turns cues into styled text clips on the text track, export writes
   the timeline's text clips back out (markup-stripped, byte-stable).
+- **Audio mixing:** the timeline's audio-track clips flatten into
+  mixer spans (track gain/pan/mute/solo baked in, per-clip linear
+  fades, seconds-mapped) and mix through a windowed, rolling-decoder
+  engine at any requested rate/channel count. The Mixer panel carries
+  real strips (faders, pan, mute/solo) plus a master fader; audio
+  clips get a fade editor in Effect Controls. Playback streams the mix
+  through the machine's audio device (WASAPI shared mode,
+  event-driven; the device's consumed position is the playhead clock,
+  scrubbing re-anchors); the export muxes the identical mix as an AAC
+  track alongside the H.264 video. Importing a file with sound places
+  video and audio clips together; audio-only files become audio clips.
+  A source that will not decode mixes as silence and says so. Track
+  strips, fades, and master persist additively in the project file.
 - **Color emoji from the machine's own fonts:** no font is bundled.
-  The app discovers the emoji-capable fonts installed on the PC
+  The app discovers the emoji-capable fonts installed on the PC -
+  scanning the platform font directories AND the Windows font
+  registrations (HKLM/HKCU), so relocated installs are found too. A
+  face qualifies by mapping a representative battery of emoji
+  codepoints (a font tagged with bitmap tables but empty behind them
+  does not), and the picker lists each family exactly once (path,
+  normalized-family-key, and byte-identical-content deduplication).
+  Faces without bitmap tables but real emoji coverage - Segoe UI
+  Symbol, Symbola, the outline Noto Emoji - list as *outline* picks:
+  choosing one routes emoji clusters through that font's monochrome
+  artwork via the platform text stack. Color faces
   (Segoe UI Emoji, Noto Color Emoji, JoyPixels... CBDT/CBLC+GSUB
   faces; Apple Color Emoji `.ttc` collections with sbix strikes) and
   the Text panel's emoji-font picker selects which one renders -
@@ -85,11 +108,12 @@ version stays at 0.1.0 until the first public build.
 
 ### Tests
 
-Eight ctest suites, ~8500 checks total: core (88), timeline (130),
-effects (2643), transitions (4531), project (79), text (381),
-emoji (218), media (400). Synthetic media is generated at runtime;
-the emoji suite pins its expectations against the committed font
-bytes.
+Ten ctest suites, ~40,000 checks total: core (88), timeline (130),
+audio (1714), effects (2643), transitions (4531), project (131),
+text (453), emoji (365), srt (83), media (29766). Synthetic media is
+generated at runtime; the emoji suite pins its expectations against
+hand-built synthetic font fixtures (nothing font-shaped lives in the
+repo).
 
 ### Notable engineering finds along the way
 
@@ -104,10 +128,26 @@ bytes.
 - Index-subtable format 1 keeps its first glyph exactly at
   `sbitOffset`; the PNG signature check is what separates "missing
   glyph" from corruption in that convention.
+- `swr_alloc_set_opts2` takes the OUTPUT layout/format/rate FIRST -
+  the proxy's resampler had them swapped. Invisible for years because
+  every synthetic source was 48 kHz stereo (a pure pass-through hides
+  any direction); found the moment the audio decoder fed a real
+  conversion (a segfault inside libswresample).
+- The emoji name-table decoder advanced a surrogate pair by three
+  bytes instead of four, re-reading the pair's second byte as a fresh
+  unit - every astral codepoint after the first corrupted. Invisible
+  because no real emoji font carries astral characters in its FAMILY
+  name; caught by a synthetic name-table test.
+- Light font probing needs the REAL file length: table records
+  routinely point past any short head, so offset bounds checks use
+  the file size, not the bytes actually read.
 
 ### Known scope
 
-- Video-only export; timeline audio mixing (multi-track summing,
-  crossfades) ships later.
-- Text animations and caption (SRT) import are planned.
 - Quick Mode AI one-tap actions are placeholders.
+- Audio crossfades across a CUT (dissolving two adjacent audio clips
+  automatically) are not modeled yet; per-clip fades cover the
+  click-free case.
+- Audio effects (EQ, compression) do not exist yet - the effect stack
+  is a video (RGBA) concept.
+- No audio meters on the mixer strips yet.

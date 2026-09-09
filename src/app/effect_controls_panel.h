@@ -12,6 +12,7 @@ class QListWidget;
 class QPushButton;
 class QScrollArea;
 class QSlider;
+class QSpinBox;
 class QStackedWidget;
 
 // Pro Mode right panel: the effect stack editor for ONE clip, plus the
@@ -54,10 +55,18 @@ public:
     void setTransition(int64_t transitionId, const QString &kindLabel, int64_t durationFrames,
                        int64_t maxDurationFrames, const QString &pairLabel, double fps);
 
+    // Shows the AUDIO FADE editor for an audio-track clip (clipId < 0
+    // clears the panel). fadeIn/fadeOut are the clip's current fade
+    // lengths in timeline frames; maxFrames (the clip's duration) clamps
+    // the spin boxes. Fades are linear ramps applied at the clip's own
+    // head/tail in the preview and export mixes (click-free cuts).
+    void setAudioFades(int64_t clipId, int64_t fadeIn, int64_t fadeOut, int64_t maxFrames);
+
 signals:
     void stackChanged(int64_t clipId, const std::vector<fc::EffectInstance> &stack);
     void transitionDurationChanged(int64_t transitionId, int64_t durationFrames);
     void transitionRemoveRequested(int64_t transitionId);
+    void audioFadesChanged(int64_t clipId, int64_t fadeIn, int64_t fadeOut);
 
 private:
     void rebuildList();
@@ -72,6 +81,12 @@ private:
     int64_t clipId_ = -1;
     std::vector<fc::EffectInstance> stack_;
     int64_t clipFrame_ = -1;
+
+    // Audio fade editor state (the third page; shares pages_).
+    QWidget *fadesPage_ = nullptr;
+    QSpinBox *fadeInSpin_ = nullptr;
+    QSpinBox *fadeOutSpin_ = nullptr;
+    QLabel *fadesLabel_ = nullptr;
 
     // One live Number-param row (rebuilt by rebuildParams, refreshed by
     // refreshParamValues).

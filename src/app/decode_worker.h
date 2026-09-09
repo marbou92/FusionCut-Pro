@@ -38,7 +38,10 @@ public slots:
     void shutdown();
 
 signals:
-    void mediaInfo(const QString &summary, double durationSeconds, double fps, int64_t frameCount);
+    // hasAudio: the file carries at least one audio stream (the import
+    // flow places a matching audio clip on an audio track when it does).
+    void mediaInfo(const QString &summary, double durationSeconds, double fps, int64_t frameCount,
+                   bool hasAudio);
     void frameReady(const QImage &frame, double ptsSeconds);
     void failed(const QString &error);
     void proxyProgress(int percent);

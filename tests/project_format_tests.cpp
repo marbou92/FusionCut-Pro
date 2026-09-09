@@ -416,11 +416,132 @@ void testTextAnimationRejections() {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Audio mixing state: track gain/pan, clip fades, master fader - all
+// additive (defaults write NO keys, so pre-mixer files round-trip
+// byte-identically).
+// ---------------------------------------------------------------------------
+
+void testAudioStateRoundTrip() {
+    TimelineModel m;
+    m.setFps(24.0);
+    m.addTrack("V1", false);
+    m.addTrack("A1", true);
+    m.setTrackAudio(1, -6.0, 0.25);
+    m.setTrackState(1, false, true, false);
+    m.setMasterGainDb(-3.0);
+    const int64_t a = m.addClip(1, "song.mp3", "song", 0, 480, 0);
+    const int64_t b = m.addClip(1, "song.mp3", "song2", 480, 960, 480);
+    CHECK(a > 0 && b > 0);
+    CHECK(m.setClipAudioFades(a, 12, 24));
+    CHECK(m.setClipAudioFades(b, 0, 6));
+
+    const std::string text = serializeProject(m);
+    CHECK(text.find("\"gainDb\":-6") != std::string::npos);
+    CHECK(text.find("\"pan\"") != std::string::npos);
+    CHECK(text.find("\"masterGainDb\"") != std::string::npos);
+    CHECK(text.find("\"fadeIn\":12") != std::string::npos);
+    CHECK(text.find("\"fadeOut\":24") != std::string::npos);
+
+    TimelineModel loaded;
+    std::string error;
+    CHECK(parseProject(text, loaded, error));
+    CHECK(error.empty());
+    CHECK(std::fabs(loaded.tracks()[1].gainDb + 6.0) < 1.0e-9);
+    CHECK(std::fabs(loaded.tracks()[1].pan - 0.25) < 1.0e-9);
+    CHECK(loaded.tracks()[1].muted);
+    CHECK(std::fabs(loaded.masterGainDb() + 3.0) < 1.0e-9);
+    const Clip *ca = loaded.clipById(a);
+    const Clip *cb = loaded.clipById(b);
+    CHECK(ca && ca->fadeInFrames == 12 && ca->fadeOutFrames == 24);
+    CHECK(cb && cb->fadeInFrames == 0 && cb->fadeOutFrames == 6);
+
+    // Byte-identical deterministic re-serialization of the loaded model.
+    CHECK(serializeProject(loaded) == text);
+
+    // Default state writes NONE of the new keys.
+    TimelineModel plain;
+    plain.setFps(24.0);
+    plain.addTrack("V1", false);
+    plain.addTrack("A1", true);
+    plain.addClip(1, "x.wav", "x", 0, 240, 0);
+    const std::string plainText = serializeProject(plain);
+    CHECK(plainText.find("gainDb") == std::string::npos);
+    CHECK(plainText.find("pan") == std::string::npos);
+    CHECK(plainText.find("masterGainDb") == std::string::npos);
+    CHECK(plainText.find("fadeIn") == std::string::npos);
+    CHECK(plainText.find("fadeOut") == std::string::npos);
+}
+
+void testAudioStateRejections() {
+    TimelineModel m;
+    m.setFps(24.0);
+    m.addTrack("V1", false);
+    m.addTrack("A1", true);
+    m.addClip(1, "s.wav", "s", 0, 240, 0);
+    const std::string base = serializeProject(m);
+
+    auto parseMutation = [&](const std::string &mutated) {
+        TimelineModel loaded;
+        std::string error;
+        const bool ok = parseProject(mutated, loaded, error);
+        return std::pair<bool, std::string>(ok, error);
+    };
+
+    // Out-of-range values reject whole-file.
+    {
+        std::string t = base;
+        t.replace(t.find("\"format\""), 0, "");
+        t.insert(t.find('{') + 1, "\"masterGainDb\":99,");
+        auto r = parseMutation(t);
+        CHECK(!r.first);
+    }
+    {
+        std::string t = base;
+        t.insert(t.find("\"audio\":true") + 12, ",\"gainDb\":-500");
+        auto r = parseMutation(t);
+        CHECK(!r.first);
+    }
+    {
+        std::string t = base;
+        t.insert(t.find("\"audio\":true") + 12, ",\"pan\":3");
+        auto r = parseMutation(t);
+        CHECK(!r.first);
+    }
+    {
+        std::string t = base;
+        const size_t at = t.find("\"out\":240");
+        t.insert(at + 9, ",\"fadeIn\":-4");
+        auto r = parseMutation(t);
+        CHECK(!r.first);
+    }
+    {
+        std::string t = base;
+        const size_t at = t.find("\"out\":240");
+        t.insert(at + 9, ",\"fadeOut\":\"x\"");
+        auto r = parseMutation(t);
+        CHECK(!r.first);
+    }
+    // A video track with a fader is structurally legal (the mixer
+    // ignores it), so it must round-trip - not reject.
+    {
+        std::string t = base;
+        t.insert(t.find("\"audio\":false") + 13, ",\"gainDb\":2.5");
+        TimelineModel loaded;
+        std::string error;
+        CHECK(parseProject(t, loaded, error));
+        CHECK(std::fabs(loaded.tracks()[0].gainDb - 2.5) < 1.0e-9);
+    }
+}
+
 int main() {
     testRoundTrip();
     testParserStrictness();
     testJsonStringsAndNumbers();
     testTextAnimationRoundTrip();
     testTextAnimationRejections();
+    testAudioStateRoundTrip();
+    testAudioStateRejections();
+
     return testExitCode("project");
 }

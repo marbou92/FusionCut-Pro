@@ -51,7 +51,7 @@ bool writePacket(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AV
 
 bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
                    const ExportFrameProvider &provider, const ExportProgress &progress,
-                   std::string &error) {
+                   std::string &error, const ExportAudioProvider &audioProvider) {
     if (!provider) {
         error = "no frame provider";
         return false;
@@ -67,6 +67,12 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
     if (config.totalFrames <= 0) {
         error = "nothing to export (empty sequence)";
         return false;
+    }
+    if (config.audioChannels != 1 && config.audioChannels != 2) {
+        config.audioChannels = 2;
+    }
+    if (config.sampleRate < 8000 || config.sampleRate > 192000) {
+        config.sampleRate = 48000;
     }
 
     // Remove partial output when the job fails or is cancelled.
@@ -117,6 +123,65 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
         return false;
     }
 
+    // ---- Audio encoder (optional: only when a provider was passed) ----
+    // Windows tile the timeline exactly at frame granularity:
+    // edge(f) = floor(f * rate * den / num) for the fps rational (the
+    // video encoder's fpsQ above), so [edge(f), edge(f+1)) never
+    // overlaps or gaps. The provider mixes each window; a FIFO
+    // accumulates AAC frame_size groups.
+    CodecContextPtr audioEnc;
+    AVStream *audioStream = nullptr;
+    FramePtr audioFrame;
+    int64_t audioFrameSize = 0;
+    int64_t audioPts = 0;         // in SAMPLES at config.sampleRate
+    std::vector<float> audioFifo; // interleaved, audioChannels per frame
+    if (audioProvider) {
+        const AVCodec *aac = avcodec_find_encoder(AV_CODEC_ID_AAC);
+        if (!aac) {
+            error = "no AAC encoder in this FFmpeg build";
+            return false;
+        }
+        audioEnc.reset(avcodec_alloc_context3(aac));
+        if (!audioEnc) {
+            error = "audio encoder context alloc failed";
+            return false;
+        }
+        audioEnc->sample_rate = config.sampleRate;
+        audioEnc->sample_fmt = AV_SAMPLE_FMT_FLTP; // the native AAC contract
+        audioEnc->bit_rate = 192000;
+        audioEnc->time_base = AVRational{1, config.sampleRate};
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+        av_channel_layout_default(&audioEnc->ch_layout, config.audioChannels);
+#else
+        audioEnc->channels = config.audioChannels;
+        audioEnc->channel_layout = av_get_default_channel_layout(config.audioChannels);
+#endif
+        if (avcodec_open2(audioEnc.get(), aac, nullptr) < 0) {
+            error = "audio encoder open failed";
+            return false;
+        }
+        audioFrameSize = audioEnc->frame_size > 0 ? audioEnc->frame_size : 1024;
+
+        audioFrame.reset(av_frame_alloc());
+        if (!audioFrame) {
+            error = "audio frame alloc failed";
+            return false;
+        }
+        audioFrame->format = AV_SAMPLE_FMT_FLTP;
+        audioFrame->sample_rate = config.sampleRate;
+        audioFrame->nb_samples = static_cast<int>(audioFrameSize);
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
+        av_channel_layout_copy(&audioFrame->ch_layout, &audioEnc->ch_layout);
+#else
+        audioFrame->channel_layout = audioEnc->channel_layout;
+        audioFrame->channels = audioEnc->channels;
+#endif
+        if (av_frame_get_buffer(audioFrame.get(), 0) < 0) {
+            error = "audio frame buffer alloc failed";
+            return false;
+        }
+    }
+
     // ---- Output container ----
     AVFormatContext *rawOut = nullptr;
     int rc = avformat_alloc_output_context2(&rawOut, nullptr, nullptr, dstPath.c_str());
@@ -132,6 +197,15 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
     }
     stream->time_base = enc->time_base;
     avcodec_parameters_from_context(stream->codecpar, enc.get());
+    if (audioProvider) {
+        audioStream = avformat_new_stream(out.get(), nullptr);
+        if (!audioStream) {
+            error = "audio stream alloc failed";
+            return false;
+        }
+        audioStream->time_base = AVRational{1, config.sampleRate};
+        avcodec_parameters_from_context(audioStream->codecpar, audioEnc.get());
+    }
 
     IoContextPtr io;
     if (!(out->oformat->flags & AVFMT_NOFILE)) {
@@ -181,9 +255,72 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
         return false;
     }
 
+    // Encodes one full interleaved window of FIFO samples as an AAC
+    // frame (planar FLTP layout) and writes the packet.
+    auto encodeAudioFrame = [&]() -> bool {
+        if (!audioProvider || !audioEnc) {
+            return true;
+        }
+        const int ch = config.audioChannels;
+        av_frame_make_writable(audioFrame.get());
+        for (int c = 0; c < ch; ++c) {
+            float *plane = reinterpret_cast<float *>(audioFrame->extended_data[c]);
+            for (int64_t i = 0; i < audioFrameSize; ++i) {
+                plane[i] = audioFifo[size_t(i) * ch + size_t(c)];
+            }
+        }
+        audioFrame->pts = audioPts;
+        audioPts += audioFrameSize;
+        const int sendRc = avcodec_send_frame(audioEnc.get(), audioFrame.get());
+        if (sendRc < 0) {
+            error = "audio encode send failed: " + fcError(sendRc);
+            return false;
+        }
+        while (avcodec_receive_packet(audioEnc.get(), pkt.get()) == 0) {
+            if (!writePacket(out.get(), audioEnc.get(), audioStream, pkt.get(), error)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // Pulls the provider's window for frame f into the FIFO and encodes
+    // every complete AAC frame that becomes available.
+    auto pullAudioWindow = [&](int64_t f) -> bool {
+        if (!audioProvider || !audioEnc) {
+            return true;
+        }
+        // Exact rational window edges: floor(f * rate * den / num), in
+        // int64 (a 3-hour 29.97 sequence stays far inside the range).
+        const int64_t e0 = (f * int64_t(config.sampleRate) * int64_t(fpsQ.den)) / int64_t(fpsQ.num);
+        const int64_t e1 =
+            ((f + 1) * int64_t(config.sampleRate) * int64_t(fpsQ.den)) / int64_t(fpsQ.num);
+        if (e1 <= e0) {
+            return true; // degenerate (sub-sample frame) - nothing to pull
+        }
+        const int count = static_cast<int>(e1 - e0);
+        audioFifo.insert(audioFifo.end(), size_t(count) * config.audioChannels, 0.0f);
+        float *dst = audioFifo.data() + (audioFifo.size() - size_t(count) * config.audioChannels);
+        if (!audioProvider(e0, count, dst)) {
+            error.clear(); // cancellation: no error message
+            return false;
+        }
+        while (audioFifo.size() / config.audioChannels >= size_t(audioFrameSize)) {
+            if (!encodeAudioFrame()) {
+                return false;
+            }
+            audioFifo.erase(audioFifo.begin(),
+                            audioFifo.begin() + size_t(audioFrameSize) * config.audioChannels);
+        }
+        return true;
+    };
+
     for (int64_t f = 0; f < config.totalFrames; ++f) {
         if (!provider(static_cast<int>(f), rgba.data())) {
             error.clear(); // cancellation: no error message
+            return false;
+        }
+        if (!pullAudioWindow(f)) {
             return false;
         }
         const uint8_t *srcPlane[1] = {rgba.data()};
@@ -213,6 +350,24 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
     while (avcodec_receive_packet(enc.get(), pkt.get()) == 0) {
         if (!writePacket(out.get(), enc.get(), stream, pkt.get(), error)) {
             return false;
+        }
+    }
+    if (audioProvider && audioEnc) {
+        // Pad the tail with silence to a whole AAC frame so the last
+        // partial window flushes (<= one frame, ~21 ms at 48 kHz).
+        const size_t have = audioFifo.size() / config.audioChannels;
+        if (have > 0) {
+            audioFifo.resize(size_t(audioFrameSize) * config.audioChannels, 0.0f);
+            if (!encodeAudioFrame()) {
+                return false;
+            }
+            audioFifo.clear();
+        }
+        avcodec_send_frame(audioEnc.get(), nullptr);
+        while (avcodec_receive_packet(audioEnc.get(), pkt.get()) == 0) {
+            if (!writePacket(out.get(), audioEnc.get(), audioStream, pkt.get(), error)) {
+                return false;
+            }
         }
     }
     rc = av_write_trailer(out.get());

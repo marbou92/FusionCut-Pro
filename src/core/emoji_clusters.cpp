@@ -181,4 +181,76 @@ int emojiClusterLength(const uint32_t *cps, size_t count, size_t pos) {
     return static_cast<int>(end - pos);
 }
 
+// ---------------------------------------------------------------------------
+// Coverage battery
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Ascending. Deliberately mixes:
+//   * SMP smileys/people (1F600+) - what the color fonts cover;
+//   * BMP legacy emoji (2600 block, 2700 Dingbats, 231A/23F0) - what
+//     the monochrome faces (Segoe UI Symbol, Symbola, Noto Emoji
+//     outline) cover;
+//   * hearts, hands, food, travel, objects, activity - every major
+//     emoji category, so a font covering only one niche corner of
+//     emoji still shows up.
+constexpr uint32_t kCoverageBattery[] = {
+    0x231Au,  // watch
+    0x23F0u,  // alarm clock
+    0x2600u,  // sun
+    0x260Eu,  // telephone
+    0x2614u,  // umbrella with rain
+    0x263Au,  // white smiling face
+    0x26BDu,  // soccer ball
+    0x26C4u,  // snowman
+    0x26F5u,  // sailboat
+    0x2708u,  // airplane
+    0x270Cu,  // victory hand
+    0x2728u,  // sparkles
+    0x2744u,  // snowflake
+    0x274Cu,  // cross mark
+    0x2753u,  // red question mark
+    0x2757u,  // red exclamation
+    0x2764u,  // red heart
+    0x1F321u, // thermometer
+    0x1F339u, // rose
+    0x1F341u, // maple leaf
+    0x1F344u, // mushroom
+    0x1F366u, // soft ice cream
+    0x1F36Bu, // chocolate bar
+    0x1F370u, // shortcake
+    0x1F389u, // party popper
+    0x1F3C0u, // basketball
+    0x1F3E0u, // house
+    0x1F3E2u, // office building
+    0x1F44Bu, // waving hand
+    0x1F44Cu, // OK hand
+    0x1F44Du, // thumbs up
+    0x1F44Fu, // clapping hands
+    0x1F512u, // lock
+    0x1F525u, // fire
+    0x1F534u, // red circle
+    0x1F600u, // grinning face
+    0x1F601u, // beaming face
+    0x1F602u, // face with tears of joy
+    0x1F603u, // grinning face with big eyes
+    0x1F60Au, // smiling face
+    0x1F62Du, // loudly crying face
+    0x1F631u, // face screaming in fear
+    0x1F680u, // rocket
+    0x1F695u, // taxi
+};
+constexpr size_t kCoverageBatterySize = sizeof(kCoverageBattery) / sizeof(kCoverageBattery[0]);
+
+} // namespace
+
+const uint32_t *emojiCoverageBattery() {
+    return kCoverageBattery;
+}
+
+size_t emojiCoverageBatterySize() {
+    return kCoverageBatterySize;
+}
+
 } // namespace fc

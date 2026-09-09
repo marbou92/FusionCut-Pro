@@ -23,6 +23,9 @@ GitHub Actions. No installer, no registry writes.
   engine, with a picker that switches the emoji artwork set; works on Windows 7 through 11
 - **Text animations & captions** - per-clip entrances/exits (fade, slide, pop, typewriter,
   wipe) and SubRip (.srt) caption import/export on the text tracks
+- **Timeline audio mixing** - track faders, pan, mute/solo, master, per-clip fades; the mix
+  plays through the machine's audio device during preview and lands as an AAC track in the
+  export (imports place a video clip and its sound together)
 - **Portable-first distribution** - every build is a self-contained zip straight from CI
 - **Fully tested engine primitives** - timecode, caching, effects, transitions, text, emoji,
   and allocation units run in CI on every push (Ubuntu + Windows)
@@ -35,12 +38,14 @@ the core editing feature set are in place and under active development:
 - Media I/O (FFmpeg probe/decode/proxy), the dual-mode UI, and the multi-track editing core
   (trim/split/ripple/roll, magnetic moves, audio mixer)
 - 52 CPU effects with per-parameter keyframes, 36 cut transitions, the Color panel
-- Deterministic project files (`.fcp`), export to H.264 MP4 through the exact program pipeline
+- Timeline audio mixing (track strips + clip fades) in preview and export, WASAPI playback
+- Deterministic project files (`.fcp`), export to H.264 MP4 + AAC through the exact program
+  pipeline
 - Rich-text titles with word wrap, alignment, background boxes, effect stacks - and
   full-color emoji
 
-Planned next: text animations, caption import (SRT), timeline audio mixing, AI-assisted
-features (face tracking, background removal, auto-captions), and the 1 GB RAM budget audit.
+Planned next: AI-assisted features (face tracking, background removal, auto-captions), the
+1 GB RAM budget audit, and audio effects (EQ, compression) on the effect-stack model.
 
 > **Runtime crash reporting:** a built-in crash handler captures access violations, uncaught
 > C++ exceptions, CRT misuses, pure-virtual calls, and POSIX signals, then writes a structured
@@ -149,15 +154,37 @@ features (face tracking, background removal, auto-captions), and the 1 GB RAM bu
 > The engine is unit-tested in the `text` ctest suite (layout numbers are pinned with
 > synthetic font metrics; only glyph pixels are platform-dependent).
 >
+> **Audio mixing:** every audio-track clip contributes to one timeline mix. The
+> Mixer panel gives each audio track a real strip (fader -60..+6 dB, pan, mute, solo)
+> plus a master fader; selecting an audio clip shows its *fade in / fade out* editor
+> in Effect Controls (linear ramps at the clip's own edges - click-free cuts and
+> simple dissolves). Importing a file with sound places its video clip and a matching
+> audio clip together; audio-only files (mp3, wav...) become audio clips directly.
+> During PLAYBACK the mix streams through the machine's audio device (WASAPI shared
+> mode, event-driven, float; the device's consumed position IS the playhead clock, so
+> video follows audio instead of a drifting timer - scrubbing re-anchors the stream).
+> The EXPORT mixes the identical span/gain/fade math into an AAC track muxed with the
+> H.264 video (the *Include audio* toggle in the export dialog); a source that will
+> not decode mixes as silence and names itself in the status bar instead of killing
+> the job. The track strips, fades, and master persist in the project file
+> (additively - pre-mixer projects load and re-save unchanged).
+
 > **Color emoji (from the machine's own fonts):** the app bundles no font. It scans the
-> PC's font directories for emoji-capable faces - **Segoe UI Emoji** on Windows,
-> **Apple Color Emoji** (a `.ttc` collection with sbix bitmaps) on macOS, **Noto Color
-> Emoji** and friends on Linux - and the Text panel's *Emoji font* picker lists them.
+> PC's font directories - plus the Windows font *registrations* (HKLM/HKCU), so fonts
+> installed outside the standard folders are found too - for emoji-capable faces:
+> **Segoe UI Emoji** on Windows, **Apple Color Emoji** (a `.ttc` collection with sbix
+> bitmaps) on macOS, **Noto Color Emoji** and friends on Linux. A face qualifies by
+> MAPPING a representative battery of emoji codepoints (a tagged-but-empty font does
+> not), and the Text panel's *Emoji font* picker lists each family ONCE (path,
+> normalized-family, and byte-identical-copy deduplication - no repeated entries).
 > The selected file is parsed directly by the app's own engine (CBDT/CBLC bitmap
 > tables + GSUB sequence ligatures, or sbix strikes for the Apple artwork), so the
 > same full-color bitmaps appear on Windows 7 through 11 with no platform emoji
 > support required - and picking a different font switches the emoji SET: the
-> Microsoft artwork, the Apple artwork, the Google artwork. Sequences shape through
+> Microsoft artwork, the Apple artwork, the Google artwork. Fonts that carry emoji
+> glyphs but no color bitmaps - **Segoe UI Symbol**, **Symbola**, the outline
+> **Noto Emoji** - list as *outline* faces: picking one routes emoji clusters through
+> that font's own (monochrome) artwork on the platform text stack. Sequences shape through
 > the font's own GSUB rules (ZWJ chains, flags, keycaps, skin tones); a font without
 > them (the sbix faces) renders each member emoji side by side, never half a flag.
 > U+FE0F selects the emoji presentation; hearts and other text-default symbols render
@@ -267,12 +294,16 @@ workflow).
 ctest --test-dir build --output-on-failure
 ```
 
-Eight suites run in the core-only configuration: **core** (88 checks:
+Nine suites run in the core-only configuration: **core** (88 checks:
 rational frame rates, timecode parse/format/math, LRU eviction,
 memory-pool ownership/alignment) and **timeline** (130 checks: clip
 placement/split/trim/move semantics, cross-track moves with overlap
 rejection, magnetic drop resolution, ripple delete/trim, rolling
-boundary edits, topmost-clip lookup) plus **effects** (2600+ checks:
+boundary edits, topmost-clip lookup) plus **audio** (1700+ checks: the mixing
+primitives every path evaluates through - dB conversion, the
+constant-power pan law, fades, clipping - plus the emoji coverage
+battery and the cmap/name-table blob parsers the font scanner counts
+with) and **effects** (2600+ checks:
 catalog integrity across the 52 entries, parameter clamping,
 neutral-parameter identities, per-effect reference pixels, stack
 order/disable/unknown semantics, split propagation, and the keyframe
@@ -280,7 +311,7 @@ battery - resolution, editing, rebase, time-aware application) and
 **transitions** (4500+ checks: catalog integrity, endpoint exactness
 for every kind, per-family reference pixels, and the transition model
 battery - placement validation, window resolution, and invariant
-pruning under every timeline mutation) and **project** (102 checks:
+pruning under every timeline mutation) and **project** (131 checks:
 JSON codec strictness, full model round-trip with id/keyframe/stack
 fidelity, byte-identical deterministic serialization, malformed-input
 rejection, parse atomicity) and **text** (453 checks: UTF-8 decoding
@@ -289,7 +320,7 @@ synthetic metrics - wrap/alignment/baseline/box, source-over
 reference pixels, the text-clip timeline mutator battery, the
 text-document project round-trip, and the text-animation evaluator -
 progress/easing/clamping for every kind, direction map, cluster-aware
-typewriter truncation) and **emoji** (356 checks: the pure Unicode
+typewriter truncation) and **emoji** (365 checks: the pure Unicode
 cluster policy - joiner chains, flags, keycaps, skin tones, tag
 sequences, VS15/VS16 - plus the font parsers pinned against
 hand-built SYNTHETIC fonts, one per format: a minimal CBDT face with
@@ -298,13 +329,16 @@ with 'dupe'/'flip' records and hmtx advances, and a TrueType
 Collection wrapping them - hermetic, no font file in the repo) and
 **srt** (83 checks: strict parsing with real-world tolerance, the
 canonical writer, byte-stable round trips, markup stripping) and
-**media** (400 checks: synthetic media is generated at runtime - no
+**media** (29000+ checks: synthetic media is generated at runtime - no
 binary assets in the repo - then probed, decoded
 frame-accurately with color-order assertions, seeked, and transcoded
 to 360p proxies with geometry, audio, progress, cancellation, and
-no-upscale verification, plus the export pipeline: encode/probe/decode
-round-trips, per-frame progress, both cancellation paths) when the
-media layer is enabled.
+no-upscale verification, plus the audio pipeline - the window mixer
+(span placement, rolling decoders, gain/pan/fades, master, the hard
+clip, missing-source tolerance) and the export's AAC track
+(probe/decode round-trips, tone fidelity, cancellation) - and the
+export pipeline: encode/probe/decode round-trips, per-frame progress,
+both cancellation paths) when the media layer is enabled.
 
 ## Project layout
 

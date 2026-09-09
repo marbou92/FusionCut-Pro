@@ -215,6 +215,11 @@ std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji)
     std::vector<ShapedRun> shaped;
     shaped.reserve(doc.runs.size());
     const EmojiFont *ef = (emoji && emoji->loaded()) ? emoji->font() : nullptr;
+    // The picked font's own family: an OUTLINE pick (no bitmap tables)
+    // routes every emoji cluster through it on the platform text stack,
+    // and a COLOR pick uses it for the clusters its bitmaps do not
+    // cover (a fallback tighter than Qt's own).
+    const QString emojiFamily = emoji ? emoji->emojiFamily() : QString();
     for (size_t i = 0; i < doc.runs.size(); ++i) {
         const TextRun &run = doc.runs[i];
         if (run.text.empty()) {
@@ -243,7 +248,7 @@ std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji)
                 continue;
             }
             const int cluster = emojiClusterLength(s.codepoints.data(), n, c);
-            if (cluster >= 2 || (cluster == 1 && ef != nullptr)) {
+            if (cluster >= 2 || (cluster == 1 && (ef != nullptr || !emojiFamily.isEmpty()))) {
                 const int len = cluster >= 2 ? cluster : 1;
                 if (ef != nullptr &&
                     markBitmapCluster(ef, emoji, s, c, len, size, ascent, descent)) {
@@ -253,14 +258,26 @@ std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji)
                 // Platform path: the cluster (or single emoji) is one
                 // shaped string through the platform font stack - the
                 // head carries its advance, the layout stays atomic,
-                // and the renderer draws it as one drawText call.
+                // and the renderer draws it as one drawText call. With
+                // a picked emoji family the cluster measures through
+                // THAT font (matching what the renderer will draw it
+                // with); otherwise the run's own font stack (including
+                // Qt's emoji fallback) decides.
                 const QString str = cpsAsQString(s.codepoints.data() + c, size_t(len));
-                s.advances[c] = metrics.horizontalAdvance(str);
+                if (!emojiFamily.isEmpty()) {
+                    QFont clusterFont = font;
+                    clusterFont.setFamily(emojiFamily);
+                    const QFontMetrics clusterMetrics(clusterFont);
+                    s.advances[c] = clusterMetrics.horizontalAdvance(str);
+                    foldInkExtents(clusterMetrics, str, ascent, descent);
+                } else {
+                    s.advances[c] = metrics.horizontalAdvance(str);
+                    foldInkExtents(metrics, str, ascent, descent);
+                }
                 for (int k = 1; k < len; ++k) {
                     s.advances[c + size_t(k)] = 0;
                     s.clusterStarts[c + size_t(k)] = 0;
                 }
-                foldInkExtents(metrics, str, ascent, descent);
                 c += size_t(len);
                 continue;
             }
@@ -327,8 +344,21 @@ QImage renderTextLayer(const TextDocument &doc, int width, int height, int64_t c
     fonts.reserve(work.runs.size());
     colors.reserve(work.runs.size());
     sizes.reserve(work.runs.size());
+    // The emoji-family variant of every run font (the same style, with
+    // the family swapped): no-bitmap emoji clusters draw through it
+    // when the pick carries a family - an OUTLINE pick (Segoe UI
+    // Symbol, Symbola...) renders every emoji cluster monochrome
+    // THROUGH THE PICKED FONT, and a color pick falls back to it for
+    // the clusters its bitmaps miss.
+    const QString emojiFamily = emoji ? emoji->emojiFamily() : QString();
+    std::vector<QFont> emojiFonts;
     for (const TextRun &run : work.runs) {
-        fonts.push_back(fontForStyle(run.style));
+        QFont font = fontForStyle(run.style);
+        fonts.push_back(font);
+        if (!emojiFamily.isEmpty()) {
+            font.setFamily(emojiFamily);
+        }
+        emojiFonts.push_back(font);
         colors.push_back(toQColor(run.style.colorRgba));
         sizes.push_back(textPixelSizeClamped(run.style));
     }
@@ -430,13 +460,36 @@ QImage renderTextLayer(const TextDocument &doc, int width, int height, int64_t c
                     const int byte0 = run.byteStarts[size_t(cp)];
                     const int byte1 = run.byteStarts[size_t(e)];
                     const QString piece = QString::fromUtf8(text.data() + byte0, byte1 - byte0);
-                    painter.drawText(QPointF(pen, slice.baselineY), piece);
+                    if (!emojiFamily.isEmpty()) {
+                        painter.setFont(emojiFonts[run.runIndex]);
+                        painter.drawText(QPointF(pen, slice.baselineY), piece);
+                        painter.setFont(fonts[run.runIndex]);
+                    } else {
+                        painter.drawText(QPointF(pen, slice.baselineY), piece);
+                    }
                     for (int k = cp; k < e; ++k) {
                         pen += run.advances[size_t(k)];
                     }
                     c += e - cp;
                     continue;
                 }
+            }
+            if (!emojiFamily.isEmpty() &&
+                EmojiFont::isDefaultEmojiPresentation(run.codepoints[size_t(cp)])) {
+                // A standalone emoji-presentation codepoint under an
+                // emoji-family pick: draw it through the PICKED font
+                // (its advance already came from that font's metrics
+                // in the shaper), never through the run's text font.
+                flushSegment(c);
+                const int byte0 = run.byteStarts[size_t(cp)];
+                const int byte1 = run.byteStarts[size_t(cp) + 1];
+                const QString piece = QString::fromUtf8(text.data() + byte0, byte1 - byte0);
+                painter.setFont(emojiFonts[run.runIndex]);
+                painter.drawText(QPointF(pen, slice.baselineY), piece);
+                painter.setFont(fonts[run.runIndex]);
+                pen += run.advances[size_t(cp)];
+                ++c;
+                continue;
             }
             if (segStart < 0) {
                 segStart = c;
@@ -494,6 +547,7 @@ bool EmojiPainter::load(const QString &path) {
     raw_.clear();
     scaled_.clear();
     path_ = QString();
+    emojiFamily_ = QString();
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         return false;
@@ -503,12 +557,24 @@ bool EmojiPainter::load(const QString &path) {
         return false;
     }
     bytes_.assign(blob.constData(), blob.constData() + blob.size());
-    if (!font_.load(bytes_.data(), bytes_.size())) {
-        bytes_.clear();
-        return false;
+    const std::string family =
+        sfntFamilyName(reinterpret_cast<const uint8_t *>(bytes_.data()), bytes_.size());
+    if (font_.load(bytes_.data(), bytes_.size())) {
+        path_ = path;
+        emojiFamily_ = QString::fromStdString(family);
+        return true; // a bitmap face (the color-emoji path)
     }
-    path_ = path;
-    return true;
+    // No bitmap tables: an OUTLINE emoji face when the name table is
+    // readable - the family is the whole payload (the platform text
+    // stack renders the glyphs), the bytes are not needed.
+    if (!family.empty()) {
+        bytes_.clear();
+        path_ = path;
+        emojiFamily_ = QString::fromStdString(family);
+        return true;
+    }
+    bytes_.clear();
+    return false;
 }
 
 const QImage *EmojiPainter::image(uint16_t glyph) {
