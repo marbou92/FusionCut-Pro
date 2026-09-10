@@ -160,7 +160,11 @@ Timecode Timecode::operator-(const Timecode &other) const {
 }
 
 bool Timecode::operator==(const Timecode &other) const {
-    return frames_ == other.frames_ && rate_.num == other.rate_.num && rate_.den == other.rate_.den;
+    // Full rate identity: drop-frame numbering presents differently
+    // (";FF" vs ":FF"), so a DF timecode never equals its NDF twin even
+    // when the frame counts and ratio match.
+    return frames_ == other.frames_ && rate_.num == other.rate_.num &&
+           rate_.den == other.rate_.den && rate_.dropFrame == other.rate_.dropFrame;
 }
 
 } // namespace fc

@@ -829,7 +829,31 @@ int EmojiFont::sbixAdvance(uint16_t glyph, int ppem) const {
 
 // ---- load ----
 
+// Every parse attempt starts from a clean slate: data_/size_ survive
+// (they describe the blob, not a face), everything else is cleared so a
+// sub-font that failed mid-parse cannot leak its strikes, cmap ranges,
+// or hmtx metrics into the next face's attempt.
+void EmojiFont::resetState() {
+    loaded_ = false;
+    strikes_.clear();
+    sbixStrikes_.clear();
+    cmapRanges_.clear();
+    cmapUnsorted_ = false;
+    hasCmap4_ = false;
+    cmap4Off_ = 0;
+    variants_.clear();
+    ligatures_.clear();
+    maxLigatureLen_ = 0;
+    numGlyphs_ = 0;
+    unitsPerEm_ = 1000;
+    hmtxAdvances_.clear();
+    hmtxTailAdvance_ = 0;
+    dirBase_ = 0;
+    cbdtOff_ = cbdtLen_ = cblcOff_ = cblcLen_ = sbixOff_ = sbixLen_ = 0;
+}
+
 bool EmojiFont::parseFontAt(size_t dirBase) {
+    resetState();
     dirBase_ = dirBase;
     uint16_t numTables = 0;
     if (dirBase_ + 12 > size_ || !rdU16(dirBase_ + 4, &numTables) || numTables == 0 ||
@@ -859,22 +883,7 @@ bool EmojiFont::parseFontAt(size_t dirBase) {
 }
 
 bool EmojiFont::load(const uint8_t *data, size_t size) {
-    loaded_ = false;
-    strikes_.clear();
-    sbixStrikes_.clear();
-    cmapRanges_.clear();
-    cmapUnsorted_ = false;
-    hasCmap4_ = false;
-    cmap4Off_ = 0;
-    variants_.clear();
-    ligatures_.clear();
-    maxLigatureLen_ = 0;
-    numGlyphs_ = 0;
-    unitsPerEm_ = 1000;
-    hmtxAdvances_.clear();
-    hmtxTailAdvance_ = 0;
-    dirBase_ = 0;
-    cbdtOff_ = cbdtLen_ = cblcOff_ = cblcLen_ = sbixOff_ = sbixLen_ = 0;
+    resetState();
     data_ = data;
     size_ = size;
     if (!data || size < 12) {

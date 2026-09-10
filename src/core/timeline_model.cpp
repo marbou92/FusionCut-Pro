@@ -131,14 +131,18 @@ Track *TimelineModel::trackAt(int index) {
 }
 
 bool TimelineModel::setTrackState(int index, bool locked, bool muted, bool solo) {
-    if (Track *track = trackAt(index)) {
-        track->locked = locked;
-        track->muted = muted;
-        track->solo = solo;
-        ++revision_;
-        return true;
+    Track *track = trackAt(index);
+    if (!track) {
+        return false;
     }
-    return false;
+    if (track->locked == locked && track->muted == muted && track->solo == solo) {
+        return true; // no-op: the state already reads exactly this
+    }
+    track->locked = locked;
+    track->muted = muted;
+    track->solo = solo;
+    ++revision_;
+    return true;
 }
 
 int64_t TimelineModel::addClip(int trackIndex, const std::string &sourcePath,

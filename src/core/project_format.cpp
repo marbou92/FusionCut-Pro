@@ -1354,8 +1354,12 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
             error = "transition pair is not adjacent on its track";
             return false;
         }
+        // Mirrors maxTransitionDuration(): transitions stay on VIDEO
+        // lanes - text tracks render on top of the video stack and have
+        // no decoded stream for the compositor to hold.
         if (static_cast<size_t>(t.trackIndex) >= tracks.size() ||
-            tracks[static_cast<size_t>(t.trackIndex)].isAudio) {
+            tracks[static_cast<size_t>(t.trackIndex)].isAudio ||
+            tracks[static_cast<size_t>(t.trackIndex)].isText) {
             error = "transition lives on a non-video track";
             return false;
         }

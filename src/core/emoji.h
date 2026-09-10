@@ -205,6 +205,7 @@ private:
     bool parseMaxp();
     bool parseHead();
     bool parseHmtx();
+    void resetState();                               // clear every parse member
     bool parseFontAt(size_t dirBase);                // one sub-font's full parse
     int sbixAdvance(uint16_t glyph, int ppem) const; // hmtx units -> strike px
     bool bitmapForCbdt(uint16_t glyph, Bitmap *out) const;

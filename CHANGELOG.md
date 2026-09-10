@@ -21,11 +21,17 @@ version stays at 0.1.0 until the first public build.
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.
+  Timecode equality compares the FULL rate identity: a drop-frame
+  timecode no longer equals its non-drop twin (same ratio, same frame
+  count) even though the two present differently (";FF" vs ":FF").
 - **Timeline model:** multi-track video/audio/text lanes, trim, split,
   roll, ripple delete, magnetic move with overlap rejection,
   topmost-wins compositing resolution. Every mutation preserves the
   transition invariants (adjacency, duration clamps, re-targeting on
-  split).
+  split). Setting a track's lock/mute/solo to the values it already
+  holds is a true no-op - the document revision stays put, so a
+  keyboard tour over the tracks no longer marks an untouched project
+  dirty.
 - **Effects:** 52 CPU effects across 7 categories (Color, Tone,
   Filter, Blur & Sharpen, Distort, Generate, Stylize), per-clip
   stacks, per-parameter keyframe tracks with linear interpolation
@@ -80,7 +86,12 @@ version stays at 0.1.0 until the first public build.
   Google). The selected file is parsed directly (bitmap strikes, cmap,
   GSUB ligatures, sbix records incl. 'dupe'/'flip' indirection), so
   full-color emoji appear on every Windows version, 7 included, with
-  no platform emoji support required. Sequences without GSUB rules
+  no platform emoji support required. Collection files parse each
+  sub-font from a clean slate: a face that fails mid-parse (an sbix
+  face missing its metrics, a CBDT face with a broken cmap) no longer
+  leaves its strikes, cmap ranges, or advances behind for the next
+  face in the collection to trip over, so the surviving face's glyphs
+  resolve through ITS OWN tables. Sequences without GSUB rules
   render member-by-member, never half a flag; with no emoji font
   installed, emoji fall back to the platform font stack. Clusters stay
   atomic in the layout engine and scale with the run's pixel size; the
@@ -88,7 +99,11 @@ version stays at 0.1.0 until the first public build.
 - **Project persistence:** strict deterministic JSON (`.fcp`) with
   byte-identical round-trips; ids, effect stacks, keyframes,
   transitions, and text documents load back exactly; newer-catalog
-  ids round-trip untouched.
+  ids round-trip untouched. The loader now rejects transitions
+  declared on a TEXT track (the runtime model has always refused to
+  create them there - the compositor has no decoded stream to hold
+  for the incoming side), closing the gap where a hand-edited or
+  foreign file could smuggle one in.
 - **Export:** H.264 MP4 (MPEG-4 fallback) through the exact program
   pipeline - effects with per-frame keyframe interpolation, live
   transitions, text/emoji compositing - with CRF control, progress,
