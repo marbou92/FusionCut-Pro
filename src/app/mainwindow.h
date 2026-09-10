@@ -83,14 +83,19 @@ private:
     void markDirty();
     void updateWindowTitle();
 
-    // export. exportMedia() runs on the UI thread (dialogs);
-    // runExportJob() runs on the decode worker's thread and renders every
-    // frame through the exact program-monitor pipeline (effects with
-    // keyframes + transitions); finishExport() marshals back.
+    // export. exportMedia() runs on the UI thread (dialogs) and FREEZES
+    // everything the job reads (model snapshot, fps, source->decode-path
+    // map, emoji font path) before queuing; runExportJob() runs on the
+    // decode worker's thread, renders every frame through the exact
+    // program-monitor pipeline (effects with keyframes + transitions)
+    // from that frozen state, and touches no live GUI-owned state;
+    // finishExport() marshals back via the queued event queue.
     void exportMedia();
     void runExportJob(const QString &path, int width, int height, int crf, const QString &preset,
-                      bool withAudio);
-    void finishExport(bool ok, const QString &error, const QString &path);
+                      bool withAudio, const std::shared_ptr<const fc::TimelineModel> &model,
+                      double fps, const std::map<std::string, std::string> &decodePaths,
+                      const QString &emojiFontPath);
+    void finishExport(bool ok, const QString &error, const QString &path, const QString &audioNote);
     void updateExportProgress(int percent);
 
     // timeline editing actions (drag-move / trim / roll / L-M-S).
@@ -266,12 +271,10 @@ private:
     int64_t audioStartSample_ = 0;
     std::atomic<int64_t> audioPulled_{0};
     uint64_t audioSpansRevision_ = 0;
-    // First mixing problem of the current export (surfaced after the
-    // job; the mix itself is failure-tolerant).
-    QString exportAudioNote_;
-
     // Export state (the cancel flag is read from the worker thread;
-    // everything else stays on the UI thread).
+    // everything else stays on the UI thread. The job itself receives
+    // frozen snapshots - see runExportJob - and shares NOTHING mutable
+    // with the GUI except this atomic).
     bool exportRunning_ = false;
     std::atomic<bool> exportCancel_{false};
     QDialog *exportDialog_ = nullptr;

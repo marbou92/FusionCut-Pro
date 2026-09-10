@@ -136,8 +136,15 @@ SwrContextPtr makeResampler(const AVFrame *src, const AVCodecContext *enc) {
 }
 
 // Writes one packet through the interleaved muxer and unrefs it.
-bool writePacket(AVFormatContext *out, AVPacket *pkt, int streamIndex, std::string &error) {
-    pkt->stream_index = streamIndex;
+bool writePacket(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AVPacket *pkt,
+                 std::string &error) {
+    // The muxer is free to change stream->time_base in write_header; the
+    // encoder emits pts in enc->time_base - rescale before writing (the
+    // same bug class the exporter fixed: without this, an MP4 muxer that
+    // picks a different time_base makes every proxy probe as a fraction
+    // of its real duration).
+    av_packet_rescale_ts(pkt, enc->time_base, stream->time_base);
+    pkt->stream_index = stream->index;
     const int rc = av_interleaved_write_frame(out, pkt);
     av_packet_unref(pkt);
     if (rc < 0) {
@@ -148,11 +155,17 @@ bool writePacket(AVFormatContext *out, AVPacket *pkt, int streamIndex, std::stri
 }
 
 // Drains an encoder and writes every produced packet.
-bool drainEncoder(AVFormatContext *out, AVCodecContext *enc, AVPacket *pkt, int streamIndex,
+bool drainEncoder(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AVPacket *pkt,
                   std::string &error) {
-    avcodec_send_frame(enc, nullptr);
+    // Entering the drain state is legal exactly once: 0 on success,
+    // AVERROR_EOF if somehow already drained - anything else is real.
+    const int sendRc = avcodec_send_frame(enc, nullptr);
+    if (sendRc < 0 && sendRc != AVERROR_EOF) {
+        error = "encoder flush failed: " + fcError(sendRc);
+        return false;
+    }
     while (avcodec_receive_packet(enc, pkt) == 0) {
-        if (!writePacket(out, pkt, streamIndex, error)) {
+        if (!writePacket(out, enc, stream, pkt, error)) {
             return false;
         }
     }
@@ -192,7 +205,10 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
         return false;
     }
     FormatContextPtr in(rawIn);
-    avformat_find_stream_info(in.get(), nullptr);
+    if (avformat_find_stream_info(in.get(), nullptr) < 0) {
+        error = "stream info failed";
+        return false;
+    }
 
     AVStream *inVideo = in->streams[info.video.streamIndex];
     const int videoIdx = info.video.streamIndex;
@@ -349,7 +365,7 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
             return false;
         }
         while (avcodec_receive_packet(videoEnc, encPacket.get()) == 0) {
-            if (!writePacket(out.get(), encPacket.get(), outVideo->index, error)) {
+            if (!writePacket(out.get(), videoEnc, outVideo, encPacket.get(), error)) {
                 return false;
             }
         }
@@ -359,9 +375,12 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
     // Pulls FIFO samples into AAC frames and encodes them.
     auto flushAudioFifo = [&]() -> bool {
         while (audioFifo && av_audio_fifo_size(audioFifo.get()) >= audioEnc->frame_size) {
-            av_audio_fifo_read(audioFifo.get(),
-                               reinterpret_cast<void **>(audioOutFrame->extended_data),
-                               audioEnc->frame_size);
+            if (av_audio_fifo_read(audioFifo.get(),
+                                   reinterpret_cast<void **>(audioOutFrame->extended_data),
+                                   audioEnc->frame_size) < audioEnc->frame_size) {
+                error = "audio fifo read failed";
+                return false;
+            }
             audioOutFrame->pts = audioSamplesWritten;
             audioSamplesWritten += audioEnc->frame_size;
             const int sendRc = avcodec_send_frame(audioEnc, audioOutFrame.get());
@@ -370,7 +389,7 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                 return false;
             }
             while (avcodec_receive_packet(audioEnc, encPacket.get()) == 0) {
-                if (!writePacket(out.get(), encPacket.get(), outAudio->index, error)) {
+                if (!writePacket(out.get(), audioEnc, outAudio, encPacket.get(), error)) {
                     return false;
                 }
             }
@@ -438,7 +457,10 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
             packet->flags &= ~AV_PKT_FLAG_DISCARD;
             if (avcodec_send_packet(videoDecoder.get(), packet.get()) == 0) {
                 while (avcodec_receive_frame(videoDecoder.get(), decoded.get()) == 0) {
-                    av_frame_make_writable(proxyFrame.get());
+                    if (av_frame_make_writable(proxyFrame.get()) < 0) {
+                        error = "proxy frame buffer not writable";
+                        return false;
+                    }
                     sws_scale(scaler.get(), decoded->data, decoded->linesize, 0,
                               videoDecoder->height, proxyFrame->data, proxyFrame->linesize);
                     const int64_t pts = decoded->pts != AV_NOPTS_VALUE
@@ -478,9 +500,16 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
     }
 
     // Flush the video decoder, then both encoders.
-    avcodec_send_packet(videoDecoder.get(), nullptr);
+    const int flushRc = avcodec_send_packet(videoDecoder.get(), nullptr);
+    if (flushRc < 0 && flushRc != AVERROR_EOF) {
+        error = "decoder flush failed: " + fcError(flushRc);
+        return false;
+    }
     while (avcodec_receive_frame(videoDecoder.get(), decoded.get()) == 0) {
-        av_frame_make_writable(proxyFrame.get());
+        if (av_frame_make_writable(proxyFrame.get()) < 0) {
+            error = "proxy frame buffer not writable";
+            return false;
+        }
         sws_scale(scaler.get(), decoded->data, decoded->linesize, 0, videoDecoder->height,
                   proxyFrame->data, proxyFrame->linesize);
         const int64_t pts =
@@ -504,10 +533,10 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
         }
     }
 
-    if (!drainEncoder(out.get(), videoEnc, encPacket.get(), outVideo->index, error)) {
+    if (!drainEncoder(out.get(), videoEnc, outVideo, encPacket.get(), error)) {
         return false;
     }
-    if (audioEnc && !drainEncoder(out.get(), audioEnc, encPacket.get(), outAudio->index, error)) {
+    if (audioEnc && !drainEncoder(out.get(), audioEnc, outAudio, encPacket.get(), error)) {
         return false;
     }
 

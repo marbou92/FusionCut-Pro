@@ -1959,6 +1959,31 @@ void MainWindow::exportMedia() {
     exportCancel_ = false;
     exportRunning_ = true;
 
+    // ---- Freeze everything the job will read (ON the GUI thread,
+    // BEFORE the job is queued). The worker thread used to reach into
+    // the live model / media library / member fps - safe only while the
+    // modal dialog happened to block every writer. A private snapshot
+    // makes the boundary real: the job reads frozen state, the GUI
+    // keeps its own, and the only shared mutable is the atomic cancel
+    // flag.
+    const auto modelSnapshot = std::make_shared<const fc::TimelineModel>(model_);
+    const double jobFps = fps_ > 1.0 ? fps_ : 24.0;
+    // Source path -> decode path (proxy when one exists), resolved here
+    // for every clip source (video AND audio) - the library lives in a
+    // QWidget and is never touched from the worker thread again.
+    std::map<std::string, std::string> decodePaths;
+    for (const fc::Clip &clip : modelSnapshot->clips()) {
+        if (decodePaths.count(clip.sourcePath)) {
+            continue;
+        }
+        const int index =
+            projectPanel_->library().indexOfPath(QString::fromStdString(clip.sourcePath));
+        decodePaths[clip.sourcePath] =
+            (index >= 0 && projectPanel_->library().at(index)->hasProxy())
+                ? projectPanel_->library().at(index)->proxyPath.toStdString()
+                : clip.sourcePath;
+    }
+
     // Modal progress dialog; the export itself runs on the decode worker
     // thread (see runExportJob) and closes it via finishExport.
     exportDialog_ = new QDialog(this);
@@ -1978,39 +2003,34 @@ void MainWindow::exportMedia() {
     layout->addWidget(cancel, 0, Qt::AlignRight);
 
     // The worker-thread job is queued behind anything the decoder is
-    // doing; the dialog spins the UI event loop in the meantime.
+    // doing; the dialog spins the UI event loop in the meantime. The
+    // frozen state rides along as lambda captures.
     const int width = dialog.outputWidth();
     const int height = dialog.outputHeight();
     const int crf = dialog.crf();
     const QString preset = dialog.preset();
     const bool withAudio = dialog.includeAudio();
+    const QString emojiFontPath = emojiFontPath_;
     exportDialog_->show();
-    QMetaObject::invokeMethod(worker_, [this, path, width, height, crf, preset, withAudio] {
-        runExportJob(path, width, height, crf, preset, withAudio);
+    QMetaObject::invokeMethod(worker_, [this, path, width, height, crf, preset, withAudio,
+                                        modelSnapshot, jobFps, decodePaths, emojiFontPath] {
+        runExportJob(path, width, height, crf, preset, withAudio, modelSnapshot, jobFps,
+                     decodePaths, emojiFontPath);
     });
 }
 
 void MainWindow::runExportJob(const QString &path, int width, int height, int crf,
-                              const QString &preset, bool withAudio) {
-    // ---- Runs on the decode worker's thread. The modal progress dialog
-    // blocks all UI input, so the timeline model is effectively frozen
-    // while this job reads it. ----
-    const int64_t totalFrames = model_.durationFrames();
-    const double fps = fps_ > 1.0 ? fps_ : 24.0;
-
-    // Source path -> decode path (proxy when one exists), frozen up front.
-    std::map<std::string, std::string> decodePaths;
-    for (const fc::Clip &clip : model_.clips()) {
-        if (decodePaths.count(clip.sourcePath)) {
-            continue;
-        }
-        const int index =
-            projectPanel_->library().indexOfPath(QString::fromStdString(clip.sourcePath));
-        decodePaths[clip.sourcePath] =
-            (index >= 0 && projectPanel_->library().at(index)->hasProxy())
-                ? projectPanel_->library().at(index)->proxyPath.toStdString()
-                : clip.sourcePath;
-    }
+                              const QString &preset, bool withAudio,
+                              const std::shared_ptr<const fc::TimelineModel> &model, double fps,
+                              const std::map<std::string, std::string> &decodePaths,
+                              const QString &emojiFontPath) {
+    // ---- Runs on the decode worker's thread. EVERYTHING this job reads
+    // arrived frozen from the GUI thread (model snapshot, fps, decode
+    // paths, emoji font path) - the live model, the media library, and
+    // the panels are never touched from here, so no writer-freeze
+    // assumption is needed. The only shared mutable is the atomic
+    // exportCancel_ flag. ----
+    const int64_t totalFrames = model->durationFrames();
 
     // Per-source decoders + last-decoded position (sequential reads,
     // seeks only on jumps); held transition frames cached per right clip.
@@ -2020,12 +2040,12 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     // Rendered text layers cached per clip (time-invariant docs only)
     // at the export resolution. Animated clips render per frame. The
     // emoji painter is job-local: its caches are not thread-safe and
-    // the worker must not touch the GUI-side painter (the path is
-    // snapshotted when the job starts).
+    // the worker must not touch the GUI-side painter (the path arrived
+    // snapshotted from the GUI thread).
     std::map<int64_t, QImage> textLayers;
     fc::EmojiPainter exportEmoji;
-    if (!emojiFontPath_.isEmpty()) {
-        exportEmoji.load(emojiFontPath_);
+    if (!emojiFontPath.isEmpty()) {
+        exportEmoji.load(emojiFontPath);
     }
 
     // ---- Audio: the timeline flattened ONCE (frozen for the job's
@@ -2036,29 +2056,27 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     std::unique_ptr<fc::AudioWindowMixer> audioMixer;
     std::vector<fc::AudioSpan> audioSpans;
     fc::ExportAudioProvider audioProvider;
-    exportAudioNote_.clear();
+    QString audioNote; // job-local: written here, returned with the result
     if (withAudio) {
-        auto resolver = [this](const std::string &src) -> std::string {
-            const QString source = QString::fromStdString(src);
-            const int index = projectPanel_->library().indexOfPath(source);
-            return (index >= 0 && projectPanel_->library().at(index)->hasProxy())
-                       ? projectPanel_->library().at(index)->proxyPath.toStdString()
-                       : src;
+        // Proxy resolution reads the FROZEN decode-path map (no live
+        // library access from the worker thread).
+        auto resolver = [&decodePaths](const std::string &src) -> std::string {
+            const auto it = decodePaths.find(src);
+            return it != decodePaths.end() ? it->second : src;
         };
-        audioSpans = fc::flattenAudioSpans(model_, fps_, resolver);
+        audioSpans = fc::flattenAudioSpans(*model, fps, resolver);
         if (!audioSpans.empty()) {
             audioMixer = std::make_unique<fc::AudioWindowMixer>(48000, 2);
-            audioMixer->setMasterGain(fc::audioDbToLinear(model_.masterGainDb()));
+            audioMixer->setMasterGain(fc::audioDbToLinear(model->masterGainDb()));
             fc::AudioWindowMixer *mixer = audioMixer.get();
-            QString *note = &exportAudioNote_;
-            audioProvider = [mixer, &audioSpans, note](int64_t startSample, int sampleCount,
-                                                       float *dst) -> bool {
+            audioProvider = [mixer, &audioSpans, &audioNote](int64_t startSample, int sampleCount,
+                                                             float *dst) -> bool {
                 std::string pullError;
                 if (!mixer->pull(audioSpans, startSample, sampleCount, dst, pullError)) {
                     return false; // invalid arguments - treat as cancellation
                 }
-                if (!pullError.empty() && note->isEmpty()) {
-                    *note = QString::fromStdString(pullError);
+                if (!pullError.empty() && audioNote.isEmpty()) {
+                    audioNote = QString::fromStdString(pullError);
                 }
                 return true;
             };
@@ -2068,7 +2086,14 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
         const double srcSec =
             static_cast<double>(timelineFrame - clip.timelineStart + clip.sourceInFrames) / fps;
-        const std::string &decPath = decodePaths[clip.sourcePath];
+        // the frozen map is const - look up, never insert (every source
+        // in the snapshot was resolved on the GUI thread, so the miss
+        // path only guards against a bug, not a normal case).
+        const auto pathIt = decodePaths.find(clip.sourcePath);
+        if (pathIt == decodePaths.end()) {
+            return false;
+        }
+        const std::string &decPath = pathIt->second;
         auto it = decoders.find(decPath);
         if (it == decoders.end()) {
             std::string openError;
@@ -2110,7 +2135,7 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         }
         QImage out(width, height, QImage::Format_RGBA8888);
         out.fill(Qt::black);
-        const fc::Clip *clip = model_.activeVideoClipAt(f);
+        const fc::Clip *clip = model->activeVideoClipAt(f);
         if (clip) {
             QImage live;
             if (fetchFrame(*clip, f, live)) {
@@ -2121,11 +2146,11 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
                                      f - clip->timelineStart);
                 bool composited = false;
                 fc::TransitionSample sample;
-                if (model_.resolveTransitionAt(f, clip->trackIndex, sample) &&
+                if (model->resolveTransitionAt(f, clip->trackIndex, sample) &&
                     sample.leftClipId == clip->id) {
                     auto heldIt = held.find(sample.rightClipId);
                     if (heldIt == held.end()) {
-                        const fc::Clip *right = model_.clipById(sample.rightClipId);
+                        const fc::Clip *right = model->clipById(sample.rightClipId);
                         QImage hf;
                         if (right && fetchFrame(*right, right->timelineStart, hf)) {
                             heldIt = held.emplace(sample.rightClipId, hf).first;
@@ -2138,7 +2163,7 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
                         if (heldFrame.format() != QImage::Format_RGBA8888) {
                             heldFrame = heldFrame.convertToFormat(QImage::Format_RGBA8888);
                         }
-                        const fc::Clip *right = model_.clipById(sample.rightClipId);
+                        const fc::Clip *right = model->clipById(sample.rightClipId);
                         if (right && !right->effectStack.empty()) {
                             // The held frame is the incoming clip's first
                             // frame: clip-relative position 0.
@@ -2172,7 +2197,7 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         // preview uses. The text clip's own effect stack runs on a copy
         // per frame so keyframed parameters resolve exactly like the
         // preview.
-        for (const fc::Clip *textClip : model_.textClipsAt(f)) {
+        for (const fc::Clip *textClip : model->textClipsAt(f)) {
             if (!textClip || !textClip->isText) {
                 continue;
             }
@@ -2230,7 +2255,8 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         fc::Exporter::run(path.toStdString(), config, provider, progressCb, error, audioProvider);
     const QString errorText = QString::fromStdString(error);
     QMetaObject::invokeMethod(
-        this, [this, ok, errorText, path] { finishExport(ok, errorText, path); },
+        this,
+        [this, ok, errorText, path, audioNote] { finishExport(ok, errorText, path, audioNote); },
         Qt::QueuedConnection);
 }
 
@@ -2241,11 +2267,11 @@ void MainWindow::updateExportProgress(int percent) {
     statusBar()->showMessage(tr("Exporting... %1%").arg(percent));
 }
 
-void MainWindow::finishExport(bool ok, const QString &error, const QString &path) {
+void MainWindow::finishExport(bool ok, const QString &error, const QString &path,
+                              const QString &audioNote) {
     // A successful export may still carry an audio note (a source that
-    // would not decode mixed as silence instead of killing the job).
-    const QString audioNote = exportAudioNote_;
-    exportAudioNote_.clear();
+    // would not decode mixed as silence instead of killing the job) -
+    // it arrives captured in the queued call, not through shared state.
     exportRunning_ = false;
     if (exportDialog_) {
         exportDialog_->deleteLater();

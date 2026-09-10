@@ -10,7 +10,14 @@ version stays at 0.1.0 until the first public build.
 - **Media I/O (FFmpeg):** probe, frame-accurate decode, 360p proxy
   generation for smooth low-RAM playback. Compiles against the FFmpeg
   4.4 and 5.1+/7.x API generations; the portable build ships the
-  FFmpeg 8 runtime.
+  FFmpeg 8 runtime. The proxy generator now rescales packet
+  timestamps against the STREAM's time base at mux time (the same
+  bug class the exporter fixed: the muxer may pick a different time
+  base in write_header, which made proxies probe at a fraction of
+  their real duration), and checks the returns it silently ignored
+  before (stream-info discovery, encoder/decoder flushes, frame
+  writability, FIFO reads) so a failing step reports a real error
+  instead of limping on.
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.
@@ -123,6 +130,17 @@ version stays at 0.1.0 until the first public build.
   check, and frame stepping clamp to the sequence, so a sequence
   longer than its first-opened source no longer stops early and a
   shorter one no longer plays into black.
+- The export job reads FROZEN state: before the job is queued, the
+  GUI thread snapshots the timeline model, the sequence fps, the
+  source->decode-path map (the media library is never touched from
+  the worker thread), and the emoji font path; the audio note comes
+  back captured in the completion call instead of through a member
+  shared across threads. The old safety argument ("the modal dialog
+  blocks all input, so the model is effectively frozen") is retired.
+- The Effect Controls boolean checkbox no longer indexes the effect
+  stack through an unvalidated list row (a cleared list made
+  currentRow() -1 and the write became a wild index); it now uses
+  the same captured-row guard as the slider and keyframe paths.
 
 ### Tests
 

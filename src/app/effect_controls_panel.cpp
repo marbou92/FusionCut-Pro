@@ -379,12 +379,22 @@ void EffectControlsPanel::rebuildParams() {
             auto *box = new QCheckBox(rowWidget);
             box->setChecked(value >= 0.5);
             const size_t idx = i;
-            connect(box, &QCheckBox::toggled, this, [this, idx, box](bool on) {
-                if (idx >= stack_[static_cast<size_t>(list_->currentRow())].values.size()) {
+            const int currentRowCapture = row;
+            connect(box, &QCheckBox::toggled, this, [this, idx, currentRowCapture](bool on) {
+                // the SAME guard the slider/diamond paths use:
+                // only the row this widget was built for may
+                // write (a stale row after a rebuild, or a
+                // cleared list with currentRow() == -1, must
+                // never index the stack).
+                if (currentRowCapture != list_->currentRow() ||
+                    currentRowCapture >= static_cast<int>(stack_.size())) {
                     return;
                 }
-                stack_[static_cast<size_t>(list_->currentRow())].values[idx] = on ? 1.0 : 0.0;
-                Q_UNUSED(box)
+                EffectInstance &fx = stack_[static_cast<size_t>(currentRowCapture)];
+                if (idx >= fx.values.size()) {
+                    return;
+                }
+                fx.values[idx] = on ? 1.0 : 0.0;
                 emitStack();
             });
             rowLayout->addWidget(name);
