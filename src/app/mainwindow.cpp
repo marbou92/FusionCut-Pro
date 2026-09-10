@@ -132,8 +132,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         } else {
             playhead_ += 1.0 / fps_;
         }
-        if (playhead_ >= duration_) {
-            playhead_ = duration_;
+        if (playhead_ >= sequenceDuration_) {
+            playhead_ = sequenceDuration_;
             requestFrameAt(playhead_);
             startPlayback(false);
             return;
@@ -206,26 +206,44 @@ void MainWindow::buildDecodeThread() {
     connect(worker_, &DecodeWorker::mediaInfo, this,
             [this](const QString &summary, double duration, double fps, int64_t frameCount,
                    bool hasAudio) {
+                if (pendingProgramSeek_) {
+                    // A program SOURCE SWITCH (playback/scrub crossing
+                    // into a clip from another file) finished its async
+                    // open. The SEQUENCE is authoritative: a probe must
+                    // never re-time the project (fps/duration) or dirty
+                    // it - it only re-resolves the queued timeline seek.
+                    pendingProgramSeek_ = false;
+                    if (playing_ && audioPreview_ && audioPreview_->running()) {
+                        // the audio clock kept running through the
+                        // open - catch the playhead up to it so the
+                        // re-resolved frame lands at the LIVE position.
+                        playhead_ = audioStartSeconds_ + audioPreview_->playedSeconds();
+                    }
+                    requestFrameAt(playhead_);
+                    return;
+                }
+                // Loading media (import / library double-click). The
+                // FIRST probe of a fresh session sets the sequence fps;
+                // later probes never re-time it (sequenceFpsSet_).
+                if (!sequenceFpsSet_) {
+                    sequenceFpsSet_ = true;
+                    fps_ = fps > 1.0 ? fps : 24.0;
+                    model_.setFps(fps_);
+                }
                 duration_ = duration;
-                fps_ = fps > 1.0 ? fps : 24.0;
-                model_.setFps(fps_);
                 transport_->setMedia(duration_, fps_);
                 updateSequenceDuration();
                 statusBar()->showMessage(summary, 8000);
                 if (!pendingAddClipPath_.isEmpty()) {
+                    // map the SOURCE's own length into sequence frames
+                    // at the SEQUENCE fps (probe values, not members -
+                    // the sequence fps may be locked to an older rate).
                     const int64_t sourceOut = std::min<int64_t>(
                         frameCount > 0 ? frameCount
-                                       : static_cast<int64_t>(std::llround(duration_ * fps_)),
+                                       : static_cast<int64_t>(std::llround(duration * fps_)),
                         static_cast<int64_t>(std::llround(5.0 * fps_)));
                     addPendingClip(pendingAddClipPath_, sourceOut, hasAudio);
                     pendingAddClipPath_.clear();
-                }
-                // a program-source switch was queued during a seek -
-                // the new source is now open; re-resolve the timeline
-                // position (it maps into the clip and seeks directly).
-                if (pendingProgramSeek_) {
-                    pendingProgramSeek_ = false;
-                    requestFrameAt(playhead_);
                 }
             });
     connect(worker_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double pts) {
@@ -251,10 +269,21 @@ void MainWindow::buildDecodeThread() {
             projectPanel_->setThumbnail(loadedPath_, frame);
             captureThumbnail_ = false;
         }
-        applyProgramFrame();
+        // The frame an OPEN emitted (source frame 0) is stale while a
+        // program re-seek is pending: cache it (above - it also lands
+        // the thumbnail) but skip the composite; the re-resolved seek
+        // replaces it a beat later.
+        if (!pendingProgramSeek_) {
+            applyProgramFrame();
+        }
     });
     connect(worker_, &DecodeWorker::failed, this, [this](const QString &error) {
         statusBar()->showMessage(tr("Error: %1").arg(error), 8000);
+        // A failed OPEN never emits mediaInfo - drop the queued program
+        // re-seek so the switch state cannot wedge (playback then
+        // retries the source on the next switch, and requestFrame on a
+        // closed decoder no-ops silently, so nothing storms).
+        pendingProgramSeek_ = false;
     });
     connect(worker_, &DecodeWorker::proxyProgress, this, [this](int percent) {
         statusBar()->showMessage(tr("Generating proxy... %1%").arg(percent));
@@ -912,6 +941,7 @@ void MainWindow::updateSequenceDuration() {
     timeline_->setFps(fps_);
     const double seq = model_.durationSeconds();
     const double dur = seq > 0.0 ? seq : (duration_ > 0.0 ? duration_ : 10.0);
+    sequenceDuration_ = dur; // the extent playback + stepping follow
     timeline_->setSequenceDuration(dur);
     // The transport drives the PROGRAM (the timeline sequence); once
     // clips exist the sequence extent replaces the media duration.
@@ -942,7 +972,7 @@ void MainWindow::startPlayback(bool playing) {
     transport_->setPlaying(playing);
     quickView_->setPlaying(playing);
     if (playing) {
-        if (duration_ > 0.0 && playhead_ >= duration_ - 1e-9) {
+        if (sequenceDuration_ > 0.0 && playhead_ >= sequenceDuration_ - 1e-9) {
             playhead_ = 0.0;
             requestFrameAt(0.0);
         }
@@ -960,8 +990,8 @@ void MainWindow::stepFrames(int frames) {
     if (playhead_ < 0.0) {
         playhead_ = 0.0;
     }
-    if (duration_ > 0.0 && playhead_ > duration_) {
-        playhead_ = duration_;
+    if (playhead_ > sequenceDuration_) {
+        playhead_ = sequenceDuration_;
     }
     requestFrameAt(playhead_);
 }
@@ -1025,7 +1055,10 @@ void MainWindow::requestFrameAt(double seconds) {
         // Source switch: open the clip's media (proxy when available);
         // the queued seek re-resolves through mediaInfo once the open
         // completes (pendingProgramSeek_), then maps directly.
-        startPlayback(false);
+        // Playback is NOT stopped: the audio preview keeps running its
+        // own rolling decoders (it is the clock), the play clock keeps
+        // ticking, and only the video freezes for the brief async open
+        // (a closed decoder no-ops queued frame requests silently).
         pendingProgramSeek_ = true;
         loadedPath_ = clipSource;
         captureThumbnail_ = true;
@@ -1793,6 +1826,11 @@ void MainWindow::openProject() {
     projectPath_ = path;
     dirty_ = false;
     updateWindowTitle();
+    // The loaded project's fps is authoritative - the session either
+    // had no media yet or a DIFFERENT sequence; sync the shell to the
+    // model (the old code kept whatever fps the last probe adopted).
+    fps_ = model_.fps();
+    sequenceFpsSet_ = true;
     selectedClipId_ = -1;
     selectedTransitionId_ = -1;
     lastProgramClipId_ = -1;

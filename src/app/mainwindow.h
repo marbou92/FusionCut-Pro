@@ -195,7 +195,17 @@ private:
     int64_t selectedClipId_ = -1;
     int64_t lastProgramClipId_ = -1; // debounce for program source switches
     double playhead_ = 0.0;
+    // duration_ is the LAST LOADED SOURCE's length (informational + the
+    // empty-timeline fallback); sequenceDuration_ is the PROGRAM extent
+    // (the timeline's duration when clips exist, else the media's) and
+    // is what playback, restart-from-start, and step clamping follow.
     double duration_ = 0.0;
+    double sequenceDuration_ = 10.0;
+    // The sequence fps is adopted from the FIRST media probe of a fresh
+    // session (or a loaded project) and then LOCKED: later probes never
+    // re-time the timeline (importing a 60 fps file into a 24 fps
+    // project must not retime every clip).
+    bool sequenceFpsSet_ = false;
     double fps_ = 24.0;
     bool playing_ = false;
     bool captureThumbnail_ = false;

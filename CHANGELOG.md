@@ -105,6 +105,24 @@ version stays at 0.1.0 until the first public build.
   the identical stack.
 - File > Open/Save/Save As project, Export Media, Title > Add Text
   Clip, Ctrl+D default transition; dirty-state title and close prompt.
+- Playback survives source switches: crossing a cut into a clip from
+  another file no longer stops the transport - the audio preview
+  keeps running (it is the clock), the async open completes, and the
+  queued seek re-resolves at the LIVE audio position; the frame the
+  open emits (source frame 0) is cached for the thumbnail but never
+  composited while the re-seek is pending, and a failed open drops
+  the queued seek instead of wedging the switch state.
+- The sequence is authoritative over media probes: loading media no
+  longer re-times the project (the sequence fps is adopted from the
+  FIRST probe of a fresh session - or from a loaded project - and
+  then locked, so importing a 60 fps file into a 24 fps project does
+  not retime every clip), probing no longer dirties an untouched
+  project, and Open Project syncs the shell's fps to the model.
+- Playback follows the SEQUENCE extent (timeline duration when clips
+  exist, else the loaded media's): the clock, the restart-from-start
+  check, and frame stepping clamp to the sequence, so a sequence
+  longer than its first-opened source no longer stops early and a
+  shorter one no longer plays into black.
 
 ### Tests
 
