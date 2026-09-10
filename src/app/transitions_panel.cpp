@@ -5,6 +5,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+#include "catalog_tree.h"
 #include "transitions.h"
 
 namespace {
@@ -61,29 +62,14 @@ TransitionsPanel::TransitionsPanel(QWidget *parent) : QWidget(parent) {
 }
 
 void TransitionsPanel::rebuildTree(const QString &filter) {
-    tree_->clear();
-    const QString needle = filter.trimmed().toLower();
-
-    QTreeWidgetItem *currentCategory = nullptr;
-    QString currentCategoryName;
+    QVector<fc::CatalogRow> rows;
+    rows.reserve(static_cast<int>(fc::transitionCatalog().size()));
     for (const fc::TransitionDescriptor &d : fc::transitionCatalog()) {
-        const QString label = QString::fromStdString(d.label);
-        const QString id = QString::fromStdString(d.id);
-        const QString category = QString::fromStdString(d.category);
-        if (!needle.isEmpty() && !label.toLower().contains(needle) &&
-            !id.toLower().contains(needle) && !category.toLower().contains(needle)) {
-            continue;
-        }
-        if (currentCategory == nullptr || category != currentCategoryName) {
-            currentCategory = new QTreeWidgetItem(tree_, QStringList(category));
-            currentCategory->setFlags(Qt::ItemIsEnabled);
-            currentCategoryName = category;
-        }
-        auto *leaf = new QTreeWidgetItem(currentCategory, QStringList(label));
-        leaf->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-        leaf->setData(0, kTransitionIdRole, id);
-        leaf->setToolTip(
-            0, tr("%1 (%2) - double-click to add to the selected clip's cut").arg(label, id));
+        rows.push_back({QString::fromStdString(d.category), QString::fromStdString(d.label),
+                        QString::fromStdString(d.id)});
     }
-    tree_->expandAll();
+    fc::rebuildCatalogTree(tree_, rows, filter, [this](const fc::CatalogRow &row) {
+        return tr("%1 (%2) - double-click to add to the selected clip's cut")
+            .arg(row.label, row.id);
+    });
 }

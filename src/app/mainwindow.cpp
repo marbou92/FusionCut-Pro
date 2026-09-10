@@ -263,6 +263,7 @@ void MainWindow::buildDecodeThread() {
         // timeline position is what the user scrubbed.
         timeline_->setPlayhead(playhead_);
         transport_->setPosition(playhead_);
+        quickView_->setPosition(playhead_); // Quick Mode follows the same clock
         if (captureThumbnail_) {
             // Thumbnails stay raw (pre-effects): they represent the source.
             sourceCanvas_->setFrame(frame, pts);
@@ -594,6 +595,11 @@ void MainWindow::buildQuickWorkspace() {
 
     connect(quickView_, &QuickModeView::playToggled, this,
             [this](bool playing) { startPlayback(playing); });
+    connect(quickView_, &QuickModeView::seekRequested, this,
+            [this](double seconds) { requestFrameAt(seconds); });
+    connect(quickView_, &QuickModeView::stepRequested, this,
+            [this](int frames) { stepFrames(frames); });
+    connect(quickView_, &QuickModeView::importRequested, this, [this] { importMedia(); });
 }
 
 void MainWindow::buildMenus() {
@@ -733,21 +739,28 @@ void MainWindow::importMedia() {
            "All Files (*)"));
     bool first = true;
     for (const QString &file : files) {
-        MediaItem item;
-        item.path = file;
-        item.displayName = QFileInfo(file).completeBaseName();
-        projectPanel_->addMedia(item);
-
-        // Probe once up front: a file with audio but NO video becomes
-        // an audio clip directly (the video decode path cannot open
-        // it); a file with video follows the existing worker flow,
-        // which places its video clip AND - when the probe found a
-        // sound track - a matching audio clip on the audio lane.
+        // Probe FIRST so the library item is born with real metadata
+        // (the panel readout + tooltip read it; they used to stay empty
+        // because the probe ran after the item was registered and its
+        // result was only used for the audio-only routing decision).
         fc::MediaInfo info;
         std::string probeError;
         const bool probed = fc::MediaProbe::probe(file.toStdString(), info, probeError);
         const bool hasAudio = probed && !info.audioStreams.empty();
         const bool hasVideo = probed && info.hasVideo;
+
+        MediaItem item;
+        item.path = file;
+        item.displayName = QFileInfo(file).completeBaseName();
+        item.summary = probed ? fc::mediaSummary(info) : QString::fromStdString(probeError);
+        item.durationSeconds = probed ? info.durationSeconds() : 0.0;
+        item.fps = hasVideo ? info.video.frameRate.toDouble() : 0.0;
+        projectPanel_->addMedia(item);
+        // A file with audio but NO video becomes an audio clip directly
+        // (the video decode path cannot open it); a file with video
+        // follows the existing worker flow, which places its video clip
+        // AND - when the probe found a sound track - a matching audio
+        // clip on the audio lane.
         if (hasAudio && !hasVideo) {
             startPlayback(false);
             const int audioTrack = ensureAudioTrack();
@@ -792,11 +805,16 @@ void MainWindow::loadClip(const QString &sourcePath) {
 
 void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFrames,
                                 bool withAudio) {
-    // place on V1 (track index 1) at the playhead; first 5s or full.
+    // Place on the FIRST video lane at the playhead; first 5s or full.
+    // The lane is RESOLVED, not assumed: text tracks insert ABOVE the
+    // video lanes (shifting V1 off index 1) and loaded projects can
+    // carry any track order - the old hardcoded index 1 silently
+    // dropped the clip (an out-of-range addClip is a no-op).
+    const int videoTrack = firstVideoTrack();
     const int64_t start = static_cast<int64_t>(std::llround(playhead_ * fps_));
     const int64_t out = std::max<int64_t>(1, sourceOutFrames);
     const QString label = QFileInfo(sourcePath).completeBaseName();
-    model_.addClip(1, sourcePath.toStdString(), label.toStdString(), 0, out, start);
+    model_.addClip(videoTrack, sourcePath.toStdString(), label.toStdString(), 0, out, start);
     if (withAudio) {
         // The sound track rides along: an audio clip with the SAME
         // source range and placement on the audio lane under the video
@@ -811,7 +829,7 @@ void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFram
 
 void MainWindow::splitAtPlayhead() {
     const int64_t frame = static_cast<int64_t>(std::llround(playhead_ * fps_));
-    int trackIndex = 1; // default to V1
+    int trackIndex = firstVideoTrack(); // default: the first video lane
     // Prefer the track of the currently selected clip.
     if (selectedClipId_ > 0) {
         if (const fc::Clip *clip = model_.clipById(selectedClipId_)) {
@@ -948,6 +966,9 @@ void MainWindow::updateSequenceDuration() {
     if (seq > 0.0) {
         transport_->setMedia(dur, fps_);
     }
+    // Quick Mode's transport spans the same extent; a duration > 0 is
+    // what enables its scrub slider (the 10 s placeholder must not).
+    quickView_->setMedia(seq > 0.0 || duration_ > 0.0 ? dur : 0.0, fps_);
     // every MainWindow model mutation funnels through here;
     // keep the transition editor in sync with pruned/clamped transitions.
     syncTransitionEditor();
@@ -1390,6 +1411,20 @@ int MainWindow::ensureAudioTrack() {
     }
     const int index = model_.addTrack("A1", true);
     timeline_->setModel(&model_); // the lane appears in the timeline UI
+    return index;
+}
+
+int MainWindow::firstVideoTrack() {
+    for (const fc::Track &track : model_.tracks()) {
+        if (!track.isAudio && !track.isText) {
+            return track.index;
+        }
+    }
+    // A project without any video lane is pathological but reachable
+    // through a hand-edited file; give it a bare V1 rather than
+    // dropping clips on the floor.
+    const int index = model_.addTrack("V1", false);
+    timeline_->setModel(&model_);
     return index;
 }
 

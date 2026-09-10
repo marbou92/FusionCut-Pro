@@ -2,26 +2,10 @@
 
 #include <cmath>
 
+#include "media_item.h"
 #include "media_probe.h"
 #include "proxy_generator.h"
 #include "video_decoder.h"
-
-namespace {
-
-// Human-readable one-liner for a probed file (project panel + status).
-QString summarize(const fc::MediaInfo &info) {
-    if (!info.hasVideo) {
-        return QString::fromStdString("audio only");
-    }
-    return QString("%1x%2 %3, %4 fps, %5s")
-        .arg(info.video.width)
-        .arg(info.video.height)
-        .arg(QString::fromStdString(info.video.codecName))
-        .arg(QString::number(info.video.frameRate.toDouble(), 'f', 3))
-        .arg(QString::number(info.durationSeconds(), 'f', 1));
-}
-
-} // namespace
 
 struct DecodeWorker::Impl {
     fc::VideoDecoder decoder;
@@ -51,7 +35,7 @@ void DecodeWorker::open(const QString &path) {
     }
 
     const fc::MediaInfo &info = d->decoder.info();
-    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount,
+    emit mediaInfo(fc::mediaSummary(info), info.durationSeconds(), d->fps, info.video.frameCount,
                    !info.audioStreams.empty());
     requestFrame(0.0);
 }
@@ -71,7 +55,7 @@ void DecodeWorker::openQuiet(const QString &path) {
     }
 
     const fc::MediaInfo &info = d->decoder.info();
-    emit mediaInfo(summarize(info), info.durationSeconds(), d->fps, info.video.frameCount,
+    emit mediaInfo(fc::mediaSummary(info), info.durationSeconds(), d->fps, info.video.frameCount,
                    !info.audioStreams.empty());
 }
 

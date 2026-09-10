@@ -22,6 +22,8 @@ add_executable(FusionCutPro WIN32
     effects_panel.h
     transitions_panel.cpp
     transitions_panel.h
+    catalog_tree.cpp
+    catalog_tree.h
     timeline_panel.cpp
     timeline_panel.h
     mixer_panel.cpp

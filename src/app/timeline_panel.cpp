@@ -9,6 +9,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QResizeEvent>
+#include <QScrollBar>
 #include <QSlider>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -25,6 +27,8 @@ constexpr int kRulerHeight = 26;
 constexpr int kTrackHeight = 44;
 constexpr int kZoomBarHeight = 30;
 constexpr int kToolRowHeight = 30;
+constexpr int kHScrollHeight = 14;
+constexpr int kLanePad = 160;  // tail padding past the last frame (px)
 constexpr int kEdgeGrabPx = 8; // edge-trim / roll grab zone
 
 const QColor kPanelBg(0x1B, 0x1B, 0x1B);
@@ -94,14 +98,23 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
 
     layout->addStretch(1);
 
+    // Horizontal lane scroll: the lanes + ruler scroll, the track
+    // header column and the tool/zoom rows stay fixed.
+    hscroll_ = new QScrollBar(Qt::Horizontal, this);
+    hscroll_->setFixedHeight(kHScrollHeight);
+    hscroll_->setRange(0, 0);
+    connect(hscroll_, &QScrollBar::valueChanged, this, [this](int value) {
+        scrollX_ = value;
+        update();
+    });
+    layout->addWidget(hscroll_);
+
     zoom_ = new QSlider(Qt::Horizontal, this);
     zoom_->setRange(5, 400);
     zoom_->setValue(static_cast<int>(pps_));
     zoom_->setFixedHeight(kZoomBarHeight - 6);
-    connect(zoom_, &QSlider::valueChanged, this, [this](int value) {
-        pps_ = static_cast<double>(value);
-        update();
-    });
+    connect(zoom_, &QSlider::valueChanged, this,
+            [this](int value) { applyZoom(static_cast<double>(value)); });
 
     auto *zoomRow = new QWidget(this);
     zoomRow->setFixedHeight(kZoomBarHeight);
@@ -121,16 +134,24 @@ int TimelinePanel::contentTop() const {
 }
 
 int TimelinePanel::areaHeight() const {
-    return height() - kZoomBarHeight - kToolRowHeight;
+    return height() - kZoomBarHeight - kHScrollHeight - kToolRowHeight;
 }
 
 QRect TimelinePanel::laneRect(int row) const {
-    return QRect(kHeaderWidth, contentTop() + kRulerHeight + row * kTrackHeight,
-                 std::max(0, width() - kHeaderWidth), kTrackHeight);
+    return QRect(kHeaderWidth, contentTop() + kRulerHeight + row * kTrackHeight, laneContentWidth(),
+                 kTrackHeight);
+}
+
+int TimelinePanel::laneContentWidth() const {
+    // The sequence extent at the current zoom plus tail padding, so the
+    // ruler labels and the clip tails past the last frame stay reachable.
+    return static_cast<int>(duration_ * pps_) + kLanePad;
 }
 
 int64_t TimelinePanel::xToFrame(int x) const {
-    return static_cast<int64_t>(std::max(0.0, (x - kHeaderWidth) / pps_));
+    // x is a WIDGET coordinate; the content it points at sits scrollX_
+    // pixels to the right.
+    return static_cast<int64_t>(std::max(0.0, (x - kHeaderWidth + scrollX_) / pps_));
 }
 
 int TimelinePanel::frameToX(int64_t frame) const {
@@ -143,6 +164,47 @@ int TimelinePanel::trackRowAt(int y) const {
         return -1;
     }
     return (y - laneTop) / kTrackHeight;
+}
+
+void TimelinePanel::updateScrollRange() {
+    if (!hscroll_) {
+        return;
+    }
+    const int viewport = std::max(1, width() - kHeaderWidth);
+    const int maxScroll = std::max(0, laneContentWidth() - viewport);
+    hscroll_->blockSignals(true);
+    hscroll_->setRange(0, maxScroll);
+    hscroll_->setPageStep(viewport);
+    hscroll_->setSingleStep(40);
+    scrollX_ = std::min(std::max(scrollX_, 0), maxScroll);
+    hscroll_->setValue(scrollX_);
+    hscroll_->blockSignals(false);
+}
+
+void TimelinePanel::ensurePlayheadVisible() {
+    if (!hscroll_) {
+        return;
+    }
+    const int playheadX = frameToX(static_cast<int64_t>(playhead_ * fps_)) - scrollX_; // widget x
+    const int margin = 32;
+    if (playheadX < kHeaderWidth + margin || playheadX > width() - margin) {
+        // Center the playhead in the lane viewport (clamped by the range).
+        const int target = frameToX(static_cast<int64_t>(playhead_ * fps_)) - kHeaderWidth -
+                           std::max(1, width() - kHeaderWidth) / 2;
+        hscroll_->setValue(std::min(std::max(target, 0), hscroll_->maximum()));
+    }
+}
+
+void TimelinePanel::applyZoom(double pps) {
+    pps_ = std::min(400.0, std::max(5.0, pps));
+    if (zoom_) {
+        zoom_->blockSignals(true);
+        zoom_->setValue(static_cast<int>(pps_));
+        zoom_->blockSignals(false);
+    }
+    updateScrollRange();
+    ensurePlayheadVisible(); // zoom around the playhead, not the left edge
+    update();
 }
 
 QColor TimelinePanel::trackColor(int index) const {
@@ -184,16 +246,19 @@ double TimelinePanel::trackDimFactor(int index) const {
 
 void TimelinePanel::setModel(const fc::TimelineModel *model) {
     model_ = model;
+    updateScrollRange();
     update();
 }
 
 void TimelinePanel::setSequenceDuration(double seconds) {
     duration_ = seconds > 0.0 ? seconds : 10.0;
+    updateScrollRange();
     update();
 }
 
 void TimelinePanel::setPlayhead(double seconds) {
     playhead_ = std::max(0.0, seconds);
+    ensurePlayheadVisible(); // playback auto-follows the playhead
     update();
 }
 
@@ -246,14 +311,21 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
     painter.fillRect(rect(), kPanelBg);
 
     drawHeaderColumn(painter);
+
+    // Everything below scrolls: drawn in CONTENT coordinates, shifted
+    // once by -scrollX_ and clipped to the lane viewport so translated
+    // content can never bleed over the fixed header column.
+    painter.save();
+    painter.setClipRect(QRect(kHeaderWidth, contentTop(), std::max(0, width() - kHeaderWidth),
+                              std::max(0, areaHeight())));
+    painter.translate(-scrollX_, 0);
     drawRuler(painter);
     drawClips(painter);
     drawTransitions(painter);
     drawDragGhost(painter);
-    drawRazorHover(painter);
 
     const int x = frameToX(static_cast<int64_t>(playhead_ * fps_));
-    if (x >= kHeaderWidth && x <= width()) {
+    if (x >= kHeaderWidth) {
         painter.setPen(QPen(QColor(0xE8, 0xE8, 0xE8), 1));
         painter.drawLine(x, contentTop(), x, areaHeight() + contentTop());
         painter.setBrush(QColor(0xE8, 0xE8, 0xE8));
@@ -261,6 +333,10 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
         painter.drawPolygon(QPolygon() << QPoint(x - 5, contentTop()) << QPoint(x + 5, contentTop())
                                        << QPoint(x, contentTop() + 8));
     }
+    painter.restore();
+
+    // The razor hover line tracks the mouse in WIDGET coordinates.
+    drawRazorHover(painter);
 }
 
 void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
@@ -306,8 +382,9 @@ void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
 }
 
 void TimelinePanel::drawRuler(QPainter &painter) const {
-    const QRect rulerRect(kHeaderWidth, contentTop(), std::max(0, width() - kHeaderWidth),
-                          kRulerHeight);
+    // Content coordinates: the ruler extends over the whole scrollable
+    // extent (the viewport clip culls what is off-screen).
+    const QRect rulerRect(kHeaderWidth, contentTop(), laneContentWidth(), kRulerHeight);
     painter.fillRect(rulerRect, kRulerBg);
     painter.setPen(QColor(0x9A, 0x9A, 0x9A));
 
@@ -564,13 +641,16 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
     dragOriginEnd_ = clip->timelineEnd();
     ghostStart_ = clip->timelineStart;
     ghostEnd_ = clip->timelineEnd();
+    // Edge-grab comparisons run in CONTENT coordinates (frameToX is
+    // content-space; the mouse x needs the same scroll shift).
+    const int contentX = pos.x() + scrollX_;
     const int clipX0 = frameToX(clip->timelineStart);
     const int clipX1 = frameToX(clip->timelineEnd());
 
     // Alt + edge press where two clips touch => rolling edit on that
     // boundary; plain edge press => trim; body press => move.
     const bool altHeld = QGuiApplication::queryKeyboardModifiers() & Qt::AltModifier;
-    if (pos.x() - clipX0 <= kEdgeGrabPx && clipX1 - pos.x() > kEdgeGrabPx) {
+    if (contentX - clipX0 <= kEdgeGrabPx && clipX1 - contentX > kEdgeGrabPx) {
         const fc::Clip *left = nullptr;
         // Left edge of THIS clip: it is the right side of the pair.
         for (const fc::Clip &other : model_->clips()) {
@@ -592,7 +672,7 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
             dragMode_ = DragMode::TrimStart;
             ghostStart_ = clip->timelineStart;
         }
-    } else if (clipX1 - pos.x() <= kEdgeGrabPx) {
+    } else if (clipX1 - contentX <= kEdgeGrabPx) {
         const fc::Clip *right = rightNeighborOf(clip);
         if (altHeld && right) {
             dragMode_ = DragMode::RollBoundary;
@@ -753,9 +833,10 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
     if (!(event->buttons() & Qt::LeftButton) && !razorMode_ && model_) {
         const fc::Clip *clip = clipAtPos(event->pos());
         if (clip) {
+            const int contentX = x + scrollX_; // frameToX is content-space
             const int x0 = frameToX(clip->timelineStart);
             const int x1 = frameToX(clip->timelineEnd());
-            const bool nearEdge = (x - x0 <= kEdgeGrabPx) || (x1 - x <= kEdgeGrabPx);
+            const bool nearEdge = (contentX - x0 <= kEdgeGrabPx) || (x1 - contentX <= kEdgeGrabPx);
             const fc::Track *track = model_->trackAt(clip->trackIndex);
             setCursor(track && track->locked ? Qt::ForbiddenCursor
                                              : (nearEdge ? Qt::SizeHorCursor : Qt::ArrowCursor));
@@ -825,16 +906,24 @@ void TimelinePanel::leaveEvent(QEvent *event) {
 
 void TimelinePanel::wheelEvent(QWheelEvent *event) {
     if (event->modifiers() & Qt::ControlModifier) {
-        const int delta = event->angleDelta().y() > 0 ? 20 : -20;
-        pps_ = std::min(400.0, std::max(5.0, pps_ + delta));
-        zoom_->blockSignals(true);
-        zoom_->setValue(static_cast<int>(pps_));
-        zoom_->blockSignals(false);
-        update();
+        applyZoom(pps_ + (event->angleDelta().y() > 0 ? 20.0 : -20.0));
+        event->accept();
+        return;
+    }
+    // Plain wheel scrolls the lanes horizontally (Ctrl+wheel zooms).
+    const int delta = event->angleDelta().y();
+    if (delta != 0 && hscroll_ && hscroll_->maximum() > 0) {
+        hscroll_->setValue(std::min(std::max(hscroll_->value() - delta, 0), hscroll_->maximum()));
         event->accept();
         return;
     }
     QWidget::wheelEvent(event);
+}
+
+void TimelinePanel::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event);
+    updateScrollRange();
+    update();
 }
 
 void TimelinePanel::syncToolButtons() {

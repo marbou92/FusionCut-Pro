@@ -156,6 +156,31 @@ version stays at 0.1.0 until the first public build.
   stack through an unvalidated list row (a cleared list made
   currentRow() -1 and the write became a wild index); it now uses
   the same captured-row guard as the slider and keyframe paths.
+- Quick Mode is wired to the same engine as Pro Mode: the Import
+  button opens the media dialog, the position slider scrubs the
+  program (enabled once a real duration exists), |< and >| step one
+  frame, and the slider + a timecode readout follow the playhead.
+  The previously dead signals (seekRequested / stepRequested) carry
+  real traffic now.
+- The timeline scrolls horizontally: a scrollbar under the lanes
+  (the track header column and the tool/zoom rows stay fixed), plain
+  wheel scrolls while Ctrl+wheel zooms, playback keeps the playhead
+  in view, and zooming anchors on the playhead instead of the left
+  edge. Previously a sequence longer than the window was unreachable
+  past the right border.
+- Clip placement resolves the FIRST video lane instead of assuming
+  the default layout: adding a text track inserts lanes ABOVE the
+  video ones (shifting V1 off index 1), and the old hardcoded track
+  index silently dropped the clip once that happened (split-at-
+  playhead's no-selection default resolved the same way).
+- The Project panel's metadata readout is live from import: every
+  library item carries its probed summary (dimensions, codec, fps,
+  duration), the duration line shows the source fps, and the tooltip
+  reads the same summary. The one-liner formatter is shared with the
+  decode worker's status report so the two can never drift.
+- The Effects and Transitions panels share one catalog-tree builder
+  (search + category grouping + filter); the panels were copy-paste
+  twins of that logic and only their wording differed.
 
 ### Tests
 

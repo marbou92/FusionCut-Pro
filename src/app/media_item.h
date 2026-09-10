@@ -3,7 +3,24 @@
 #include <QList>
 #include <QString>
 
+#include "media_info.h"
+
 namespace fc {
+
+// Human-readable one-liner for a probed file (the library item's
+// summary, the status-bar note on load). Shared by the decode worker's
+// mediaInfo handoff and the import probe so the two can never drift.
+inline QString mediaSummary(const fc::MediaInfo &info) {
+    if (!info.hasVideo) {
+        return QString::fromStdString("audio only");
+    }
+    return QString("%1x%2 %3, %4 fps, %5s")
+        .arg(info.video.width)
+        .arg(info.video.height)
+        .arg(QString::fromStdString(info.video.codecName))
+        .arg(QString::number(info.video.frameRate.toDouble(), 'f', 3))
+        .arg(QString::number(info.durationSeconds(), 'f', 1));
+}
 
 // One imported media asset in the project library.
 struct MediaItem {

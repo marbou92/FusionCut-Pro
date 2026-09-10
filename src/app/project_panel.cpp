@@ -96,7 +96,16 @@ void ProjectPanel::onSelectionChanged() {
     }
     metaName_->setText(QFileInfo(item->path).fileName());
     metaSummary_->setText(item->summary);
-    metaDuration_->setText(QString("%1 s").arg(item->durationSeconds, 0, 'f', 2));
+    // Duration readout with the source fps when the probe found video
+    // (audio-only files have no frame rate to show).
+    if (item->durationSeconds > 0.0) {
+        metaDuration_->setText(item->fps > 0.0 ? tr("%1 s @ %2 fps")
+                                                     .arg(item->durationSeconds, 0, 'f', 2)
+                                                     .arg(item->fps, 0, 'f', 3)
+                                               : tr("%1 s").arg(item->durationSeconds, 0, 'f', 2));
+    } else {
+        metaDuration_->setText(tr("-"));
+    }
     metaProxy_->setText(item->hasProxy() ? tr("proxy: ready") : tr("proxy: none"));
 }
 

@@ -135,6 +135,12 @@ private:
     // First audio-track index (creates A1 lazily when a file with an
     // audio stream is imported into a project that has none).
     int ensureAudioTrack();
+    // First video-track index (a lane that is neither audio nor text);
+    // creates a bare V1 when a project somehow carries none. Clip
+    // placement resolves lanes through this instead of assuming the
+    // default layout (text tracks insert ABOVE the video lanes and
+    // loaded projects can carry any track order).
+    int firstVideoTrack();
     // Re-flattens the audio-track clips into the thread-safe snapshot
     // the preview player and the export provider mix from (GUI thread;
     // the audio thread only ever reads the snapshot).

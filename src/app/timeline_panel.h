@@ -4,6 +4,8 @@
 
 #include "timeline_model.h"
 
+class QResizeEvent;
+class QScrollBar;
 class QSlider;
 class QToolButton;
 
@@ -17,6 +19,12 @@ class QToolButton;
 // rolling boundary edits, header L/M/S click toggling, a tool row
 // (Select / Razor / Ripple toggle), razor hover preview line, and
 // visual dimming for locked / muted / non-solo tracks.
+//
+// horizontal scrolling: the lane content is drawn in CONTENT
+// coordinates and shifted by one scrollX_ offset under a clip rect
+// (the header column + panel chrome stay fixed). The scrollbar, plain
+// wheel, zoom changes, and playhead-follow all drive that one offset;
+// every hit-test converts widget x through xToFrame().
 class TimelinePanel : public QWidget {
     Q_OBJECT
 
@@ -74,6 +82,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     enum class DragMode {
@@ -87,9 +96,19 @@ private:
     int areaHeight() const;
     int contentTop() const; // tool row height offset for all lane geometry
     QRect laneRect(int row) const;
+    // Width of the scrollable lane content in CONTENT pixels: the
+    // sequence extent at the current zoom plus tail padding.
+    int laneContentWidth() const;
     int64_t xToFrame(int x) const;
     int frameToX(int64_t frame) const;
     int trackRowAt(int y) const;
+    // Scroll plumbing: recompute the scrollbar range for the current
+    // duration/zoom/size and clamp scrollX_ into it; keep the playhead
+    // in view after zoom/position changes; one zoom entry point for
+    // the slider and Ctrl+wheel.
+    void updateScrollRange();
+    void ensurePlayheadVisible();
+    void applyZoom(double pps);
     void drawHeaderColumn(QPainter &painter) const;
     void drawRuler(QPainter &painter) const;
     void drawClips(QPainter &painter) const;
@@ -121,11 +140,13 @@ private:
     double playhead_ = 0.0;
     double pps_ = 60.0;
     double fps_ = 24.0;
+    int scrollX_ = 0; // horizontal scroll offset (CONTENT px past the fixed header)
     int64_t selectedClipId_ = -1;
     int64_t selectedTransitionId_ = -1;
     bool razorMode_ = false;
     bool rippleEnabled_ = false;
     QSlider *zoom_ = nullptr;
+    QScrollBar *hscroll_ = nullptr;
 
     // ---- interaction state ----
     DragMode dragMode_ = DragMode::None;

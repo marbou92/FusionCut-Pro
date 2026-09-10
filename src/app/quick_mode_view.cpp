@@ -7,7 +7,13 @@
 #include <QSlider>
 #include <QVBoxLayout>
 
+#include <cmath>
+
+#include "timecode.h"
+
 namespace {
+constexpr int kMaxSlider = 100000;
+
 const char *kAccentStyle = "QPushButton { background: #00A8FF; color: #101010; font-weight: bold; "
                            "border-radius: 4px; padding: 6px 18px; }"
                            "QPushButton:hover { background: #33B9FF; }";
@@ -34,9 +40,15 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     canvas_ = new PreviewCanvas(this);
     playButton_ = new QPushButton(tr("Play"), this);
     playButton_->setMinimumWidth(90);
+    stepBack_ = new QPushButton(tr("|<"), this);
+    stepFwd_ = new QPushButton(tr(">|"), this);
+    stepBack_->setToolTip(tr("Previous frame (Left)"));
+    stepFwd_->setToolTip(tr("Next frame (Right)"));
     position_ = new QSlider(Qt::Horizontal, this);
-    position_->setRange(0, 1000);
-    position_->setEnabled(false); // full scrubbing ships with the timeline
+    position_->setRange(0, kMaxSlider);
+    position_->setEnabled(false); // a duration arrives with setMedia()
+    timecode_ = new QLabel("00:00:00:00", this);
+    timecode_->setMinimumWidth(110);
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(16, 12, 16, 12);
@@ -46,12 +58,27 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
 
     auto *transport = new QHBoxLayout();
     transport->addWidget(playButton_);
+    transport->addWidget(stepBack_);
+    transport->addWidget(stepFwd_);
     transport->addWidget(position_, 1);
+    transport->addWidget(timecode_);
     root->addLayout(transport);
     root->addWidget(buildToolbar());
 
     connect(playButton_, &QPushButton::clicked, this,
             [this] { emit playToggled(playButton_->text() == tr("Play")); });
+    connect(stepBack_, &QPushButton::clicked, this, [this] { emit stepRequested(-1); });
+    connect(stepFwd_, &QPushButton::clicked, this, [this] { emit stepRequested(1); });
+    connect(position_, &QSlider::sliderMoved, this, [this](int value) {
+        if (duration_ <= 0.0) {
+            return;
+        }
+        const double seconds = static_cast<double>(value) / kMaxSlider * duration_;
+        pos_ = seconds;
+        refreshTimecode();
+        emit seekRequested(seconds);
+    });
+    refreshTimecode();
 }
 
 QWidget *QuickModeView::buildTopBar() {
@@ -61,6 +88,8 @@ QWidget *QuickModeView::buildTopBar() {
 
     auto *import = new QPushButton(tr("Import"), bar);
     import->setStyleSheet(kAccentStyle);
+    import->setToolTip(tr("Import media files into the project (Ctrl+I)"));
+    connect(import, &QPushButton::clicked, this, [this] { emit importRequested(); });
 
     aspectBox_ = new QComboBox(bar);
     aspectBox_->addItem(tr("16:9"));
@@ -106,6 +135,39 @@ QWidget *QuickModeView::buildToolbar() {
     return bar;
 }
 
+void QuickModeView::setMedia(double durationSeconds, double fps) {
+    duration_ = durationSeconds > 0.0 ? durationSeconds : 0.0;
+    fps_ = fps > 1.0 ? fps : 24.0;
+    pos_ = 0.0;
+    position_->setEnabled(duration_ > 0.0);
+    position_->blockSignals(true);
+    position_->setValue(0);
+    position_->blockSignals(false);
+    refreshTimecode();
+}
+
+void QuickModeView::setPosition(double seconds) {
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    if (duration_ > 0.0 && seconds > duration_) {
+        seconds = duration_;
+    }
+    pos_ = seconds;
+    position_->blockSignals(true);
+    position_->setValue(duration_ > 0.0 ? static_cast<int>(seconds / duration_ * kMaxSlider) : 0);
+    position_->blockSignals(false);
+    refreshTimecode();
+}
+
 void QuickModeView::setPlaying(bool playing) {
     playButton_->setText(playing ? tr("Pause") : tr("Play"));
+}
+
+void QuickModeView::refreshTimecode() {
+    // Same math as TransportBar: fps as a milli-rational keeps
+    // 23.976/29.97 display exact.
+    const fc::FrameRate rate{static_cast<uint32_t>(std::lround(fps_ * 1000.0)), 1000, false};
+    const int64_t frames = static_cast<int64_t>(std::llround(pos_ * fps_));
+    timecode_->setText(QString::fromStdString(fc::Timecode::fromFrames(frames, rate).toString()));
 }
