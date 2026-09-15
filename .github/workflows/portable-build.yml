@@ -412,6 +412,9 @@ jobs:
           # create the dir here so a fresh portable install has somewhere
           # to land the first report.
           mkdir -p dist/crash-logs
+          # GPL-3.0 distribution convention: the license text (and the
+          # third-party notices) travel with the binaries.
+          cp LICENSE THIRD_PARTY_NOTICES.md dist/
           ls dist | wc -l
           ls dist
 
