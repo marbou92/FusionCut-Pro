@@ -319,6 +319,14 @@ jobs:
             fi
           done
           cp VERSION dist/VERSION.txt
+          # PORTABLE.txt header carries the same version string as the zip
+          # name and CMake's project(): read from the one VERSION file
+          # instead of a hard-coded literal that silently went stale.
+          FCP_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$FCP_VERSION" ]; then
+            echo "::error::VERSION file is empty - cannot stamp PORTABLE.txt"
+            exit 1
+          fi
           # PORTABLE.txt prose. RULE (learned the hard way in an early
           # CI run): no apostrophes inside these single-quoted arguments.
           # In bash, \' inside '...' does NOT escape the quote - it
@@ -326,9 +334,11 @@ jobs:
           # of the whole printf; the first later "(" that landed outside
           # quotes then killed the script with "syntax error near
           # unexpected token (" at line 138). Write possessives as
-          # "the DLL that ships with FFmpeg 8" instead.
+          # "the DLL that ships with FFmpeg 8" instead. (The version
+          # header above is double-quoted on purpose: it interpolates
+          # $FCP_VERSION and contains no apostrophes.)
           printf '%s\n' \
-            'FusionCut Pro - portable build (v0.1.0)' '' \
+            "FusionCut Pro - portable build (v${FCP_VERSION})" '' \
             'Double-click FusionCutPro.exe to launch.' '' \
             'IF FUSIONCUTPRO.EXE WILL NOT START (the Windows dialog says' \
             '"The application was unable to start correctly' \

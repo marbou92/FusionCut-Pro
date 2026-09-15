@@ -92,6 +92,47 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
 
+  media-tests-windows:
+    # The media layer under MinGW64 + MSYS2 FFmpeg - the exact toolchain
+    # the portable zip ships. ci.yml used to compile the FFmpeg layer on
+    # Linux only, so a Windows-only break (MinGW headers, import libs,
+    # path handling) surfaced only in the manual/tag-triggered portable
+    # workflow, long after the commit that caused it.
+    name: Media tests (windows, MinGW64 FFmpeg)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW64, FFmpeg)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          release: true
+          update: false
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-ffmpeg
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFC_BUILD_APP=OFF
+          -DFC_BUILD_MEDIA=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
+
   qt-app-ubuntu:
     name: Qt app build (Ubuntu, Qt 5.15)
     runs-on: ubuntu-latest
