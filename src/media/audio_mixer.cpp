@@ -209,9 +209,28 @@ bool AudioWindowMixer::pull(const std::vector<AudioSpan> &spans, int64_t startSa
             if (chunk.ptsSec >= srcTo) {
                 break;
             }
+            // A BACKWARD seek can land on a packet that starts before the
+            // needed range: skip the samples sitting before the span's
+            // in-point (srcFrom) instead of blending them. They are source
+            // audio the clip does not own (the previous clip's tail or
+            // raw lead-in) - leaking them bakes a click into every clip
+            // head that lacks a fadeIn, in exports and the WASAPI preview
+            // alike, whenever the clip head falls strictly inside a pull
+            // window.
+            int j0 = 0;
+            if (chunk.ptsSec < srcFrom - 1.0e-9) {
+                const double raw = (srcFrom - chunk.ptsSec) * rate;
+                j0 = static_cast<int>(std::ceil(raw - 1.0e-9));
+                if (j0 < 0) {
+                    j0 = 0;
+                }
+                if (j0 >= chunk.frames) {
+                    continue;
+                }
+            }
             const double kFloat = kFloatBase + chunk.ptsSec * static_cast<double>(rate);
             const int64_t k0 = static_cast<int64_t>(std::llround(kFloat));
-            for (int j = 0; j < chunk.frames; ++j) {
+            for (int j = j0; j < chunk.frames; ++j) {
                 const int64_t k = k0 + j;
                 if (k < 0) {
                     continue;

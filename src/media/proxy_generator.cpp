@@ -183,7 +183,7 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
         bool committed = false;
         ~PartialFileCleaner() {
             if (!committed) {
-                std::remove(path.c_str());
+                removeFileUtf8(path);
             }
         }
     } cleaner{dstPath, false};
@@ -300,14 +300,16 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
     }
     CodecContextPtr audioEncGuard(audioEnc);
 
+    IoContextPtr io;
     if (!(out->oformat->flags & AVFMT_NOFILE)) {
-        AVIOContext *io = nullptr;
-        rc = avio_open(&io, dstPath.c_str(), AVIO_FLAG_WRITE);
+        AVIOContext *rawIo = nullptr;
+        rc = avio_open(&rawIo, dstPath.c_str(), AVIO_FLAG_WRITE);
         if (rc < 0) {
             error = "open output file failed: " + fcError(rc);
             return false;
         }
-        out->pb = io; // closed via avio_closep after the trailer
+        io.reset(rawIo);
+        out->pb = rawIo; // closed by the IoContextPtr at scope exit
     }
 
     rc = avformat_write_header(out.get(), nullptr);
@@ -405,9 +407,18 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                 return true; // skip audio on resampler failure
             }
         }
-        const int outCapacity =
-            srcFrame->nb_samples +
-            static_cast<int>(swr_get_delay(resampler.get(), srcFrame->sample_rate)) + 16;
+        // The output budget must be counted in OUTPUT sample-frames (see
+        // AudioDecoder::readSamples): nb_samples and swr_get_delay at the
+        // input rate are input-side quantities, and at a 44.1 kHz source
+        // against the 48 kHz proxy target the old formula undershot every
+        // frame, stranding input in the resampler forever. This is the
+        // library's own upper bound for the next convert, buffered state
+        // included.
+        int bound = swr_get_out_samples(resampler.get(), srcFrame->nb_samples);
+        if (bound < 0) {
+            bound = srcFrame->nb_samples * 2 + 64;
+        }
+        const int outCapacity = bound + 16;
         uint8_t **buffer = nullptr;
         if (av_samples_alloc_array_and_samples(&buffer, nullptr, 2, outCapacity, AV_SAMPLE_FMT_FLTP,
                                                0) < 0) {
@@ -528,6 +539,64 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
             }
             av_frame_unref(decoded.get());
         }
+        // The decoder is drained, but the resampler still holds its
+        // low-pass filter tail - flush it into the FIFO the same way
+        // (NULL input is the flush signal; this runs exactly once, at
+        // the true end of the stream).
+        if (resampler) {
+            int flushCapacity = swr_get_out_samples(resampler.get(), 0);
+            if (flushCapacity < 0) {
+                flushCapacity = 0;
+            }
+            flushCapacity += 4096; // bound + flush-reflection headroom
+            uint8_t **flushBuf = nullptr;
+            if (av_samples_alloc_array_and_samples(&flushBuf, nullptr, 2, flushCapacity,
+                                                   AV_SAMPLE_FMT_FLTP, 0) >= 0) {
+                int produced = 0;
+                while (produced < flushCapacity) {
+                    uint8_t *planes[2] = {
+                        flushBuf[0] + static_cast<size_t>(produced) * sizeof(float),
+                        flushBuf[1] + static_cast<size_t>(produced) * sizeof(float)};
+                    const int got =
+                        swr_convert(resampler.get(), planes, flushCapacity - produced, nullptr, 0);
+                    if (got <= 0) {
+                        break; // drained (errors abandoned the tail)
+                    }
+                    produced += got;
+                }
+                if (produced > 0) {
+                    if (av_audio_fifo_space(audioFifo.get()) < produced) {
+                        av_audio_fifo_realloc(audioFifo.get(),
+                                              av_audio_fifo_size(audioFifo.get()) + produced);
+                    }
+                    av_audio_fifo_write(audioFifo.get(), reinterpret_cast<void **>(flushBuf),
+                                        produced);
+                }
+                av_freep(&flushBuf[0]);
+                av_freep(&flushBuf);
+            }
+        }
+        // Silence-pad the tail to a whole AAC frame so the last partial
+        // frame flushes (<= one frame, ~21 ms at 48 kHz) - the same
+        // contract the exporter honors for timeline audio.
+        if (audioEnc && audioEnc->frame_size > 0) {
+            const int remainder = av_audio_fifo_size(audioFifo.get()) % audioEnc->frame_size;
+            if (remainder > 0) {
+                const int pad = audioEnc->frame_size - remainder;
+                uint8_t **padBuf = nullptr;
+                if (av_samples_alloc_array_and_samples(&padBuf, nullptr, 2, pad, AV_SAMPLE_FMT_FLTP,
+                                                       0) >= 0) {
+                    av_samples_set_silence(padBuf, 0, pad, 2, AV_SAMPLE_FMT_FLTP);
+                    if (av_audio_fifo_space(audioFifo.get()) < pad) {
+                        av_audio_fifo_realloc(audioFifo.get(),
+                                              av_audio_fifo_size(audioFifo.get()) + pad);
+                    }
+                    av_audio_fifo_write(audioFifo.get(), reinterpret_cast<void **>(padBuf), pad);
+                    av_freep(&padBuf[0]);
+                    av_freep(&padBuf);
+                }
+            }
+        }
         if (!flushAudioFifo()) {
             return false;
         }
@@ -546,9 +615,6 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
         return false;
     }
 
-    if (out->pb && !(out->oformat->flags & AVFMT_NOFILE)) {
-        avio_closep(&out->pb);
-    }
     cleaner.committed = true;
     return true;
 }

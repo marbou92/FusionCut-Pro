@@ -77,4 +77,10 @@ std::string ffmpegVersionInfo();
 FrameRate avRationalToFrameRate(AVRational rational);
 AVRational frameRateToAv(const FrameRate &rate);
 
+// Removes a file named by a UTF-8 path (the media layer's filename
+// contract) - on Windows through the wide API, because the narrow CRT
+// reads bytes in the system ANSI code page and would silently miss
+// non-ASCII targets. Returns true when the file is gone.
+bool removeFileUtf8(const std::string &path);
+
 } // namespace fc

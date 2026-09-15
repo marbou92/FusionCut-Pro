@@ -68,6 +68,11 @@ void VideoDecoder::close() {
     format_.reset();
     videoStreamIndex_ = -1;
     endOfFile_ = false;
+    // Drop a stale seek target: without this, a decode error between
+    // seek and the first delivered frame left the skip active, and the
+    // NEXT source opened on this decoder silently dropped every frame
+    // before the old target (its head looked like pre-seek frames).
+    seekTarget_ = -1.0;
     info_ = MediaInfo();
 }
 

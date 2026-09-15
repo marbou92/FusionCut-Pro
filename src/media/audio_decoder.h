@@ -59,7 +59,9 @@ public:
     // Decodes the next chunk (one resampled frame's worth of samples).
     // Returns false at end of stream (error is left empty in that case)
     // or on failure. Empty chunks (the resampler's warm-up delay) are
-    // skipped internally; a true return always carries >= 1 frame.
+    // skipped internally; a true return always carries >= 1 frame. At
+    // the true end of stream the resampler is flushed once, so the
+    // final chunk can be the filter tail after the last decoded frame.
     bool readSamples(DecodedAudio &out, std::string &error);
 
 private:
@@ -78,6 +80,8 @@ private:
     bool endOfFile_ = false;
     bool draining_ = false;
     double seekTarget_ = -1.0; // >= 0 while skipping to the seek target
+    bool tailFlushed_ = false; // the end-of-stream resampler flush ran
+    double tailPts_ = 0.0;     // expected pts of the next chunk (seconds)
     // Source geometry the current resampler was built for (0 = unset).
     int resamplerSrcChannels_ = 0;
     int resamplerSrcRate_ = 0;

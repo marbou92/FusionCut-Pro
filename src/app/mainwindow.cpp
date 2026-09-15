@@ -23,6 +23,7 @@
 #include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
@@ -161,13 +162,21 @@ MainWindow::~MainWindow() {
     // (previewMixer_) unwind - the unique_ptrs destruct in reverse
     // order and the mixer is declared AFTER the preview.
     stopAudioPreview();
+    // A running export polls exportCancel_ every frame - set it BEFORE
+    // the join, or the job keeps running into the destructor: the wait
+    // timed out, MainWindow's members (the flag itself included) were
+    // destroyed under the job, and Qt then aborted on a thread that is
+    // still running. The join below is now unbounded: the flag ends the
+    // export within one frame's work, and a job with no cancel path
+    // (a proxy) simply finishes before the process exits.
+    exportCancel_.store(true);
     if (decodeThreadB_) {
         decodeThreadB_->quit();
         decodeThreadB_->wait(3000);
     }
     if (decodeThread_) {
         decodeThread_->quit();
-        decodeThread_->wait(3000);
+        decodeThread_->wait();
     }
 }
 
@@ -969,6 +978,13 @@ void MainWindow::updateSequenceDuration() {
     // Quick Mode's transport spans the same extent; a duration > 0 is
     // what enables its scrub slider (the 10 s placeholder must not).
     quickView_->setMedia(seq > 0.0 || duration_ > 0.0 ? dur : 0.0, fps_);
+    // setMedia resets both transports' position display to zero, but the
+    // model edits that funnel through here never move the playhead - and
+    // while paused there is no frameReady round trip to re-assert it
+    // (cached-frame re-renders skip the worker). Put the real position
+    // back so a trim/delete does not make the timecode jump to 00:00.
+    transport_->setPosition(playhead_);
+    quickView_->setPosition(playhead_);
     // every MainWindow model mutation funnels through here;
     // keep the transition editor in sync with pruned/clamped transitions.
     syncTransitionEditor();
@@ -1798,17 +1814,21 @@ void MainWindow::saveProject() {
         return;
     }
     const std::string text = fc::serializeProject(model_);
-    QFile file(projectPath_);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    // Atomic save: QSaveFile writes a temp file next to the target and
+    // renames it over the real file on commit() - a crash or power loss
+    // mid-write leaves the previous good project intact instead of a
+    // truncated file that refuses to load.
+    QSaveFile file(projectPath_);
+    if (!file.open(QIODevice::WriteOnly)) {
         QMessageBox::warning(this, tr("Save Project"),
                              tr("Could not write %1: %2").arg(projectPath_, file.errorString()));
         return;
     }
     const qint64 written = file.write(text.data(), static_cast<qint64>(text.size()));
-    file.close();
-    if (written != static_cast<qint64>(text.size())) {
+    if (written != static_cast<qint64>(text.size()) || !file.commit()) {
+        file.cancelWrite();
         QMessageBox::warning(this, tr("Save Project"),
-                             tr("Could not write %1: the file is incomplete.").arg(projectPath_));
+                             tr("Could not write %1: %2").arg(projectPath_, file.errorString()));
         return;
     }
     dirty_ = false;
@@ -1826,9 +1846,18 @@ bool MainWindow::saveProjectAs() {
     if (path.isEmpty()) {
         return false;
     }
+    // The session only follows the new path once the write actually
+    // succeeded - a failed save used to retarget the (still dirty)
+    // session at a file that was never written.
+    const QString previous = projectPath_;
     projectPath_ = path;
     saveProject();
-    return !dirty_;
+    if (dirty_) {
+        projectPath_ = previous;
+        updateWindowTitle();
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::openProject() {
@@ -1846,7 +1875,15 @@ void MainWindow::openProject() {
                              tr("Could not read %1: %2").arg(path, file.errorString()));
         return;
     }
-    const QByteArray raw = file.readAll();
+    const QByteArray rawAll = file.readAll();
+    // Tolerate a UTF-8 BOM: hand-edited projects re-saved by Win7-era
+    // Notepad start with one, and the JSON parser rejects it as a bad
+    // number at offset 0.
+    QByteArray raw = rawAll;
+    if (raw.size() >= 3 && static_cast<unsigned char>(raw[0]) == 0xEF &&
+        static_cast<unsigned char>(raw[1]) == 0xBB && static_cast<unsigned char>(raw[2]) == 0xBF) {
+        raw.remove(0, 3);
+    }
     const std::string text(raw.constData(), static_cast<size_t>(raw.size()));
     std::string error;
     if (!fc::parseProject(text, model_, error)) {
@@ -2033,6 +2070,10 @@ void MainWindow::exportMedia() {
         cancel->setEnabled(false);
         cancel->setText(tr("Cancelling..."));
     });
+    // The system close (X) and Esc must cancel too: without this the
+    // dialog hides while the job keeps running with no visible progress
+    // and no way to stop it but quitting the app.
+    connect(exportDialog_, &QDialog::rejected, this, [this] { exportCancel_ = true; });
     auto *layout = new QVBoxLayout(exportDialog_);
     layout->addWidget(exportBar_);
     layout->addWidget(cancel, 0, Qt::AlignRight);

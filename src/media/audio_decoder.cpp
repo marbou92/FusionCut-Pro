@@ -81,6 +81,8 @@ bool AudioDecoder::open(const std::string &path, int sampleRate, int channels, s
     endOfFile_ = false;
     draining_ = false;
     seekTarget_ = -1.0;
+    tailFlushed_ = false;
+    tailPts_ = 0.0;
     return true;
 }
 
@@ -95,6 +97,8 @@ void AudioDecoder::close() {
     endOfFile_ = false;
     draining_ = false;
     seekTarget_ = -1.0;
+    tailFlushed_ = false;
+    tailPts_ = 0.0;
     resamplerSrcChannels_ = 0;
     resamplerSrcRate_ = 0;
     resamplerSrcFormat_ = -1;
@@ -172,6 +176,8 @@ bool AudioDecoder::seekToSeconds(double seconds, std::string &error) {
     endOfFile_ = false;
     draining_ = false;
     seekTarget_ = seconds;
+    tailFlushed_ = false;
+    tailPts_ = seconds;
     return true;
 }
 
@@ -194,8 +200,27 @@ bool AudioDecoder::readSamples(DecodedAudio &out, std::string &error) {
                 av_frame_unref(frame_.get());
                 return false;
             }
-            const int64_t delay = swr_get_delay(resampler_.get(), frame_->sample_rate);
-            const int capacity = frame_->nb_samples + static_cast<int>(delay) + 16;
+            // The output budget must be counted in OUTPUT sample-frames:
+            // nb_samples (the input count) and swr_get_delay at the INPUT
+            // rate are input-side quantities. At a 44.1 kHz source against
+            // the 48 kHz mixer target, the old "input" formula undershot
+            // every chunk by ~8%: swr_convert clamped its output, buffered
+            // the leftover input forever (unbounded growth), and every
+            // chunk carried less audio than its pts step promised -
+            // dropouts and drift on the single most common input class.
+            // swr_get_out_samples is the library's own upper bound on the
+            // next convert's output for this much input, INCLUDING
+            // whatever is already buffered internally (verified against
+            // the FFmpeg 4.4 source); +16 covers rounding across the
+            // supported API generations.
+            int bound = swr_get_out_samples(resampler_.get(), frame_->nb_samples);
+            if (bound < 0) {
+                // API generation without the bound callback: a generous
+                // resample estimate; the end-of-stream flush below
+                // catches anything that still strands.
+                bound = frame_->nb_samples * 2 + 64;
+            }
+            const int capacity = bound + 16;
             out.samples.assign(static_cast<size_t>(capacity) * channels_, 0.0f);
             float *planes[1] = {out.samples.data()};
             // The const_cast is required for FFmpeg <= 6.1, where
@@ -225,6 +250,7 @@ bool AudioDecoder::readSamples(DecodedAudio &out, std::string &error) {
             out.samples.resize(static_cast<size_t>(converted) * channels_);
             out.frames = converted;
             out.ptsSeconds = ptsSeconds;
+            tailPts_ = ptsSeconds + static_cast<double>(converted) / rate_;
             return true;
         }
         if (rc != AVERROR(EAGAIN)) {
@@ -235,6 +261,61 @@ bool AudioDecoder::readSamples(DecodedAudio &out, std::string &error) {
                 continue;
             }
             if (endOfFile_) {
+                // True end of stream. The resampler still holds its
+                // low-pass filter tail (a handful of samples at any rate;
+                // whole seconds when a short output budget ever stranded
+                // input) - drain it once and emit it as the final chunk.
+                if (!tailFlushed_ && resampler_) {
+                    // swr_get_out_samples(s, 0) bounds what is buffered
+                    // right now; the flush additionally mirrors up to
+                    // filter_length samples of reflection padding, so
+                    // grow generously and loop until it yields nothing.
+                    int capacity = swr_get_out_samples(resampler_.get(), 0);
+                    if (capacity < 0) {
+                        capacity = 0;
+                    }
+                    capacity += 4096;
+                    out.samples.assign(static_cast<size_t>(capacity) * channels_, 0.0f);
+                    int produced = 0;
+                    int flushRc = 0;
+                    while (true) {
+                        float *plane[1] = {out.samples.data() +
+                                           static_cast<size_t>(produced) * channels_};
+                        flushRc = swr_convert(resampler_.get(), reinterpret_cast<uint8_t **>(plane),
+                                              capacity - produced, nullptr, 0);
+                        if (flushRc < 0) {
+                            break;
+                        }
+                        produced += flushRc;
+                        if (flushRc == 0) {
+                            break;
+                        }
+                        if (produced >= capacity) {
+                            capacity *= 2;
+                            out.samples.resize(static_cast<size_t>(capacity) * channels_, 0.0f);
+                        }
+                    }
+                    if (flushRc < 0) {
+                        error = "audio resample flush failed: " + fcError(flushRc);
+                        return false;
+                    }
+                    // Honor the seek skip: a tail entirely before the
+                    // target is dropped, exactly like a decoded chunk.
+                    const bool beforeTarget =
+                        seekTarget_ >= 0.0 && tailPts_ + static_cast<double>(produced) / rate_ <
+                                                  seekTarget_ + 0.5 / rate_;
+                    if (seekTarget_ >= 0.0 && !beforeTarget) {
+                        seekTarget_ = -1.0;
+                    }
+                    if (produced > 0 && !beforeTarget) {
+                        out.samples.resize(static_cast<size_t>(produced) * channels_);
+                        out.frames = produced;
+                        out.ptsSeconds = tailPts_;
+                        tailPts_ += static_cast<double>(produced) / rate_;
+                        return true; // the next call drains to zero below
+                    }
+                }
+                tailFlushed_ = true;
                 return false; // clean end of stream (error left empty)
             }
             error = "audio decode failed: " + fcError(rc);

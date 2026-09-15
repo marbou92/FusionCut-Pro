@@ -19,7 +19,19 @@ version stays at 0.1.0 until the first public build.
   writability, FIFO reads) so a failing step reports a real error
   instead of limping on. The export frame callback receives the full
   int64_t frame index its signature declares - the loop used to narrow
-  the counter to int, silently wrapping past 2^31 frames.
+  the counter to int, silently wrapping past 2^31 frames. The proxy
+  now owns its output AVIOContext through RAII (every error path used
+  to leak the handle, which also made the partial-file cleanup fail
+  on Windows), silence-pads its audio tail so the last partial AAC
+  frame flushes, and its partial-file cleanup removes UTF-8 paths
+  through the wide API on Windows (the narrow CRT reads bytes in the
+  system code page and silently missed non-ASCII destinations). The
+  probe ignores ATTACHED_PIC video streams (a music file's embedded
+  cover art used to classify the whole file as a one-frame video and
+  route it into the video pipeline), maps a NOPTS container duration
+  to unknown instead of a garbage negative, and no longer builds a
+  std::string from a NULL sample-format name (undefined behavior on
+  streams whose format was never resolved).
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.
@@ -69,6 +81,20 @@ version stays at 0.1.0 until the first public build.
   video and audio clips together; audio-only files become audio clips.
   A source that will not decode mixes as silence and says so. Track
   strips, fades, and master persist additively in the project file.
+  The resampler's output budget is now computed in OUTPUT samples via
+  swr_get_out_samples (the old formula summed input-side quantities:
+  every upsampling source - 44.1 kHz music against the 48 kHz mixer
+  rate, the single most common input class - came out chunked, with
+  ~1 ms dropouts 44 times a second, cumulative audio-ahead drift, and
+  an unboundedly growing internal buffer; the 1:1 test sources could
+  never see it). The resampler is flushed at end of stream by the
+  decoder and the proxy generator, so the low-pass filter tail (and
+  any input stranded before the fix) is emitted instead of dropped -
+  the last ~21 ms of every file used to vanish. The mixer no longer
+  blends samples that sit BEFORE a clip's in-point into a pull window
+  (a BACKWARD seek lands on a packet that starts early; its lead-in
+  leaked into exports and the preview as a click on every clip head
+  without a fadeIn).
 - **Color emoji from the machine's own fonts:** no font is bundled.
   The app discovers the emoji-capable fonts installed on the PC -
   scanning the platform font directories AND the Windows font
@@ -105,7 +131,12 @@ version stays at 0.1.0 until the first public build.
   declared on a TEXT track (the runtime model has always refused to
   create them there - the compositor has no decoded stream to hold
   for the incoming side), closing the gap where a hand-edited or
-  foreign file could smuggle one in.
+  foreign file could smuggle one in. Saving is atomic (QSaveFile:
+  temp file + rename on commit - a crash mid-write can no longer
+  truncate the only copy), loading tolerates a UTF-8 BOM (Win7-era
+  Notepad writes one; the parser used to reject the file as a bad
+  number), and Save As only retargets the session once the write
+  actually succeeded.
 - **Export:** H.264 MP4 (MPEG-4 fallback) through the exact program
   pipeline - effects with per-frame keyframe interpolation, live
   transitions, text/emoji compositing - with CRF control, progress,
@@ -169,7 +200,28 @@ version stays at 0.1.0 until the first public build.
   wheel scrolls while Ctrl+wheel zooms, playback keeps the playhead
   in view, and zooming anchors on the playhead instead of the left
   edge. Previously a sequence longer than the window was unreachable
-  past the right border.
+  past the right border. The scroll extent is now computed in the
+  panel's real units - the zoom scale is pixels-per-FRAME, and the
+  old extent multiplied duration (seconds) by that scale, which kept
+  the scrollbar dead at default zoom and clipped the playhead, the
+  ruler ticks, and every clip past the first seconds out of view;
+  transition markers hit-test scroll-aware (a scrolled click used to
+  select a transition living a whole viewport away), the ruler tick
+  spacing is fps-scaled to match its 70 px target, Ctrl+wheel with a
+  purely horizontal delta no longer zooms out, and an fps change
+  re-ranges the scroll bar.
+- The export progress dialog cancels the job when closed with the
+  system X or Esc (the dialog used to hide while the encode kept
+  running invisibly), and quitting the app while an export runs now
+  sets the cancel flag and joins the worker without a timeout - the
+  old 3 s wait timed out, destroyed the thread's owner under it, and
+  aborted the process on exit (a cancel-less proxy job now simply
+  finishes before exit).
+- Both transports keep their position display across model edits:
+  every mutation funnels through the duration refresh, whose setMedia
+  call used to zero the slider and timecode while paused (no worker
+  round trip was coming to restore it), so deleting or trimming a
+  clip no longer makes the readout jump to 00:00:00:00.
 - Clip placement resolves the FIRST video lane instead of assuming
   the default layout: adding a text track inserts lanes ABOVE the
   video ones (shifting V1 off index 1), and the old hardcoded track
@@ -203,7 +255,9 @@ repo).
 - The portable workflow stamps PORTABLE.txt's version header from the
   VERSION file - the single source CMake's project() and the zip name
   already read - instead of a hard-coded v0.1.0 literal that silently
-  went stale the moment VERSION moved.
+  went stale the moment VERSION moved. The portable zip now ships the
+  license text and third-party notices alongside the binaries (GPL
+  distribution convention).
 
 ### Notable engineering finds along the way
 

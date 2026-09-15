@@ -145,7 +145,13 @@ QRect TimelinePanel::laneRect(int row) const {
 int TimelinePanel::laneContentWidth() const {
     // The sequence extent at the current zoom plus tail padding, so the
     // ruler labels and the clip tails past the last frame stay reachable.
-    return static_cast<int>(duration_ * pps_) + kLanePad;
+    // pps_ is pixels-per-FRAME (xToFrame/frameToX are frame-scaled), so
+    // the extent is duration * fps * pps - the old duration * pps
+    // computed the scroll range as if pps_ were pixels-per-second, which
+    // kept the scrollbar dead at default zoom (10 s @ 24 fps paints
+    // 14400 px but the range said 600) and clipped everything past the
+    // first seconds of a project out of view.
+    return static_cast<int>(duration_ * fps_ * pps_) + kLanePad;
 }
 
 int64_t TimelinePanel::xToFrame(int x) const {
@@ -264,6 +270,11 @@ void TimelinePanel::setPlayhead(double seconds) {
 
 void TimelinePanel::setFps(double fps) {
     fps_ = fps > 1.0 ? fps : 24.0;
+    // The content extent is fps-scaled (laneContentWidth) and the ruler
+    // tick spacing is fps-scaled (drawRuler) - both need a re-range, and
+    // the playhead pixel position moves with fps too.
+    updateScrollRange();
+    ensurePlayheadVisible();
     update();
 }
 
@@ -389,7 +400,10 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     painter.setPen(QColor(0x9A, 0x9A, 0x9A));
 
     double step = 1.0;
-    while (step * pps_ < 70.0) {
+    // One step is `step` seconds; its pixel distance is step * fps * pps
+    // (pps_ is pixels-per-frame). Without the fps factor the ticks land
+    // fps-times sparser than the 70 px target.
+    while (step * fps_ * pps_ < 70.0) {
         step *= 5.0;
     }
     const fc::FrameRate rate{static_cast<uint32_t>(std::lround(fps_ * 1000.0)), 1000, false};
@@ -591,7 +605,12 @@ const fc::Transition *TimelinePanel::transitionAtPos(const QPoint &pos) const {
         // edge-drag trims and body moves around the marker.
         const int cy = (rect.top() + rect.bottom()) / 2;
         const int half = 10;
-        if (pos.x() >= rect.left() && pos.x() <= rect.right() && pos.y() >= cy - half &&
+        // transitionRect (like every frameToX call) is CONTENT space, but
+        // pos is a WIDGET coordinate - shift it by the scroll offset or a
+        // scrolled click selects a transition living scrollX_ pixels away
+        // (and misses the one actually under the cursor).
+        const int contentX = pos.x() + scrollX_;
+        if (contentX >= rect.left() && contentX <= rect.right() && pos.y() >= cy - half &&
             pos.y() <= cy + half) {
             return &t;
         }
@@ -906,7 +925,11 @@ void TimelinePanel::leaveEvent(QEvent *event) {
 
 void TimelinePanel::wheelEvent(QWheelEvent *event) {
     if (event->modifiers() & Qt::ControlModifier) {
-        applyZoom(pps_ + (event->angleDelta().y() > 0 ? 20.0 : -20.0));
+        // A purely horizontal wheel delta (y == 0) must not zoom - the
+        // ternary below would read it as "zoom out".
+        if (event->angleDelta().y() != 0) {
+            applyZoom(pps_ + (event->angleDelta().y() > 0 ? 20.0 : -20.0));
+        }
         event->accept();
         return;
     }

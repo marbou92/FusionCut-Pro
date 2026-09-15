@@ -81,7 +81,7 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
         bool committed = false;
         ~PartialFileCleaner() {
             if (!committed) {
-                std::remove(path.c_str());
+                removeFileUtf8(path);
             }
         }
     } cleaner{dstPath, false};

@@ -62,8 +62,12 @@ void fillAudioStream(const AVStream *stream, AudioStreamInfo &out) {
     out.streamIndex = stream->index;
     out.codecName = codecNameFor(stream->codecpar);
     out.sampleRate = stream->codecpar->sample_rate;
-    out.sampleFormat =
-        std::string(av_get_sample_fmt_name(static_cast<AVSampleFormat>(stream->codecpar->format)));
+    // codecpar->format defaults to -1 (unknown) for streams whose format
+    // was never resolved - av_get_sample_fmt_name returns NULL there, and
+    // std::string(nullptr) is undefined behavior.
+    const char *sampleFmtName =
+        av_get_sample_fmt_name(static_cast<AVSampleFormat>(stream->codecpar->format));
+    out.sampleFormat = sampleFmtName ? std::string(sampleFmtName) : std::string("unknown");
 
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
     out.channels = stream->codecpar->ch_layout.nb_channels;
@@ -97,9 +101,26 @@ bool MediaProbe::probe(const std::string &path, MediaInfo &out, std::string &err
 
     out.container = ctx->iformat->long_name ? ctx->iformat->long_name : "";
     out.formatName = ctx->iformat->name ? ctx->iformat->name : "";
-    out.durationUs = ctx->duration; // AV_TIME_BASE units, may be AV_NOPTS_VALUE
+    // Duration-less containers (some TS/raw streams) report NOPTS - map
+    // it to "unknown" (0) instead of passing a garbage negative through
+    // durationSeconds().
+    out.durationUs = ctx->duration != AV_NOPTS_VALUE ? ctx->duration : 0;
 
-    const int videoIdx = av_find_best_stream(ctx.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    // Pick the first REAL video stream. av_find_best_stream cannot be
+    // used for that: it scores by disposition/frame count/bitrate but
+    // knows nothing about ATTACHED_PIC, so a music file's embedded cover
+    // art (the mjpeg stream inside an ID3/APIC envelope) wins as the
+    // only "video" stream, hasVideo flips true, and the import routes a
+    // song into the video pipeline (one static frame, a wasted proxy).
+    int videoIdx = -1;
+    for (unsigned int i = 0; i < ctx->nb_streams; ++i) {
+        const AVStream *stream = ctx->streams[i];
+        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+            !(stream->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            videoIdx = static_cast<int>(i);
+            break;
+        }
+    }
     if (videoIdx >= 0) {
         out.hasVideo = true;
         fillVideoStream(ctx.get(), ctx->streams[videoIdx], out.video);
