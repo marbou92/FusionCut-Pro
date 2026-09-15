@@ -316,7 +316,10 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
     };
 
     for (int64_t f = 0; f < config.totalFrames; ++f) {
-        if (!provider(static_cast<int>(f), rgba.data())) {
+        // The provider contract is int64_t (ExportFrameProvider) - pass the
+        // loop counter through un-narrowed; an int cast here silently
+        // wrapped the frame index past 2^31 frames.
+        if (!provider(f, rgba.data())) {
             error.clear(); // cancellation: no error message
             return false;
         }

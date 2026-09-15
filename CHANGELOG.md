@@ -17,7 +17,9 @@ version stays at 0.1.0 until the first public build.
   their real duration), and checks the returns it silently ignored
   before (stream-info discovery, encoder/decoder flushes, frame
   writability, FIFO reads) so a failing step reports a real error
-  instead of limping on.
+  instead of limping on. The export frame callback receives the full
+  int64_t frame index its signature declares - the loop used to narrow
+  the counter to int, silently wrapping past 2^31 frames.
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.
@@ -190,6 +192,18 @@ text (453), emoji (365), srt (83), media (29766). Synthetic media is
 generated at runtime; the emoji suite pins its expectations against
 hand-built synthetic font fixtures (nothing font-shaped lives in the
 repo).
+
+### Build & CI
+
+- ci.yml gained a Windows media-tests leg (windows-latest, MSYS2
+  MinGW64 + FFmpeg - the exact toolchain the portable zip ships).
+  The FFmpeg layer previously compiled on Linux only in CI, so a
+  Windows-only break surfaced only in the manual/tag-triggered
+  portable workflow, long after the commit that caused it.
+- The portable workflow stamps PORTABLE.txt's version header from the
+  VERSION file - the single source CMake's project() and the zip name
+  already read - instead of a hard-coded v0.1.0 literal that silently
+  went stale the moment VERSION moved.
 
 ### Notable engineering finds along the way
 
