@@ -35,9 +35,12 @@ void fillVideoStream(const AVFormatContext *fmt, const AVStream *stream, VideoSt
     out.codecName = codecNameFor(stream->codecpar);
     out.width = stream->codecpar->width;
     out.height = stream->codecpar->height;
-    const char *pixName = av_get_pix_fmt_name(
-        stream->codecpar->format ? static_cast<AVPixelFormat>(stream->codecpar->format)
-                                 : AV_PIX_FMT_NONE);
+    // codecpar->format defaults to -1 (unknown); 0 is a REAL format
+    // (AV_PIX_FMT_YUV420P - the most common one), so the unknown case
+    // is "negative", never "zero".
+    const int pixFmt = stream->codecpar->format;
+    const char *pixName =
+        av_get_pix_fmt_name(pixFmt >= 0 ? static_cast<AVPixelFormat>(pixFmt) : AV_PIX_FMT_NONE);
     out.pixelFormat = pixName ? std::string(pixName) : std::string("unknown");
 
     // Prefer the real base rate (r_frame_rate): it carries the stream's

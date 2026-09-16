@@ -20,7 +20,7 @@ DecodeWorker::~DecodeWorker() {
     delete d;
 }
 
-void DecodeWorker::open(const QString &path) {
+void DecodeWorker::open(const QString &path, qint64 token) {
     std::string error;
     if (!d->decoder.open(path.toStdString(), error)) {
         d->openPath.clear();
@@ -36,11 +36,11 @@ void DecodeWorker::open(const QString &path) {
 
     const fc::MediaInfo &info = d->decoder.info();
     emit mediaInfo(fc::mediaSummary(info), info.durationSeconds(), d->fps, info.video.frameCount,
-                   !info.audioStreams.empty());
+                   !info.audioStreams.empty(), token);
     requestFrame(0.0);
 }
 
-void DecodeWorker::openQuiet(const QString &path) {
+void DecodeWorker::openQuiet(const QString &path, qint64 token) {
     std::string error;
     if (!d->decoder.open(path.toStdString(), error)) {
         d->openPath.clear();
@@ -56,7 +56,7 @@ void DecodeWorker::openQuiet(const QString &path) {
 
     const fc::MediaInfo &info = d->decoder.info();
     emit mediaInfo(fc::mediaSummary(info), info.durationSeconds(), d->fps, info.video.frameCount,
-                   !info.audioStreams.empty());
+                   !info.audioStreams.empty(), token);
 }
 
 void DecodeWorker::requestFrame(double seconds) {

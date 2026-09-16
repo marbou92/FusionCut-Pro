@@ -37,6 +37,16 @@ TransportBar::TransportBar(QWidget *parent) : QWidget(parent) {
     connect(stepBack_, &QPushButton::clicked, this, [this] { emit stepRequested(-1); });
     connect(stepFwd_, &QPushButton::clicked, this, [this] { emit stepRequested(1); });
     connect(position_, &QSlider::sliderMoved, this, &TransportBar::onSliderMoved);
+    // Groove clicks and keyboard moves fire valueChanged without a
+    // sliderMoved - the handle jumped but no seek was emitted and the
+    // next setPosition() snapped it back. setPosition()'s blockSignals
+    // keeps programmatic updates silent; during a DRAG the handle is
+    // "down" and sliderMoved already covers it.
+    connect(position_, &QSlider::valueChanged, this, [this](int value) {
+        if (!position_->isSliderDown()) {
+            onSliderMoved(value);
+        }
+    });
 
     refreshTimecode();
 }

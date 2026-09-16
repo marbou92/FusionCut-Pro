@@ -151,6 +151,7 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
     impl_->beginFlag = false;
     impl_->playing = false;
     impl_->playedFrames = 0;
+    failed_ = false; // a fresh run starts optimistic (the device may be back)
 
     // The render thread owns every COM object (created, used, and
     // released there - a clean apartment story, nothing cross-thread).
@@ -279,6 +280,7 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
 
         // ---- render loop ----
         if (FAILED(impl_->client->Start())) {
+            failed_ = true; // device death: the transport must not trust this clock
             impl_->closeAll();
             return;
         }
@@ -292,10 +294,12 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                 break; // control: stop
             }
             if (rc != WAIT_OBJECT_0 + 1 && rc != WAIT_TIMEOUT) {
+                failed_ = true;
                 break; // unexpected: bail out rather than spin
             }
             UINT32 padding = 0;
             if (FAILED(impl_->client->GetCurrentPadding(&padding))) {
+                failed_ = true; // endpoint gone / format changed
                 break;
             }
             impl_->playedFrames = submitted - int64_t(padding);
@@ -325,6 +329,7 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
             }
             BYTE *dst = nullptr;
             if (FAILED(impl_->render->GetBuffer(frames, &dst))) {
+                failed_ = true; // the render pipeline is wedged: no submission, frozen clock
                 continue;
             }
             if (impl_->isFloat) {
@@ -337,7 +342,10 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                     out[i] = int16_t(std::lrint(v * 32767.0));
                 }
             }
-            impl_->render->ReleaseBuffer(frames, 0);
+            if (FAILED(impl_->render->ReleaseBuffer(frames, 0))) {
+                failed_ = true; // the samples never reached the device
+                continue;
+            }
             submitted += frames;
             impl_->playedFrames = submitted - int64_t(padding);
         }
@@ -368,7 +376,7 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
 }
 
 bool AudioPreview::begin(const PullFn &pull) {
-    if (!impl_->thread.joinable() || !impl_->probeOk || impl_->playing.load()) {
+    if (!impl_->thread.joinable() || !impl_->probeOk || impl_->playing.load() || failed_.load()) {
         return false;
     }
     {
@@ -404,6 +412,13 @@ double AudioPreview::playedSeconds() const {
     return double(impl_->playedFrames.load()) / double(impl_->rate);
 }
 
+bool AudioPreview::healthy() const {
+    // Alive AND not failed AND actually rendering: after a mid-run
+    // device death the thread has exited but running_ is only cleared
+    // by stop(), so the transport must not keep reading a frozen clock.
+    return running_.load() && !failed_.load() && impl_->playing.load();
+}
+
 #else // !_WIN32
 
 struct AudioPreview::Impl {};
@@ -426,6 +441,10 @@ bool AudioPreview::begin(const PullFn &pull) {
 }
 
 void AudioPreview::stop() {}
+
+bool AudioPreview::healthy() const {
+    return false; // no audio output layer on this platform
+}
 
 double AudioPreview::playedSeconds() const {
     return 0.0;

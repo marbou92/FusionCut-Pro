@@ -566,8 +566,14 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                 }
                 if (produced > 0) {
                     if (av_audio_fifo_space(audioFifo.get()) < produced) {
-                        av_audio_fifo_realloc(audioFifo.get(),
-                                              av_audio_fifo_size(audioFifo.get()) + produced);
+                        if (av_audio_fifo_realloc(audioFifo.get(),
+                                                  av_audio_fifo_size(audioFifo.get()) + produced) <
+                            0) {
+                            error = "audio fifo realloc failed";
+                            av_freep(&flushBuf[0]);
+                            av_freep(&flushBuf);
+                            return false;
+                        }
                     }
                     av_audio_fifo_write(audioFifo.get(), reinterpret_cast<void **>(flushBuf),
                                         produced);
@@ -588,8 +594,13 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                                                        0) >= 0) {
                     av_samples_set_silence(padBuf, 0, pad, 2, AV_SAMPLE_FMT_FLTP);
                     if (av_audio_fifo_space(audioFifo.get()) < pad) {
-                        av_audio_fifo_realloc(audioFifo.get(),
-                                              av_audio_fifo_size(audioFifo.get()) + pad);
+                        if (av_audio_fifo_realloc(audioFifo.get(),
+                                                  av_audio_fifo_size(audioFifo.get()) + pad) < 0) {
+                            error = "audio fifo realloc failed";
+                            av_freep(&padBuf[0]);
+                            av_freep(&padBuf);
+                            return false;
+                        }
                     }
                     av_audio_fifo_write(audioFifo.get(), reinterpret_cast<void **>(padBuf), pad);
                     av_freep(&padBuf[0]);

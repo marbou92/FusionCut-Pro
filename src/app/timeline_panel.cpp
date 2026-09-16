@@ -876,10 +876,13 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent *event) {
     switch (dragMode_) {
     case DragMode::Move:
         // The ghost row may be a different (same-kind, valid) lane; the
-        // lock check here mirrors MainWindow's safety net.
-        if (ghostRow_ >= 0 && model_->trackAt(ghostRow_)) {
+        // lock check here mirrors MainWindow's safety net. A click
+        // without movement emits nothing: emitting the origin-position
+        // move bumped the revision and dirtied a saved project.
+        if (clip && ghostRow_ >= 0) {
+            const bool moved = ghostRow_ != clip->trackIndex || ghostStart_ != dragOriginStart_;
             const fc::Track *target = model_->trackAt(ghostRow_);
-            if (target && !target->locked && !(track && track->locked)) {
+            if (moved && target && !target->locked && !(track && track->locked)) {
                 emit clipMoveRequested(dragClipId_, ghostRow_, ghostStart_);
             }
         }

@@ -23,15 +23,19 @@ version stays at 0.1.0 until the first public build.
   now owns its output AVIOContext through RAII (every error path used
   to leak the handle, which also made the partial-file cleanup fail
   on Windows), silence-pads its audio tail so the last partial AAC
-  frame flushes, and its partial-file cleanup removes UTF-8 paths
-  through the wide API on Windows (the narrow CRT reads bytes in the
-  system code page and silently missed non-ASCII destinations). The
+  frame flushes, checks its FIFO growth (a failed realloc used to be
+  ignored and limped on), and its partial-file cleanup removes UTF-8
+  paths through the wide API on Windows (the narrow CRT reads bytes in
+  the system code page and silently missed non-ASCII destinations). The
   probe ignores ATTACHED_PIC video streams (a music file's embedded
   cover art used to classify the whole file as a one-frame video and
   route it into the video pipeline), maps a NOPTS container duration
-  to unknown instead of a garbage negative, and no longer builds a
+  to unknown instead of a garbage negative, no longer builds a
   std::string from a NULL sample-format name (undefined behavior on
-  streams whose format was never resolved).
+  streams whose format was never resolved), and reads the pixel format
+  of YUV420P streams correctly (format index 0 - the single most
+  common pixel format - was mistaken for "no format"; the unknown case
+  is the negative default, not zero).
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.
@@ -163,10 +167,12 @@ version stays at 0.1.0 until the first public build.
 - Playback survives source switches: crossing a cut into a clip from
   another file no longer stops the transport - the audio preview
   keeps running (it is the clock), the async open completes, and the
-  queued seek re-resolves at the LIVE audio position; the frame the
-  open emits (source frame 0) is cached for the thumbnail but never
-  composited while the re-seek is pending, and a failed open drops
-  the queued seek instead of wedging the switch state.
+  queued seek re-resolves at the LIVE audio position; the switch opens
+  the source QUIETLY (no open-time frame-0 decode - that first frame
+  used to arrive before the re-seek guard could arm and flash at every
+  cut), so the re-resolved frame is the only thing that paints, and a
+  failed open drops the queued seek instead of wedging the switch
+  state.
 - The sequence is authoritative over media probes: loading media no
   longer re-times the project (the sequence fps is adopted from the
   FIRST probe of a fresh session - or from a loaded project - and
@@ -235,6 +241,72 @@ version stays at 0.1.0 until the first public build.
 - The Effects and Transitions panels share one catalog-tree builder
   (search + category grouping + filter); the panels were copy-paste
   twins of that logic and only their wording differed.
+- Import lengths are computed in SEQUENCE frames from the container
+  duration: the raw stream frame count is counted in the SOURCE's own
+  rate (300 frames of a 30 fps file are 12.5 s at a 24 fps sequence),
+  and using it verbatim made every non-24 fps MP4 import run long -
+  the picture froze on the last decoded frame with silent audio while
+  the playhead kept advancing (1.25x too long at 30 fps, 2.5x at 60,
+  truncated at 15). The count is only a fallback now, converted
+  through the probe's own fps when the container reports no duration.
+- File > Exit goes through close() like the window X: QApplication::quit
+  ended the event loop directly, so the unsaved-changes prompt and the
+  layout save never ran and a dirty project was destroyed silently.
+- The rendered text-layer caches are bounded (LRU in the program
+  monitor, a small rotating map in the export job): one static text
+  clip holds a full-resolution RGBA layer for its whole life, Import
+  Subtitles creates one clip PER CUE, and a caption-heavy project used
+  to hold hundreds of MB after a single playthrough (past 1 GB inside
+  long exports - swap-death on the 1 GB target).
+- A dead audio device no longer freezes the transport: the render
+  thread's failure exits (endpoint removed, format change, wedged
+  buffer submission) raise a failed flag the play clock checks, so
+  playback falls back to the system wall clock and the status bar
+  says so once; the next play attempt re-probes and recovers when the
+  device is back. Previously the thread died while running() stayed
+  true and every tick re-read a frozen position until Stop.
+- Worker B (the transition held-frame fetcher) joins without a timeout
+  at shutdown, matching the main decode thread - its old 3 s cap was
+  the exact destroy-under-a-slow-open abort the main thread had
+  already fixed.
+- Proxy generation runs on its own worker thread: the transcode used
+  to occupy the shared decode worker for minutes, freezing the program
+  monitor (every frame request queued behind the job) and stalling
+  library loads. A second Ctrl+P while a job runs is now a friendly
+  "already running" note instead of two jobs cross-wiring their
+  results, and the job's progress/done signals follow the right
+  source.
+- A library double-click arms a request token that rides the open
+  through to its probe: only the mediaInfo carrying THAT token places
+  the clip. Rapid clicks (or an import landing while a probe was in
+  flight) used to let the first item's probe place the second item's
+  clip with the first item's length.
+- Both transports seek from groove clicks and keyboard input, not
+  just handle drags (a groove click moved the handle, emitted nothing,
+  and snapped back on the next programmatic update), and a USER seek
+  while playing always re-anchors the audio stream - the 0.30 s drift
+  guard used to treat small nudges as clock noise and snap the
+  playhead back.
+- Clicking a clip (select without drag) no longer dirties the project:
+  the release handler emitted the origin-position move, the model
+  wrote identical values and bumped the revision, and Alt+F4 on a
+  freshly opened project asked to save.
+- Track header L/M/S toggles mark the project dirty (the state is
+  persisted - close used to lose it without a prompt) and sync the
+  Mixer strips both ways (a mixer mute/solo now re-dims the timeline).
+- Deleting a clip clears the Color panel too (it kept showing the dead
+  clip's grade next to the already-cleared effect and text editors).
+- Open Project and the export-size suggestion skip text clips when
+  picking "the first clip": a title/caption carries no source, and
+  opening it loaded "" into the monitor (error until the first scrub)
+  or silently dropped the "Match source" export size.
+- The export fetch loop skips decoded frames forward to the requested
+  time: a source whose fps differs from the sequence (60 fps footage
+  in a 24 fps timeline) used to trail further behind every frame
+  until the seek band forced a periodic snap-forward - visible
+  stutter in exports.
+- A rejected transition-duration edit no longer dirties the project
+  (the status message fired but the write never happened).
 
 ### Tests
 

@@ -69,7 +69,7 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
             [this] { emit playToggled(playButton_->text() == tr("Play")); });
     connect(stepBack_, &QPushButton::clicked, this, [this] { emit stepRequested(-1); });
     connect(stepFwd_, &QPushButton::clicked, this, [this] { emit stepRequested(1); });
-    connect(position_, &QSlider::sliderMoved, this, [this](int value) {
+    auto seekBySlider = [this](int value) {
         if (duration_ <= 0.0) {
             return;
         }
@@ -77,6 +77,15 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
         pos_ = seconds;
         refreshTimecode();
         emit seekRequested(seconds);
+    };
+    connect(position_, &QSlider::sliderMoved, this, seekBySlider);
+    // Groove clicks / keyboard moves fire valueChanged without a
+    // sliderMoved; setPosition()'s blockSignals keeps programmatic
+    // updates silent, and during a drag the handle is "down".
+    connect(position_, &QSlider::valueChanged, this, [this, seekBySlider](int value) {
+        if (!position_->isSliderDown()) {
+            seekBySlider(value);
+        }
     });
     refreshTimecode();
 }

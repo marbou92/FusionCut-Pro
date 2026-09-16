@@ -7,8 +7,10 @@
 #include <QVector>
 
 #include <atomic>
+#include <list>
 #include <map>
 #include <memory>
+#include <unordered_map>
 
 #include "audio_preview.h"
 #include "audio_timeline.h"
@@ -65,7 +67,11 @@ private:
 
     // Media + playback flow.
     void importMedia();
-    void loadClip(const QString &sourcePath);
+    // Loads a source into the program monitor (async open on the decode
+    // worker). `addToken` > 0 arms the pending add-clip intent for THIS
+    // open (the library double-click flow): the matching mediaInfo then
+    // places the clip. A plain load (0) drops any stale intent.
+    void loadClip(const QString &sourcePath, qint64 addToken = 0);
     void addPendingClip(const QString &sourcePath, int64_t sourceOutFrames, bool withAudio);
     void splitAtPlayhead();
     void deleteSelectedClip();
@@ -73,6 +79,12 @@ private:
     void startPlayback(bool playing);
     void stepFrames(int frames);
     void requestFrameAt(double seconds);
+    // A USER-initiated seek (transport / quick-mode slider): unlike the
+    // tick-internal requestFrameAt path it ALWAYS re-anchors the audio
+    // stream when playing - the drift guard inside requestFrameAt
+    // treats small nudges as clock-internal noise and would snap the
+    // playhead back to the stale audio position.
+    void seekUser(double seconds);
 
     // project persistence (save / save-as / open, the dirty
     // flag, the modified-title, and the close-time save prompt).
@@ -123,6 +135,12 @@ private:
     void addTextClip();
     void writeTextDocument(int64_t clipId, const fc::TextDocument &doc);
     QImage textLayerForClip(const fc::Clip *clip, int width, int height, int64_t clipFrame);
+    // Bounded text-layer cache (see textLayerLru_): lookup / insert /
+    // remove-one / remove-all.
+    QImage *cachedTextLayer(int64_t clipId);
+    void rememberTextLayer(int64_t clipId, QImage layer);
+    void forgetTextLayer(int64_t clipId);
+    void clearTextLayers();
     int ensureTextTrack();
     // Emoji font selection (machine-wide preference, QSettings-backed):
     // the startup scan + auto-pick, and the combo's change handler.
@@ -177,6 +195,13 @@ private:
     // except to trigger the held-frame request.
     DecodeWorker *workerB_ = nullptr;
     QThread *decodeThreadB_ = nullptr;
+    // third context dedicated to PROXY JOBS: a transcode blocks its
+    // worker's thread for minutes, and on the shared decode worker that
+    // froze the program monitor (every frame request queued behind the
+    // job) and stalled library loads. Proxy jobs never touch a decoder,
+    // so a private worker/thread is all they need.
+    DecodeWorker *proxyWorker_ = nullptr;
+    QThread *proxyThread_ = nullptr;
     QTimer *playClock_;
 
     // Pro Mode widgets.
@@ -203,6 +228,12 @@ private:
     QString loadedPath_;
     QString proxySourcePath_;
     QString pendingAddClipPath_;
+    // Add-clip intent correlation: the library double-click arms a
+    // token; only the mediaInfo carrying THAT token places the clip.
+    // A stale probe from a superseded open (rapid clicks, or an import
+    // while a probe is in flight) can no longer place a wrong clip.
+    qint64 pendingAddToken_ = 0;
+    qint64 loadTokenCounter_ = 0;
     int64_t selectedClipId_ = -1;
     int64_t lastProgramClipId_ = -1; // debounce for program source switches
     double playhead_ = 0.0;
@@ -245,16 +276,19 @@ private:
     QString projectPath_;
     bool dirty_ = false;
 
-    // Text state. The layer cache holds ONE rendered layer per text
-    // clip (keyed by clip id, invalidated on text edits and project
-    // loads). Layers WITHOUT animations are time-invariant, so
-    // playback composites the cached bitmap every frame instead of
-    // re-rasterizing; an ANIMATED clip is re-rendered per frame (its
-    // layer depends on the clip-relative time). lastProgramSize_ keeps
-    // the program monitor's frame geometry around so a text clip over
-    // BLACK (no video clip at the playhead) renders at the same
-    // resolution the video uses.
-    std::map<int64_t, QImage> textLayerCache_;
+    // Text state. The layer cache holds rendered layers for text clips
+    // (LRU-bounded: one full-res RGBA layer per clip is ~4-8 MB, and an
+    // SRT caption import creates one clip PER CUE - an unbounded cache
+    // held hundreds of MB after one playthrough). Layers WITHOUT
+    // animations are time-invariant, so playback composites the cached
+    // bitmap every frame instead of re-rasterizing; an ANIMATED clip is
+    // re-rendered per frame (its layer depends on the clip-relative
+    // time). lastProgramSize_ keeps the program monitor's frame
+    // geometry around so a text clip over BLACK (no video clip at the
+    // playhead) renders at the same resolution the video uses.
+    static constexpr size_t kTextLayerCacheCap = 12;
+    std::list<std::pair<int64_t, QImage>> textLayerLru_; // front = most recent
+    std::unordered_map<int64_t, std::list<std::pair<int64_t, QImage>>::iterator> textLayerIndex_;
     QSize lastProgramSize_{1280, 720};
 
     // The SELECTED color-emoji font (one of the machine's installed
@@ -277,6 +311,10 @@ private:
     int64_t audioStartSample_ = 0;
     std::atomic<int64_t> audioPulled_{0};
     uint64_t audioSpansRevision_ = 0;
+    bool audioDeviceWarned_ = false; // one "device lost" message per run
+    // Proxy state: one job at a time (a second Ctrl+P used to overwrite
+    // proxySourcePath_ and cross-wire both jobs' done handling).
+    bool proxyRunning_ = false;
     // Export state (the cancel flag is read from the worker thread;
     // everything else stays on the UI thread. The job itself receives
     // frozen snapshots - see runExportJob - and shares NOTHING mutable

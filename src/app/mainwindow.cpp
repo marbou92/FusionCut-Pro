@@ -125,13 +125,23 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         // stream cannot). Without audio the wall tick advances as
         // before. Track edits made during playback land in the mix via
         // the revision check.
-        if (audioPreview_ && audioPreview_->running()) {
+        if (audioPreview_ && audioPreview_->healthy()) {
             if (model_.revision() != audioSpansRevision_) {
                 rebuildAudioSnapshot();
             }
             playhead_ = audioStartSeconds_ + audioPreview_->playedSeconds();
         } else {
             playhead_ += 1.0 / fps_;
+            // A device that died mid-run (USB dock unplugged, Bluetooth
+            // headset dropped) used to freeze the whole transport: the
+            // audio clock stopped but running() stayed true, so every
+            // tick re-read a constant position. Fall back to the wall
+            // clock and say so once per run.
+            if (playing_ && audioPreview_ && audioPreview_->running() && !audioDeviceWarned_) {
+                audioDeviceWarned_ = true;
+                statusBar()->showMessage(
+                    tr("Audio device lost - playback continues on the system clock."), 8000);
+            }
         }
         if (playhead_ >= sequenceDuration_) {
             playhead_ = sequenceDuration_;
@@ -170,9 +180,18 @@ MainWindow::~MainWindow() {
     // export within one frame's work, and a job with no cancel path
     // (a proxy) simply finishes before the process exits.
     exportCancel_.store(true);
+    if (proxyThread_) {
+        proxyThread_->quit();
+        // Unbounded, like the export job: a running proxy has no cancel
+        // path and simply finishes before the process exits.
+        proxyThread_->wait();
+    }
     if (decodeThreadB_) {
         decodeThreadB_->quit();
-        decodeThreadB_->wait(3000);
+        // Unbounded (the 3 s cap was the exact hazard the main decode
+        // thread's unbounded join fixed: a slow openQuiet on worker B
+        // outliving the wait destroyed the worker under its thread).
+        decodeThreadB_->wait();
     }
     if (decodeThread_) {
         decodeThread_->quit();
@@ -214,7 +233,7 @@ void MainWindow::buildDecodeThread() {
     connect(decodeThread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(worker_, &DecodeWorker::mediaInfo, this,
             [this](const QString &summary, double duration, double fps, int64_t frameCount,
-                   bool hasAudio) {
+                   bool hasAudio, qint64 token) {
                 if (pendingProgramSeek_) {
                     // A program SOURCE SWITCH (playback/scrub crossing
                     // into a clip from another file) finished its async
@@ -243,16 +262,28 @@ void MainWindow::buildDecodeThread() {
                 transport_->setMedia(duration_, fps_);
                 updateSequenceDuration();
                 statusBar()->showMessage(summary, 8000);
-                if (!pendingAddClipPath_.isEmpty()) {
-                    // map the SOURCE's own length into sequence frames
-                    // at the SEQUENCE fps (probe values, not members -
-                    // the sequence fps may be locked to an older rate).
-                    const int64_t sourceOut = std::min<int64_t>(
-                        frameCount > 0 ? frameCount
-                                       : static_cast<int64_t>(std::llround(duration * fps_)),
-                        static_cast<int64_t>(std::llround(5.0 * fps_)));
-                    addPendingClip(pendingAddClipPath_, sourceOut, hasAudio);
+                if (pendingAddToken_ != 0 && token == pendingAddToken_ &&
+                    !pendingAddClipPath_.isEmpty()) {
+                    // Map the SOURCE's own length into sequence frames at
+                    // the SEQUENCE fps. The container duration is the
+                    // reliable extent; nb_frames counts SOURCE-rate frames
+                    // (300 frames of a 30 fps file are 12.5 s at a 24 fps
+                    // sequence) and is only a fallback input, converted
+                    // through the probe's own fps - using it raw made
+                    // every non-24 fps MP4 import run long (frozen tail).
+                    int64_t sourceOut = 0;
+                    if (duration > 0.0) {
+                        sourceOut = static_cast<int64_t>(std::llround(duration * fps_));
+                    } else if (frameCount > 0 && fps > 1.0) {
+                        sourceOut = static_cast<int64_t>(
+                            std::llround(static_cast<double>(frameCount) / fps * fps_));
+                    }
+                    addPendingClip(pendingAddClipPath_,
+                                   std::min<int64_t>(
+                                       sourceOut, static_cast<int64_t>(std::llround(5.0 * fps_))),
+                                   hasAudio);
                     pendingAddClipPath_.clear();
+                    pendingAddToken_ = 0;
                 }
             });
     connect(worker_, &DecodeWorker::frameReady, this, [this](const QImage &frame, double pts) {
@@ -295,24 +326,6 @@ void MainWindow::buildDecodeThread() {
         // closed decoder no-ops silently, so nothing storms).
         pendingProgramSeek_ = false;
     });
-    connect(worker_, &DecodeWorker::proxyProgress, this, [this](int percent) {
-        statusBar()->showMessage(tr("Generating proxy... %1%").arg(percent));
-    });
-    connect(worker_, &DecodeWorker::proxyDone, this, [this](bool ok, const QString &errorOrPath) {
-        const int index = projectPanel_->library().indexOfPath(proxySourcePath_);
-        if (auto *item = projectPanel_->library().at(index)) {
-            if (ok) {
-                item->proxyPath = errorOrPath;
-                statusBar()->showMessage(tr("Proxy ready: %1").arg(errorOrPath), 8000);
-            } else {
-                statusBar()->showMessage(tr("Proxy failed: %1").arg(errorOrPath), 8000);
-            }
-            return;
-        }
-        if (!ok) {
-            statusBar()->showMessage(tr("Proxy failed: %1").arg(errorOrPath), 8000);
-        }
-    });
 
     decodeThread_->start();
 
@@ -326,7 +339,7 @@ void MainWindow::buildDecodeThread() {
     workerB_->moveToThread(decodeThreadB_);
     connect(decodeThreadB_, &QThread::finished, workerB_, &QObject::deleteLater);
     connect(workerB_, &DecodeWorker::mediaInfo, this,
-            [this](const QString &, double, double, int64_t) {
+            [this](const QString &, double, double, int64_t, bool, qint64) {
                 if (pendingBFirst_) {
                     pendingBFirst_ = false;
                     const fc::Clip *clip = model_.clipById(pendingBFirstClipId_);
@@ -352,6 +365,38 @@ void MainWindow::buildDecodeThread() {
         heldIncomingFrame_ = QImage();        // composite falls back to A
     });
     decodeThreadB_->start();
+
+    // ---- the proxy worker ----
+    // A proxy transcode runs for minutes; on the shared decode worker it
+    // starved the program monitor (every frame request queued behind the
+    // job) and stalled library loads. Proxy jobs never touch a decoder,
+    // so they get their own single-thread context. No cancel path: the
+    // destructor lets a running job finish (same policy as exports).
+    proxyThread_ = new QThread(this);
+    proxyWorker_ = new DecodeWorker; // no parent: moves to its own thread
+    proxyWorker_->moveToThread(proxyThread_);
+    connect(proxyThread_, &QThread::finished, proxyWorker_, &QObject::deleteLater);
+    connect(proxyWorker_, &DecodeWorker::proxyProgress, this, [this](int percent) {
+        statusBar()->showMessage(tr("Generating proxy... %1%").arg(percent));
+    });
+    connect(proxyWorker_, &DecodeWorker::proxyDone, this,
+            [this](bool ok, const QString &errorOrPath) {
+                proxyRunning_ = false;
+                const int index = projectPanel_->library().indexOfPath(proxySourcePath_);
+                if (auto *item = projectPanel_->library().at(index)) {
+                    if (ok) {
+                        item->proxyPath = errorOrPath;
+                        statusBar()->showMessage(tr("Proxy ready: %1").arg(errorOrPath), 8000);
+                    } else {
+                        statusBar()->showMessage(tr("Proxy failed: %1").arg(errorOrPath), 8000);
+                    }
+                    return;
+                }
+                if (!ok) {
+                    statusBar()->showMessage(tr("Proxy failed: %1").arg(errorOrPath), 8000);
+                }
+            });
+    proxyThread_->start();
 }
 
 void MainWindow::buildProWorkspace() {
@@ -381,6 +426,7 @@ void MainWindow::buildProWorkspace() {
     connect(mixer_, &MixerPanel::mixerChanged, this, [this] {
         markDirty();
         rebuildAudioSnapshot(); // fader/pan/mute/solo land in the live mix
+        timeline_->update();    // mute/solo dimming mirrors the strips
     });
     auto *bottomDock = makeDock(tr("Timeline"), bottomTabs, this);
     addDockWidget(Qt::BottomDockWidgetArea, bottomDock);
@@ -427,15 +473,20 @@ void MainWindow::buildProWorkspace() {
     // Panel-to-engine wiring.
     connect(projectPanel_, &ProjectPanel::importRequested, this, [this] { importMedia(); });
     connect(projectPanel_, &ProjectPanel::loadRequested, this, [this](const QString &path) {
+        // Arm the add-clip intent BEFORE the open: its token ties the
+        // clip placement to the mediaInfo of THIS load only (rapid
+        // clicks used to let the first item's probe place the second
+        // item's clip).
         pendingAddClipPath_ = path;
-        loadClip(path);
+        pendingAddToken_ = ++loadTokenCounter_;
+        loadClip(path, pendingAddToken_);
     });
     connect(projectPanel_, &ProjectPanel::proxyRequested, this,
             [this](const QString &path) { generateProxy(path); });
     connect(transport_, &TransportBar::playToggled, this,
             [this](bool playing) { startPlayback(playing); });
     connect(transport_, &TransportBar::seekRequested, this,
-            [this](double seconds) { requestFrameAt(seconds); });
+            [this](double seconds) { seekUser(seconds); });
     connect(transport_, &TransportBar::stepRequested, this,
             [this](int frames) { stepFrames(frames); });
     connect(timeline_, &TimelinePanel::playheadMoved, this, [this](double seconds) {
@@ -536,6 +587,12 @@ void MainWindow::buildProWorkspace() {
                 if (!model_.setTransitionDuration(id, frames)) {
                     statusBar()->showMessage(
                         tr("Duration rejected - it does not fit the outgoing clip."), 4000);
+                    // A rejected write must not dirty the project; still
+                    // re-push so the editor shows the model's real value.
+                    if (const fc::Transition *t = model_.transitionById(id)) {
+                        pushTransitionToEditor(*t);
+                    }
+                    return;
                 }
                 markDirty(); // transition edits count
                 if (const fc::Transition *t = model_.transitionById(id)) {
@@ -605,7 +662,7 @@ void MainWindow::buildQuickWorkspace() {
     connect(quickView_, &QuickModeView::playToggled, this,
             [this](bool playing) { startPlayback(playing); });
     connect(quickView_, &QuickModeView::seekRequested, this,
-            [this](double seconds) { requestFrameAt(seconds); });
+            [this](double seconds) { seekUser(seconds); });
     connect(quickView_, &QuickModeView::stepRequested, this,
             [this](int frames) { stepFrames(frames); });
     connect(quickView_, &QuickModeView::importRequested, this, [this] { importMedia(); });
@@ -640,7 +697,11 @@ void MainWindow::buildMenus() {
     connect(exportCaptionsAction, &QAction::triggered, this, [this] { exportCaptions(); });
     file->addSeparator();
     QAction *quitAction = addMenuAction(file, tr("E&xit"), QKeySequence::Quit);
-    connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
+    // Route Exit through close(), NOT QApplication::quit(): quit ends
+    // the event loop directly, bypassing closeEvent - the unsaved-
+    // changes prompt and the layout save never ran and a dirty project
+    // was destroyed silently. Closing the last window ends the app.
+    connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
 
     // ---- Edit ----
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
@@ -798,18 +859,24 @@ void MainWindow::importMedia() {
     }
 }
 
-void MainWindow::loadClip(const QString &sourcePath) {
+void MainWindow::loadClip(const QString &sourcePath, qint64 addToken) {
     startPlayback(false);
     playhead_ = 0.0;
     loadedPath_ = sourcePath;
     captureThumbnail_ = true;
     lastProgramClipId_ = -1;
+    if (addToken <= 0) {
+        // A plain monitor load carries no add-clip intent: drop any
+        // stale armed add (its probe was superseded by this load).
+        pendingAddClipPath_.clear();
+        pendingAddToken_ = 0;
+    }
 
     const int index = projectPanel_->library().indexOfPath(sourcePath);
     const QString path = (index >= 0 && projectPanel_->library().at(index)->hasProxy())
                              ? projectPanel_->library().at(index)->proxyPath
                              : sourcePath;
-    QMetaObject::invokeMethod(worker_, "open", Q_ARG(QString, path));
+    QMetaObject::invokeMethod(worker_, "open", Q_ARG(QString, path), Q_ARG(qint64, addToken));
 }
 
 void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFrames,
@@ -870,12 +937,15 @@ void MainWindow::deleteSelectedClip() {
     if (!(timeline_ && timeline_->isRippleEnabled() && model_.rippleDelete(selectedClipId_))) {
         model_.removeClip(selectedClipId_);
     }
-    textLayerCache_.erase(selectedClipId_); // stale layers never resurrect
+    forgetTextLayer(selectedClipId_); // stale layers never resurrect
     selectedClipId_ = -1;
     lastProgramClipId_ = -1;
     timeline_->clearSelection();
     effectControls_->setStack(-1, {}); // the deleted clip's editor clears
     textPanel_->setClip(-1, nullptr);  // the text editor clears too
+    colorPanel_->setClip(-1, {});      // ...and the color grade editor
+    effectControls_->setClipFrame(-1); // keyframe readouts leave the dead clip
+    colorPanel_->setClipFrame(-1);
     updateSequenceDuration();
 }
 
@@ -948,6 +1018,13 @@ void MainWindow::toggleTrackState(int row, int which) {
         return;
     }
     model_.setTrackState(row, locked, muted, solo);
+    // The state is persisted in the .fcp - close used to lose it
+    // silently because no dirty flag was raised; the mixer strips also
+    // mirror the header toggles (and vice versa via mixerChanged).
+    markDirty();
+    if (mixer_) {
+        mixer_->refreshFromModel(&model_);
+    }
     timeline_->update();
     QString state;
     switch (which) {
@@ -993,9 +1070,14 @@ void MainWindow::updateSequenceDuration() {
 }
 
 void MainWindow::generateProxy(const QString &sourcePath) {
+    if (proxyRunning_) {
+        statusBar()->showMessage(tr("A proxy job is already running."), 4000);
+        return;
+    }
+    proxyRunning_ = true;
     proxySourcePath_ = sourcePath;
     statusBar()->showMessage(tr("Proxy job queued: %1").arg(QFileInfo(sourcePath).fileName()));
-    QMetaObject::invokeMethod(worker_, "runProxyJob", Q_ARG(QString, sourcePath),
+    QMetaObject::invokeMethod(proxyWorker_, "runProxyJob", Q_ARG(QString, sourcePath),
                               Q_ARG(QString, proxyPathFor(sourcePath)));
 }
 
@@ -1031,6 +1113,19 @@ void MainWindow::stepFrames(int frames) {
         playhead_ = sequenceDuration_;
     }
     requestFrameAt(playhead_);
+}
+
+void MainWindow::seekUser(double seconds) {
+    // A USER seek must land even when the audio clock is running: the
+    // 0.30 s drift guard inside requestFrameAt treats small nudges as
+    // clock-internal noise and the very next tick snapped the playhead
+    // back to the old audio position. Re-anchor first (startAudioPreview
+    // adopts the CURRENT playhead as its origin), then resolve the frame.
+    playhead_ = seconds;
+    if (playing_) {
+        startAudioPreview();
+    }
+    requestFrameAt(seconds);
 }
 
 void MainWindow::requestFrameAt(double seconds) {
@@ -1089,9 +1184,14 @@ void MainWindow::requestFrameAt(double seconds) {
         static_cast<double>(frame - clip->timelineStart + clip->sourceInFrames) / fps_;
     const QString clipSource = QString::fromStdString(clip->sourcePath);
     if (clipSource != loadedPath_) {
-        // Source switch: open the clip's media (proxy when available);
-        // the queued seek re-resolves through mediaInfo once the open
-        // completes (pendingProgramSeek_), then maps directly.
+        // Source switch: open the clip's media (proxy when available)
+        // QUIETLY - without the open-time frame-0 decode. The queued
+        // open used to emit frameReady(source frame 0) BEFORE the
+        // mediaInfo handler could re-arm the pending-seek guard, so the
+        // incoming source's first frame flashed for a beat at every cut.
+        // openQuiet still emits mediaInfo (the handler re-resolves the
+        // queued seek through requestFrameAt below) and the re-resolved
+        // frame is the only thing that paints.
         // Playback is NOT stopped: the audio preview keeps running its
         // own rolling decoders (it is the clock), the play clock keeps
         // ticking, and only the video freezes for the brief async open
@@ -1103,7 +1203,8 @@ void MainWindow::requestFrameAt(double seconds) {
         const QString path = (index >= 0 && projectPanel_->library().at(index)->hasProxy())
                                  ? projectPanel_->library().at(index)->proxyPath
                                  : clipSource;
-        QMetaObject::invokeMethod(worker_, "open", Q_ARG(QString, path));
+        QMetaObject::invokeMethod(worker_, "openQuiet", Q_ARG(QString, path),
+                                  Q_ARG(qint64, qint64(0)));
         return;
     }
     if (clipChanged) {
@@ -1313,10 +1414,47 @@ void MainWindow::writeTextDocument(int64_t clipId, const fc::TextDocument &doc) 
     clip->text = doc;
     fc::normalizeTextDocument(clip->text);
     clip->label = fc::textPreviewLabel(clip->text);
-    textLayerCache_.erase(clipId); // the layer is text-derived; re-render
+    forgetTextLayer(clipId); // the layer is text-derived; re-render
     markDirty();
     timeline_->update(); // the clip label preview
     applyProgramFrame(); // instant re-render (video cache or black)
+}
+
+QImage *MainWindow::cachedTextLayer(int64_t clipId) {
+    const auto it = textLayerIndex_.find(clipId);
+    if (it == textLayerIndex_.end()) {
+        return nullptr;
+    }
+    // LRU touch: move the entry to the front before handing it out.
+    textLayerLru_.splice(textLayerLru_.begin(), textLayerLru_, it->second);
+    it->second = textLayerLru_.begin();
+    return &it->second->second;
+}
+
+void MainWindow::rememberTextLayer(int64_t clipId, QImage layer) {
+    forgetTextLayer(clipId);
+    textLayerLru_.emplace_front(clipId, std::move(layer));
+    textLayerIndex_.emplace(clipId, textLayerLru_.begin());
+    // Bound the memory: one full-res RGBA layer is ~4-8 MB, and an SRT
+    // caption import creates one text clip PER CUE - an unbounded cache
+    // held hundreds of MB after a single playthrough.
+    while (textLayerLru_.size() > kTextLayerCacheCap) {
+        forgetTextLayer(textLayerLru_.back().first);
+    }
+}
+
+void MainWindow::forgetTextLayer(int64_t clipId) {
+    const auto it = textLayerIndex_.find(clipId);
+    if (it == textLayerIndex_.end()) {
+        return;
+    }
+    textLayerLru_.erase(it->second);
+    textLayerIndex_.erase(it);
+}
+
+void MainWindow::clearTextLayers() {
+    textLayerLru_.clear();
+    textLayerIndex_.clear();
 }
 
 QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height,
@@ -1329,10 +1467,10 @@ QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height,
     // clip caches exactly as before.
     const bool animated = clipFrame >= 0 && fc::hasTextAnimation(clip->text.animation);
     if (!animated) {
-        auto it = textLayerCache_.find(clip->id);
-        if (it != textLayerCache_.end() && it->second.width() == width &&
-            it->second.height() == height && it->second.format() == QImage::Format_RGBA8888) {
-            return it->second;
+        QImage *cached = cachedTextLayer(clip->id);
+        if (cached && cached->width() == width && cached->height() == height &&
+            cached->format() == QImage::Format_RGBA8888) {
+            return *cached;
         }
     }
     QImage layer = fc::renderTextLayer(clip->text, width, height, animated ? clipFrame : -1,
@@ -1341,7 +1479,7 @@ QImage MainWindow::textLayerForClip(const fc::Clip *clip, int width, int height,
         layer = layer.convertToFormat(QImage::Format_RGBA8888);
     }
     if (!animated) {
-        textLayerCache_[clip->id] = layer;
+        rememberTextLayer(clip->id, layer);
     }
     return layer;
 }
@@ -1400,7 +1538,7 @@ void MainWindow::setEmojiFont(const QString &path) {
     }
     // The cached text layers embed the OLD font's bitmaps: drop them
     // all and re-render the program monitor.
-    textLayerCache_.clear();
+    clearTextLayers();
     applyProgramFrame();
 }
 
@@ -1462,6 +1600,7 @@ void MainWindow::rebuildAudioSnapshot() {
 
 void MainWindow::startAudioPreview() {
     stopAudioPreview();
+    audioDeviceWarned_ = false; // a fresh run gets a fresh "device lost" message
     rebuildAudioSnapshot();
     if (!audioSpans_.hasAudio()) {
         return; // nothing to hear: no device, no mixer, the tick keeps time
@@ -1736,7 +1875,7 @@ void MainWindow::ensureHeldIncomingFrame(const fc::TransitionSample &sample) {
     if (path != bLoadedPath_) {
         bLoadedPath_ = path;
         pendingBFirst_ = true; // the mediaInfo handler fires the request
-        QMetaObject::invokeMethod(workerB_, "openQuiet", Q_ARG(QString, path));
+        QMetaObject::invokeMethod(workerB_, "openQuiet", Q_ARG(QString, path), Q_ARG(qint64, 0));
     } else {
         pendingBFirst_ = false;
         QMetaObject::invokeMethod(workerB_, "requestFrame",
@@ -1826,7 +1965,7 @@ void MainWindow::saveProject() {
     }
     const qint64 written = file.write(text.data(), static_cast<qint64>(text.size()));
     if (written != static_cast<qint64>(text.size()) || !file.commit()) {
-        file.cancelWrite();
+        file.cancelWriting();
         QMessageBox::warning(this, tr("Save Project"),
                              tr("Could not write %1: %2").arg(projectPath_, file.errorString()));
         return;
@@ -1909,8 +2048,9 @@ void MainWindow::openProject() {
     frameClipId_ = -1;
     pendingProgramSeek_ = false;
     pendingAddClipPath_.clear();
+    pendingAddToken_ = 0;
     rawProgramFrame_ = QImage();
-    textLayerCache_.clear(); // layers belong to the OLD model's clips
+    clearTextLayers(); // layers belong to the OLD model's clips
     heldIncomingFrame_ = QImage();
     heldIncomingClipId_ = -1;
     pendingBFirstClipId_ = -1;
@@ -1954,8 +2094,13 @@ void MainWindow::openProject() {
     timeline_->setModel(&model_); // content refresh (same model object)
     timeline_->update();
 
-    // Load the first video clip into the monitor.
+    // Load the first video clip into the monitor (text clips carry no
+    // source: the loop used to break on one and open "" - the monitor
+    // then showed an error until the user scrubbed).
     for (const fc::Clip &clip : model_.clips()) {
+        if (clip.isText || clip.sourcePath.empty()) {
+            continue;
+        }
         const fc::Track *track = model_.trackAt(clip.trackIndex);
         if (track && !track->isAudio) {
             loadClip(QString::fromStdString(clip.sourcePath));
@@ -1999,10 +2144,14 @@ void MainWindow::exportMedia() {
         return;
     }
 
-    // Suggest the first video clip's native size.
+    // Suggest the first video clip's native size (text clips carry no
+    // source - probing "" wasted the pick and lost the suggestion).
     int srcW = 0;
     int srcH = 0;
     for (const fc::Clip &clip : model_.clips()) {
+        if (clip.isText || clip.sourcePath.empty()) {
+            continue;
+        }
         const fc::Track *track = model_.trackAt(clip.trackIndex);
         if (!track || track->isAudio) {
             continue;
@@ -2192,6 +2341,20 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         if (!dec->readFrame(df, err)) {
             return false;
         }
+        // Skip forward to the requested time: a source whose fps differs
+        // from the sequence steps pts by 1/srcFps while srcSec advances
+        // 1/fps - without this loop the returned frames trail further
+        // and further behind until the re-seek band forces a periodic
+        // snap-forward (visible stutter in exports). Mirrors the preview
+        // worker's skip loop.
+        const double tolerance = 0.5 / fps;
+        while (df.ptsSeconds + tolerance < srcSec) {
+            fc::DecodedFrame next;
+            if (!dec->readFrame(next, err)) {
+                break; // EOF mid-skip: the last good frame still covers the window
+            }
+            df = std::move(next);
+        }
         nextPts[decPath] = df.ptsSeconds + 1.0 / fps;
         out = QImage(df.rgba.data(), df.width, df.height, QImage::Format_RGBA8888).copy();
         return true;
@@ -2286,6 +2449,13 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
             } else {
                 auto layerIt = textLayers.find(textClip->id);
                 if (layerIt == textLayers.end()) {
+                    // Bounded cache: one full-res RGBA layer per clip is
+                    // ~8 MB at 1080p, and a caption project holds one text
+                    // clip per cue - an unbounded map peaked past 1 GB on
+                    // long exports.
+                    if (textLayers.size() >= 8) {
+                        textLayers.clear();
+                    }
                     layerIt =
                         textLayers
                             .emplace(textClip->id, fc::renderTextLayer(textClip->text, width,

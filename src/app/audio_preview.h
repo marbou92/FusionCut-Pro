@@ -67,6 +67,13 @@ public:
 
     bool running() const { return running_.load(); }
 
+    // True while the render thread is alive AND healthy: a device that
+    // died mid-run (endpoint removed, format change, driver failure)
+    // exits the render thread but - unlike stop() - never clears
+    // running_, so the transport must check healthy() before trusting
+    // the audio clock (playedSeconds() freezes at the death point).
+    bool healthy() const;
+
     // The device's consumed position in SECONDS (frames the device has
     // actually played, not what was submitted): the transport follows
     // this while playing. 0.0 when not running.
@@ -76,6 +83,9 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::atomic<bool> running_{false};
+    // Set by the render thread's FAILURE exits (never by the clean
+    // stop path); reset by probe() so the next run starts optimistic.
+    std::atomic<bool> failed_{false};
 };
 
 } // namespace fc
