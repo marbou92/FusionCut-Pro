@@ -9,6 +9,7 @@ jobs:
   lint:
     name: Format check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +28,7 @@ jobs:
   core-tests:
     name: Core tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -43,9 +45,33 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
 
+  core-tests-sanitize:
+    # The cheapest leg in the matrix catches the most expensive bugs:
+    # the dependency-free core (parsers, effects math, timeline edits)
+    # runs under ASan+UBSan. Debug + frame pointers for readable traces.
+    name: Core tests (ubuntu, ASan+UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (core only, Debug + sanitizers)
+        run: >
+          cmake -S . -B build -DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=OFF
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   media-tests:
     name: Media tests (ubuntu, FFmpeg 6.1)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +97,7 @@ jobs:
     name: Media tests (jammy container, FFmpeg 4.4)
     runs-on: ubuntu-latest
     container: ubuntu:22.04
+    timeout-minutes: 60
     steps:
       - name: Install toolchain + FFmpeg 4.4 dev
         run: |
@@ -136,6 +163,7 @@ jobs:
   qt-app-ubuntu:
     name: Qt app build (Ubuntu, Qt 5.15)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
