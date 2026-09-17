@@ -418,8 +418,13 @@ void testProxyCancellation() {
         },
         error);
     CHECK(!ok);
-    CHECK(!error.empty());
+    // Same contract as the exporter's cancellation tests above: a
+    // cancelled job returns false with an EMPTY error - the app maps
+    // that to "cancelled by caller" - and no partial output is left.
+    CHECK(error.empty());
     CHECK(calls == 10);
+    std::error_code ec;
+    CHECK(!fs::exists(dst, ec));
 }
 
 } // namespace

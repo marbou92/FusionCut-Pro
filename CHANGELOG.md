@@ -375,8 +375,8 @@ version stays at 0.1.0 until the first public build.
 
 Ten ctest suites, ~41,000 checks total: core (91), timeline (155),
 audio (1714), effects (3775), transitions (4531), project (136),
-text (453), emoji (374), srt (83), media (29,766 + the new upsample
-battery). Synthetic media is generated at runtime; the emoji suite
+text (453), emoji (374), srt (83), media (30,166, including the
+upsample battery). Synthetic media is generated at runtime; the emoji suite
 pins its expectations against hand-built synthetic font fixtures
 (nothing font-shaped lives in the repo).
 
@@ -399,7 +399,10 @@ parameters asserting finite, in-range storage and the header's
 "alpha preserved by every effect" contract, plus single-keyframe
 paramAt resolution; a size-mismatched blur-dissolve fixture that
 overread its 8×8 second input as 16×16 (silently, in Release) was
-caught by the new sanitizer leg and fixed.
+caught by the new sanitizer leg and fixed. The proxy's cancellation
+contract is pinned to the exporter's: false with an empty error (the
+app maps that to "cancelled by caller") and no partial output left
+behind.
 
 ### Build & CI
 
