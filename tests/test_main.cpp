@@ -86,6 +86,16 @@ static void testTimecode() {
     CHECK((a - b).totalFrames() == 30);
     CHECK((b - a).totalFrames() == -30);
     CHECK((a + b).totalFrames() == 70);
+
+    // Drop-frame equality (regression pin): operator== compares the whole
+    // rate INCLUDING the dropFrame flag - a DF timecode is not equal to
+    // its NDF twin (same ratio and frame count, different ";FF" vs ":FF"
+    // presentation).
+    const Timecode df = Timecode::fromFrames(1800, FrameRate::Fps2997DF);
+    const Timecode ndf = Timecode::fromFrames(1800, FrameRate::Fps2997NDF);
+    CHECK(!(df == ndf));
+    CHECK(df == Timecode::fromFrames(1800, FrameRate::Fps2997DF));
+    CHECK(ndf == Timecode::fromFrames(1800, FrameRate::Fps2997NDF));
 }
 
 static void testLruCache() {

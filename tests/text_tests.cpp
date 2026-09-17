@@ -654,9 +654,13 @@ static void testInsertTrack() {
     model.addTrack("V1", false);
     model.addTrack("A1", true);
     model.setFps(24.0);
-    const int64_t video = model.addClip(1, "v.mp4", "V", 0, 240, 0);
-    const int64_t left = model.addClip(1, "v.mp4", "L", 0, 48, 0);
-    const int64_t right = model.addClip(1, "v.mp4", "R", 0, 48, 48);
+    // Non-overlapping fixture (every lane is non-overlapping - the model
+    // mutators and the parser both enforce it): V on 0..240, then an
+    // adjacent transition pair L/R on the SAME track so the renumber must
+    // move clips and transition together.
+    const int64_t video = model.addClip(1, "v.mp4", "V", 0, 240, 0);  // V1 0..240
+    const int64_t left = model.addClip(1, "v.mp4", "L", 0, 48, 240);  // V1 240..288
+    const int64_t right = model.addClip(1, "v.mp4", "R", 0, 48, 288); // V1 288..336
     const int64_t trans = model.addTransition(left, right, "dissolve.cross", 12);
     CHECK(video > 0 && left > 0 && right > 0 && trans > 0);
 

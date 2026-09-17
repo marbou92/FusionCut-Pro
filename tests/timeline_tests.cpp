@@ -148,6 +148,8 @@ static void testMoveClipTo() {
 
     const int64_t v1a = model.addClip(1, "v.mp4", "A", 0, 100, 0);   // V1 0..100
     const int64_t v1b = model.addClip(1, "v.mp4", "B", 0, 100, 150); // V1 150..250
+    CHECK(v1a > 0);
+    CHECK(v1b > 0);
 
     // Cross-track move to empty V2.
     CHECK(model.moveClipTo(v1a, 0, 0));
@@ -314,6 +316,62 @@ static void testActiveVideoClipAt() {
     CHECK(model.activeVideoClipAt(85) != nullptr);  // V1 only region
 }
 
+// Regression armor for the shipped fixes: the setTrackState no-op
+// revision suppression, and the 0-timeline-frame "zombie" guards
+// (a rate > 1 can collapse a positive source extent to zero frames).
+static void testGuardsAndRevisions() {
+    TimelineModel model;
+    model.addTrack("V1", false);
+    model.addClip(0, "v.mp4", "A", 0, 100, 0);
+
+    // Writing the SAME track state must not dirty the project (the
+    // core no-op suppression the app's mixer sync relies on).
+    const uint64_t before = model.revision();
+    CHECK(model.setTrackState(0, false, false, false)); // already reads this
+    CHECK(model.revision() == before);
+    CHECK(model.setTrackState(0, true, false, false)); // real change bumps
+    CHECK(model.revision() == before + 1);
+    CHECK(model.setTrackState(0, true, false, false)); // writing it again
+    CHECK(model.revision() == before + 1);
+
+    // ---- addClip rejections (every lane is non-overlapping; no
+    // 0-timeline-frame zombies).----
+    CHECK(model.addClip(0, "v.mp4", "overlap", 0, 50, 50) == 0);     // 50..100 hits A
+    CHECK(model.addClip(0, "v.mp4", "zombie", 0, 1, 200, 3.0) == 0); // llround(1/3)=0
+    // rate 7: a 10-source-frame clip lasts 1 timeline frame, and ONE
+    // timeline frame of trim moves the source by 7 - the surviving
+    // extent 3 rounds llround(3/7) to a 0-frame zombie.
+    const int64_t r7 = model.addClip(0, "v.mp4", "R7", 0, 10, 150, 7.0); // 150..151
+    CHECK(r7 > 0);
+    CHECK(model.clipById(r7)->durationFrames() == 1);
+
+    // ---- trimClipEnd into a zombie.----
+    CHECK(!model.trimClipEnd(r7, -1)); // extent 10-7=3 -> llround(3/7)=0
+    CHECK(model.clipById(r7)->sourceOutFrames == 10);
+    CHECK(model.clipById(r7)->durationFrames() == 1);
+
+    // ---- trimClipStart into a zombie.----
+    const int64_t s = model.addClip(0, "v.mp4", "S", 200, 210, 250, 7.0); // 250..251
+    CHECK(s > 0);
+    CHECK(!model.trimClipStart(s, 1)); // newIn 207: extent 3 -> llround(3/7)=0
+    CHECK(model.clipById(s)->sourceInFrames == 200);
+    CHECK(model.clipById(s)->durationFrames() == 1);
+
+    // ---- rollEdit into a zombie on the RIGHT side: the incoming clip's
+    // surviving source extent rounds to zero timeline frames.----
+    TimelineModel m2;
+    m2.addTrack("V1", false);
+    const int64_t e = m2.addClip(0, "v.mp4", "E", 0, 12, 0, 3.0);  // 0..4
+    const int64_t f = m2.addClip(0, "v.mp4", "F", 12, 16, 4, 3.0); // 4..5
+    CHECK(e > 0 && f > 0);
+    CHECK(!m2.rollEdit(e, f, 1)); // right keeps extent 1 -> llround(1/3)=0
+    CHECK(m2.clipById(f)->sourceInFrames == 12);
+    CHECK(m2.clipById(f)->durationFrames() == 1);
+    // A delta of 0 is rejected outright (nothing to roll).
+    CHECK(!m2.rollEdit(e, f, 0));
+    CHECK(m2.clipById(f)->sourceInFrames == 12);
+}
+
 int main() {
     testTracks();
     testAddClip();
@@ -327,5 +385,6 @@ int main() {
     testRippleTrim();
     testRollEdit();
     testActiveVideoClipAt();
+    testGuardsAndRevisions();
     return testExitCode("timeline");
 }

@@ -28,6 +28,10 @@ bool generateTestVideo(const std::string &path, const TestMediaSpec &spec, std::
         void operator()(AVFormatContext *ctx) const { avformat_free_context(ctx); }
     };
     std::unique_ptr<AVFormatContext, OutputDeleter> out(rawOut);
+    // MP4 wants extradata: set the flag before opening the encoders so
+    // the fixtures exercise the same extradata path the exporter and
+    // proxy generator take (and the MPEG-4 fallback stays valid).
+    const bool globalHeader = (out->oformat->flags & AVFMT_GLOBALHEADER) != 0;
 
     //---- Video encoder ----
     CodecContextPtr videoEnc(avcodec_alloc_context3(videoCodec));
@@ -37,6 +41,9 @@ bool generateTestVideo(const std::string &path, const TestMediaSpec &spec, std::
     videoEnc->time_base = AVRational{1, spec.fps};
     videoEnc->gop_size = spec.fps; // one keyframe per second
     videoEnc->max_b_frames = 0;    // keep frame order trivial for assertions
+    if (globalHeader) {
+        videoEnc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
     if (videoCodec->id == AV_CODEC_ID_H264) {
         av_opt_set(videoEnc->priv_data, "crf", "20", 0);
         av_opt_set(videoEnc->priv_data, "preset", "veryfast", 0);
@@ -61,9 +68,12 @@ bool generateTestVideo(const std::string &path, const TestMediaSpec &spec, std::
             return false;
         }
         audioEnc.reset(avcodec_alloc_context3(audioCodec));
-        audioEnc->sample_rate = 48000;
+        audioEnc->sample_rate = spec.audioSampleRate;
         audioEnc->sample_fmt = AV_SAMPLE_FMT_FLTP;
         audioEnc->bit_rate = 64000;
+        if (globalHeader) {
+            audioEnc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        }
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
         av_channel_layout_default(&audioEnc->ch_layout, 2);
 #else

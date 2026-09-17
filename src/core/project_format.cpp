@@ -767,8 +767,9 @@ bool parseTextDocument(const JsonValue &node, TextDocument &doc, std::string &er
 // Rebuilds one EffectInstance from its JSON object. Known effects load
 // "params" by key into descriptor order (missing keys fall back to
 // defaults); unknown effects keep a positional "values" copy so they
-// round-trip untouched. Keyframes load generically (no descriptor
-// needed - values arrive pre-clamped from a writer that had one).
+// round-trip untouched. Values and keyframe values are re-clamped on
+// load - a hand-edited file can hold anything (1e300, NaN), and the
+// processor's pixel loops must never see a non-clamped number.
 bool parseEffectInstance(const JsonValue &node, EffectInstance &out, std::string &error) {
     if (node.type != JsonValue::Type::Object) {
         error = "effect entry is not an object";
@@ -796,8 +797,15 @@ bool parseEffectInstance(const JsonValue &node, EffectInstance &out, std::string
                         error = "effect parameter '" + kv.first + "' is not a number";
                         return false;
                     }
-                    out.values[i] = std::min(std::max(kv.second.numberValue, d->params[i].minValue),
-                                             d->params[i].maxValue);
+                    double v = kv.second.numberValue;
+                    if (std::isnan(v)) {
+                        // NaN cannot be clamped (every comparison fails);
+                        // the default is the only sane landing spot.
+                        v = d->params[i].defaultValue;
+                    } else {
+                        v = std::min(std::max(v, d->params[i].minValue), d->params[i].maxValue);
+                    }
+                    out.values[i] = v;
                     matched = true;
                     break;
                 }
@@ -853,6 +861,22 @@ bool parseEffectInstance(const JsonValue &node, EffectInstance &out, std::string
                 if (frame < 0) {
                     error = "keyframe frame must be >= 0";
                     return false;
+                }
+                // Clamp to the descriptor range like the static values -
+                // the writer's clamp is not trusted (hand-edited files).
+                // NaN cannot be clamped and falls back to the default;
+                // unknown keys keep the verbatim value (never processed).
+                if (d) {
+                    for (const EffectParamDescriptor &p : d->params) {
+                        if (p.key == kv.first) {
+                            if (std::isnan(value)) {
+                                value = p.defaultValue;
+                            } else {
+                                value = std::min(std::max(value, p.minValue), p.maxValue);
+                            }
+                            break;
+                        }
+                    }
                 }
                 track.points.push_back({frame, value});
             }
@@ -1247,6 +1271,13 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
                 error = "clip rate out of range";
                 return false;
             }
+            // A rate > 1 can collapse a positive source extent to a
+            // 0-timeline-frame zombie (durationFrames rounds down) - the
+            // model mutators reject it, the parser must too.
+            if (clip.durationFrames() < 1) {
+                error = "clip duration must be >= 1 frame at its rate";
+                return false;
+            }
             if (clip.trackIndex < 0 || clip.trackIndex >= static_cast<int>(tracks.size())) {
                 error = "clip references a track that does not exist";
                 return false;
@@ -1286,6 +1317,22 @@ bool parseProject(const std::string &text, TimelineModel &model, std::string &er
         for (const Clip &other : clips) {
             if (other.id == clip.id) {
                 error = "duplicate clip id";
+                return false;
+            }
+        }
+        // Per-track overlap rejection: the non-overlap invariant is a
+        // property of the FORMAT (every lane is non-overlapping; the
+        // model mutators enforce it, so a violating file came from
+        // outside). Rejecting at parse time keeps the hard-failure
+        // promise - the downstream model (clipAt, ripple shifts, splitAt)
+        // assumes it unconditionally.
+        const int64_t clipEnd = clip.timelineStart + clip.durationFrames();
+        for (const Clip &other : clips) {
+            if (other.trackIndex != clip.trackIndex) {
+                continue;
+            }
+            if (clip.timelineStart < other.timelineEnd() && clipEnd > other.timelineStart) {
+                error = "overlapping clips on track " + std::to_string(clip.trackIndex);
                 return false;
             }
         }

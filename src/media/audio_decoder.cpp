@@ -29,8 +29,9 @@ bool AudioDecoder::open(const std::string &path, int sampleRate, int channels, s
         return false;
     }
     raw.reset(rawFmt);
-    if (avformat_find_stream_info(raw.get(), nullptr) < 0) {
-        error = "stream discovery failed";
+    const int infoRc = avformat_find_stream_info(raw.get(), nullptr);
+    if (infoRc < 0) {
+        error = "stream discovery failed (" + path + "): " + fcError(infoRc);
         return false;
     }
     format_ = std::move(raw);

@@ -35,7 +35,29 @@ version stays at 0.1.0 until the first public build.
   streams whose format was never resolved), and reads the pixel format
   of YUV420P streams correctly (format index 0 - the single most
   common pixel format - was mistaken for "no format"; the unknown case
-  is the negative default, not zero).
+  is the negative default, not zero). The video decoder probes the
+  context it already opened (a full open + find_stream_info pass ran
+  twice per source; find_stream_info is the expensive one - it reads
+  and parses packets). Encoders now set AV_CODEC_FLAG_GLOBAL_HEADER
+  for MP4 targets: without it libx264 keeps its headers in-band and
+  file validity silently depends on movenc self-healing at trailer
+  time, while the MPEG-4 fallback writes an esds with an EMPTY
+  DecoderSpecificInfo - a malformed file some players reject outright
+  (the exporter, the proxy generator, and the test fixtures all set
+  it now). The proxy generator guards its unchecked allocations (a
+  null output stream or FIFO dereferenced right away - the exporter
+  already checked its own), refuses an encoder-reported frame_size of
+  0 (the FIFO drain loop would spin forever; the 1024 fallback the
+  exporter uses applies), and treats any encoder receive error other
+  than EAGAIN/EOF as the real failure it is - a dying encoder used to
+  end the receive loop "cleanly", silently truncating the output file
+  and still committing it. Its per-frame resample buffer is pooled
+  across the job (a malloc/free pair per decoded AAC frame was pure
+  churn), its stream-info failure names the source file, and a
+  caller cancel now reports an empty error - the same contract as the
+  exporter - so the app can name "cancelled" instead of a bare
+  "Proxy failed:" line. The audio decoder's "stream discovery
+  failed" error carries the path and the FFmpeg error string.
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.
@@ -49,11 +71,23 @@ version stays at 0.1.0 until the first public build.
   split). Setting a track's lock/mute/solo to the values it already
   holds is a true no-op - the document revision stays put, so a
   keyboard tour over the tracks no longer marks an untouched project
-  dirty.
+  dirty. Trims, rolls, and clip additions reject mutations that would
+  collapse a clip's timeline duration below one frame: at a rate > 1
+  a positive SOURCE extent can round down to a 0-frame "zombie" that
+  stays in the model invisible, un-splittable and un-movable (a
+  hand-edited rate-3 file could create one). addClip enforces the
+  lane's non-overlap invariant exactly like moveClipTo and
+  addTextClip always have, so no caller can build a state the parser
+  rejects.
 - **Effects:** 52 CPU effects across 7 categories (Color, Tone,
   Filter, Blur & Sharpen, Distort, Generate, Stylize), per-clip
   stacks, per-parameter keyframe tracks with linear interpolation
-  evaluated identically in preview, export, and panels.
+  evaluated identically in preview, export, and panels. Parameter
+  writes clamp non-finite values deterministically: NaN cannot be
+  clamped (every comparison fails) and used to slip through min/max
+  into the pixel loops (lround(NaN * 255) is undefined behavior); it
+  now lands on the descriptor default, and ±inf clamps like any
+  out-of-range number.
 - **Transitions:** 36 endpoint-exact cut transitions (dissolves,
   wipes, slides, pushes, zooms) on the no-overlap window model: the
   outgoing clip plays live while the incoming clip's held first frame
@@ -98,7 +132,14 @@ version stays at 0.1.0 until the first public build.
   blends samples that sit BEFORE a clip's in-point into a pull window
   (a BACKWARD seek lands on a packet that starts early; its lead-in
   leaked into exports and the preview as a click on every clip head
-  without a fadeIn).
+  without a fadeIn). The rolling decode's seek decision now reads the
+  HELD chunks instead of the raw decoder position: decoded chunks
+  legitimately overhang the ~10 ms pull window (AAC 21 ms, MP3 26 ms,
+  FLAC ~85 ms chunks), so the old position-based rule fired a
+  clear + demuxer-seek + flush + re-decode cycle on EVERY audio
+  callback - correct output, real CPU burn, and a glitch risk on
+  FLAC sources and fast export pulls alike. A jump too far forward
+  to decode through (250 ms) still seeks.
 - **Color emoji from the machine's own fonts:** no font is bundled.
   The app discovers the emoji-capable fonts installed on the PC -
   scanning the platform font directories AND the Windows font
@@ -140,11 +181,24 @@ version stays at 0.1.0 until the first public build.
   truncate the only copy), loading tolerates a UTF-8 BOM (Win7-era
   Notepad writes one; the parser used to reject the file as a bad
   number), and Save As only retargets the session once the write
-  actually succeeded.
+  actually succeeded. The loader now also rejects per-track
+  OVERLAPPING clips (the non-overlap invariant is a format property:
+  the model mutators enforce it, the parser didn't, so a
+  hand-edited file could create the order-dependent geometry the
+  rest of the engine assumes away) and media clips whose duration
+  collapses below one frame at their rate; effect parameter values
+  and keyframe values are re-clamped to the descriptor ranges on
+  load - the writer's clamp is no longer trusted (1e300 used to
+  reach the pixel math as-is).
 - **Export:** H.264 MP4 (MPEG-4 fallback) through the exact program
   pipeline - effects with per-frame keyframe interpolation, live
   transitions, text/emoji compositing - with CRF control, progress,
-  and cancellation.
+  and cancellation. A hard source-decode failure mid-export (a
+  corrupt or unsupported frame) now aborts with an honest
+  "source decode failed (...): path" message instead of either
+  rendering silent black frames or masquerading as "Export
+  cancelled"; a clean end of source still tolerates (the tail
+  renders black, exactly like broken audio mixes as silence).
 - **Crash reporting and the baked-in loader diagnostic:** a VEH-based
   runtime crash reporter with faulting-module attribution and a boot
   trace, plus the `--diag` two-phase loader/startup diagnostic (PE
@@ -310,12 +364,33 @@ version stays at 0.1.0 until the first public build.
 
 ### Tests
 
-Ten ctest suites, ~40,000 checks total: core (88), timeline (130),
-audio (1714), effects (2643), transitions (4531), project (131),
-text (453), emoji (365), srt (83), media (29766). Synthetic media is
-generated at runtime; the emoji suite pins its expectations against
-hand-built synthetic font fixtures (nothing font-shaped lives in the
-repo).
+Ten ctest suites, ~41,000 checks total: core (91), timeline (155),
+audio (1714), effects (3775), transitions (4531), project (136),
+text (453), emoji (374), srt (83), media (29,766 + the new upsample
+battery). Synthetic media is generated at runtime; the emoji suite
+pins its expectations against hand-built synthetic font fixtures
+(nothing font-shaped lives in the repo).
+
+The regression armor added alongside the round-2 fixes: the drop-frame
+timecode equality and the track-state no-op revision are pinned;
+rate-collapse ("zombie") trims/rolls/adds and their parser-level
+counterparts are rejected by test; per-track clip overlaps, zero-frame
+clips, and text-track transitions are pinned at the PARSER level; a
+TTC whose first face fails mid-parse (a ppem-200 strike with no cmap)
+no longer hijacks the surviving face's bitmaps - the leak the reset
+fix closed is now observable in both directions; a 44.1 kHz source
+decoded at 48 kHz exercises the resampler budget's UPSAMPLING
+direction (the old input-side formula only ever failed upward, and
+every other test source was 48 kHz) with sample-count continuity at
+±20 ms, monotone chunk pts, and a Goertzel tone check; the audio
+duration assert tightened from ±0.3 s to ±50 ms (the encoded track is
+whole AAC frames, so ±20 ms there would fight encoder priming); the
+effects suite sweeps the entire catalog across ±1e30/±inf/NaN
+parameters asserting finite, in-range storage and the header's
+"alpha preserved by every effect" contract, plus single-keyframe
+paramAt resolution; a size-mismatched blur-dissolve fixture that
+overread its 8×8 second input as 16×16 (silently, in Release) was
+caught by the new sanitizer leg and fixed.
 
 ### Build & CI
 
@@ -324,6 +399,18 @@ repo).
   The FFmpeg layer previously compiled on Linux only in CI, so a
   Windows-only break surfaced only in the manual/tag-triggered
   portable workflow, long after the commit that caused it.
+- ci.yml gained a core ASan+UBSan leg (ubuntu, Debug, sanitizer
+  flags on the dependency-free core) - the cheapest job in the
+  matrix catching the most expensive bugs; its first run surfaced a
+  real heap overread in a transitions test fixture. Every job now
+  carries timeout-minutes (five of six used to default to the
+  runner's 6-hour hang burn), and the media suite carries a ctest
+  TIMEOUT property so a hung FFmpeg call fails the job in minutes.
+- The core and its test suites build with -Wall -Wextra -Wpedantic
+  -Wshadow through an fc_warnings interface target (MSVC: /W4) - the
+  set that surfaced the dead SRT helper at zero cost. The media and
+  app layers stay on toolchain defaults so third-party header noise
+  does not bury our warnings; nothing is promoted to -Werror.
 - The portable workflow stamps PORTABLE.txt's version header from the
   VERSION file - the single source CMake's project() and the zip name
   already read - instead of a hard-coded v0.1.0 literal that silently

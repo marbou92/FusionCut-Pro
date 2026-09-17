@@ -174,7 +174,12 @@ public:
 
     const std::vector<Clip> &clips() const { return clips_; }
 
-    // Adds a clip; returns its id (>0) or 0 on invalid arguments.
+    // Adds a clip; returns its id (> 0), or 0 on invalid arguments:
+    // unknown track, a text lane, empty source extent, a resulting
+    // durationFrames() < 1 (a rate > 1 can collapse a positive source
+    // extent to zero timeline frames), negative start, or an overlap
+    // with another clip on the track (every lane is non-overlapping;
+    // use findDropPosition() to resolve a guaranteed-valid start).
     int64_t addClip(int trackIndex, const std::string &sourcePath, const std::string &label,
                     int64_t sourceInFrames, int64_t sourceOutFrames, int64_t timelineStart,
                     double rate = 1.0);

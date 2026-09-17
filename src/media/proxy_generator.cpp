@@ -39,7 +39,7 @@ using IoContextPtr = std::unique_ptr<AVIOContext, IoContextDeleter>;
 
 bool setupVideoEncoder(AVCodecContext *&ctx, const AVCodec *&codec, int width, int height,
                        AVRational timebase, int gopSize, int crf, const std::string &preset,
-                       std::string &error) {
+                       bool globalHeader, std::string &error) {
     codec = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!codec) {
         codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
@@ -61,6 +61,14 @@ bool setupVideoEncoder(AVCodecContext *&ctx, const AVCodec *&codec, int width, i
     ctx->time_base = timebase;
     ctx->gop_size = gopSize;
     ctx->max_b_frames = 2;
+    // MP4 wants extradata: without the flag libx264 keeps its headers
+    // in-band and file validity silently depends on movenc self-healing
+    // at trailer time, while the MPEG-4 fallback writes an esds with an
+    // EMPTY DecoderSpecificInfo - a malformed file some players reject
+    // outright.
+    if (globalHeader) {
+        ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
 
     if (codec->id == AV_CODEC_ID_H264) {
         // Options belong to libx264; ignore failures for other h264 encoders.
@@ -79,7 +87,7 @@ bool setupVideoEncoder(AVCodecContext *&ctx, const AVCodec *&codec, int width, i
 }
 
 bool setupAudioEncoder(AVCodecContext *&ctx, const AVCodec *&codec, int sampleRate,
-                       std::string &error) {
+                       bool globalHeader, std::string &error) {
     codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
     if (!codec) {
         error = "no AAC encoder in this FFmpeg build";
@@ -93,6 +101,9 @@ bool setupAudioEncoder(AVCodecContext *&ctx, const AVCodec *&codec, int sampleRa
     ctx->sample_rate = sampleRate;
     ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
     ctx->bit_rate = 96000;
+    if (globalHeader) {
+        ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
 #ifdef FC_HAVE_CH_LAYOUT
     av_channel_layout_default(&ctx->ch_layout, 2);
 #else
@@ -154,7 +165,10 @@ bool writePacket(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AV
     return true;
 }
 
-// Drains an encoder and writes every produced packet.
+// Drains an encoder and writes every produced packet. EAGAIN (encoder
+// wants more input first) and EOF (drain finished) end the receive loop
+// cleanly; any other error is a real encoder failure - treating it as
+// "no more packets" silently truncated the proxy file.
 bool drainEncoder(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AVPacket *pkt,
                   std::string &error) {
     // Entering the drain state is legal exactly once: 0 on success,
@@ -164,10 +178,15 @@ bool drainEncoder(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, A
         error = "encoder flush failed: " + fcError(sendRc);
         return false;
     }
-    while (avcodec_receive_packet(enc, pkt) == 0) {
+    int rc = 0;
+    while ((rc = avcodec_receive_packet(enc, pkt)) == 0) {
         if (!writePacket(out, enc, stream, pkt, error)) {
             return false;
         }
+    }
+    if (rc != AVERROR(EAGAIN) && rc != AVERROR_EOF) {
+        error = "encoder read failed: " + fcError(rc);
+        return false;
     }
     return true;
 }
@@ -206,7 +225,7 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
     }
     FormatContextPtr in(rawIn);
     if (avformat_find_stream_info(in.get(), nullptr) < 0) {
-        error = "stream info failed";
+        error = "stream info failed (" + srcPath + ")";
         return false;
     }
 
@@ -275,13 +294,19 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
 
     AVCodecContext *videoEnc = nullptr;
     const AVCodec *videoEncCodec = nullptr;
+    // Both targets (mp4/mov) want extradata - see setupVideoEncoder.
+    const bool globalHeader = (out->oformat->flags & AVFMT_GLOBALHEADER) != 0;
     if (!setupVideoEncoder(videoEnc, videoEncCodec, targetW, targetH, outTimebase, gop, config.crf,
-                           config.preset, error)) {
+                           config.preset, globalHeader, error)) {
         return false;
     }
     CodecContextPtr videoEncGuard(videoEnc);
 
     AVStream *outVideo = avformat_new_stream(out.get(), nullptr);
+    if (!outVideo) {
+        error = "output video stream alloc failed";
+        return false;
+    }
     outVideo->time_base = videoEnc->time_base;
     avcodec_parameters_from_context(outVideo->codecpar, videoEnc);
 
@@ -289,12 +314,26 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
     const AVCodec *audioEncCodec = nullptr;
     AVStream *outAudio = nullptr;
     AudioFifoPtr audioFifo;
+    int audioFrameSize = 0;
     if (config.withAudio && audioIdx >= 0 && audioDecoder) {
-        if (!setupAudioEncoder(audioEnc, audioEncCodec, config.audioSampleRate, error)) {
+        if (!setupAudioEncoder(audioEnc, audioEncCodec, config.audioSampleRate, globalHeader,
+                               error)) {
             return false;
         }
-        audioFifo.reset(av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, 2, audioEnc->frame_size * 2));
+        // frame_size == 0 would turn the FIFO drain below into an
+        // infinite loop; native AAC always reports 1024, and the 1024
+        // fallback keeps exotic encoder builds from hanging the job.
+        audioFrameSize = audioEnc->frame_size > 0 ? audioEnc->frame_size : 1024;
+        audioFifo.reset(av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, 2, audioFrameSize * 2));
+        if (!audioFifo) {
+            error = "audio fifo alloc failed";
+            return false;
+        }
         outAudio = avformat_new_stream(out.get(), nullptr);
+        if (!outAudio) {
+            error = "output audio stream alloc failed";
+            return false;
+        }
         outAudio->time_base = AVRational{1, audioEnc->sample_rate};
         avcodec_parameters_from_context(outAudio->codecpar, audioEnc);
     }
@@ -346,7 +385,7 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
         audioOutFrame.reset(av_frame_alloc());
         audioOutFrame->format = audioEnc->sample_fmt;
         audioOutFrame->sample_rate = audioEnc->sample_rate;
-        audioOutFrame->nb_samples = audioEnc->frame_size;
+        audioOutFrame->nb_samples = audioFrameSize;
 #ifdef FC_HAVE_CH_LAYOUT
         av_channel_layout_copy(&audioOutFrame->ch_layout, &audioEnc->ch_layout);
 #else
@@ -359,43 +398,87 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
         }
     }
 
-    // Encodes one converted video frame.
+    // Encodes one converted video frame. EAGAIN/EOF end the receive
+    // loop cleanly; anything else is a real encoder failure.
     auto encodeVideoFrame = [&](AVFrame *scaled) -> bool {
         const int sendRc = avcodec_send_frame(videoEnc, scaled);
         if (sendRc < 0) {
             error = "video encode send failed: " + fcError(sendRc);
             return false;
         }
-        while (avcodec_receive_packet(videoEnc, encPacket.get()) == 0) {
+        int readRc = 0;
+        while ((readRc = avcodec_receive_packet(videoEnc, encPacket.get())) == 0) {
             if (!writePacket(out.get(), videoEnc, outVideo, encPacket.get(), error)) {
                 return false;
             }
+        }
+        if (readRc != AVERROR(EAGAIN) && readRc != AVERROR_EOF) {
+            error = "video encoder read failed: " + fcError(readRc);
+            return false;
         }
         return true;
     };
 
     // Pulls FIFO samples into AAC frames and encodes them.
     auto flushAudioFifo = [&]() -> bool {
-        while (audioFifo && av_audio_fifo_size(audioFifo.get()) >= audioEnc->frame_size) {
+        while (audioFifo && av_audio_fifo_size(audioFifo.get()) >= audioFrameSize) {
             if (av_audio_fifo_read(audioFifo.get(),
                                    reinterpret_cast<void **>(audioOutFrame->extended_data),
-                                   audioEnc->frame_size) < audioEnc->frame_size) {
+                                   audioFrameSize) < audioFrameSize) {
                 error = "audio fifo read failed";
                 return false;
             }
             audioOutFrame->pts = audioSamplesWritten;
-            audioSamplesWritten += audioEnc->frame_size;
+            audioSamplesWritten += audioFrameSize;
             const int sendRc = avcodec_send_frame(audioEnc, audioOutFrame.get());
             if (sendRc < 0) {
                 error = "audio encode send failed: " + fcError(sendRc);
                 return false;
             }
-            while (avcodec_receive_packet(audioEnc, encPacket.get()) == 0) {
+            int readRc = 0;
+            while ((readRc = avcodec_receive_packet(audioEnc, encPacket.get())) == 0) {
                 if (!writePacket(out.get(), audioEnc, outAudio, encPacket.get(), error)) {
                     return false;
                 }
             }
+            if (readRc != AVERROR(EAGAIN) && readRc != AVERROR_EOF) {
+                error = "audio encoder read failed: " + fcError(readRc);
+                return false;
+            }
         }
+        return true;
+    };
+
+    // Reused across every converted audio frame: allocating and freeing
+    // a samples buffer per decoded frame (~43/s with AAC sources) was
+    // pure churn. The pool grows monotonically to the largest demand
+    // seen (the EOF flush's capacity incl. reflection headroom) and the
+    // RAII guard frees it exactly once on every exit path.
+    struct ResampleBufGuard {
+        uint8_t **ptr = nullptr;
+        int capacity = 0; // sample-frames the allocation holds
+        ~ResampleBufGuard() {
+            if (ptr) {
+                av_freep(&ptr[0]);
+                av_freep(&ptr);
+            }
+        }
+    } resampleBuf;
+    auto ensureResampleBuf = [&resampleBuf](int want) -> bool {
+        if (resampleBuf.ptr && resampleBuf.capacity >= want) {
+            return true;
+        }
+        if (resampleBuf.ptr) {
+            av_freep(&resampleBuf.ptr[0]);
+            av_freep(&resampleBuf.ptr);
+            resampleBuf.ptr = nullptr;
+            resampleBuf.capacity = 0;
+        }
+        if (av_samples_alloc_array_and_samples(&resampleBuf.ptr, nullptr, 2, want,
+                                               AV_SAMPLE_FMT_FLTP, 0) < 0) {
+            return false;
+        }
+        resampleBuf.capacity = want;
         return true;
     };
 
@@ -419,11 +502,10 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
             bound = srcFrame->nb_samples * 2 + 64;
         }
         const int outCapacity = bound + 16;
-        uint8_t **buffer = nullptr;
-        if (av_samples_alloc_array_and_samples(&buffer, nullptr, 2, outCapacity, AV_SAMPLE_FMT_FLTP,
-                                               0) < 0) {
+        if (!ensureResampleBuf(outCapacity)) {
             return true; // skip on allocation failure
         }
+        uint8_t **buffer = resampleBuf.ptr;
         // The const_cast is required for FFmpeg <= 6.1, where swr_convert
         // takes `const uint8_t **` (C++ forbids the implicit T** conversion).
         // FFmpeg 7.x takes `const uint8_t *const *`, which also accepts the
@@ -437,16 +519,10 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                                           av_audio_fifo_size(audioFifo.get()) + converted) < 0) {
                     // Out of memory: drop this audio frame rather than fail
                     // the whole proxy job.
-                    av_freep(&buffer[0]);
-                    av_freep(&buffer);
                     return flushAudioFifo();
                 }
             }
             av_audio_fifo_write(audioFifo.get(), reinterpret_cast<void **>(buffer), converted);
-        }
-        if (buffer) {
-            av_freep(&buffer[0]);
-            av_freep(&buffer);
         }
         return flushAudioFifo();
     };
@@ -506,7 +582,9 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
     }
 
     if (cancelled) {
-        error = "cancelled by caller";
+        // Same contract as the exporter: an empty error means the caller
+        // cancelled (the cleaner above removes the partial output).
+        error.clear();
         return false;
     }
 
@@ -549,9 +627,8 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                 flushCapacity = 0;
             }
             flushCapacity += 4096; // bound + flush-reflection headroom
-            uint8_t **flushBuf = nullptr;
-            if (av_samples_alloc_array_and_samples(&flushBuf, nullptr, 2, flushCapacity,
-                                                   AV_SAMPLE_FMT_FLTP, 0) >= 0) {
+            if (ensureResampleBuf(flushCapacity)) {
+                uint8_t **flushBuf = resampleBuf.ptr;
                 int produced = 0;
                 while (produced < flushCapacity) {
                     uint8_t *planes[2] = {
@@ -570,16 +647,12 @@ bool ProxyGenerator::generate(const std::string &srcPath, const std::string &dst
                                                   av_audio_fifo_size(audioFifo.get()) + produced) <
                             0) {
                             error = "audio fifo realloc failed";
-                            av_freep(&flushBuf[0]);
-                            av_freep(&flushBuf);
                             return false;
                         }
                     }
                     av_audio_fifo_write(audioFifo.get(), reinterpret_cast<void **>(flushBuf),
                                         produced);
                 }
-                av_freep(&flushBuf[0]);
-                av_freep(&flushBuf);
             }
         }
         // Silence-pad the tail to a whole AAC frame so the last partial

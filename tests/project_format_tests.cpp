@@ -225,6 +225,61 @@ void testParserStrictness() {
         "\"out\":10,\"start\":40,\"rate\":1}]}",
         m, error)); // duplicate id
 
+    // Per-track OVERLAP rejection (format-level invariant): the second
+    // clip 8..18 overlaps the first 0..10 on the same track.
+    CHECK(!parseProject(
+        "{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"V\",\"audio\":false,"
+        "\"locked\":false,\"muted\":false,\"solo\":false}],\"clips\":[{\"id\":1,"
+        "\"track\":0,\"source\":\"a\",\"label\":\"a\",\"in\":0,\"out\":10,\"start\":0,"
+        "\"rate\":1,\"effects\":[]},{\"id\":2,\"track\":0,\"source\":\"a\",\"label\":\"b\",\"in\":"
+        "0,"
+        "\"out\":10,\"start\":8,\"rate\":1,\"effects\":[]}]}",
+        m, error)); // overlapping clips
+    // Touching clips (10..20 after 0..10) are NOT an overlap.
+    error.clear();
+    CHECK(
+        parseProject("{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"V\",\"audio\":false,"
+                     "\"locked\":false,\"muted\":false,\"solo\":false}],\"clips\":[{\"id\":1,"
+                     "\"track\":0,\"source\":\"a\",\"label\":\"a\",\"in\":0,\"out\":10,\"start\":0,"
+                     "\"rate\":1,\"effects\":[]},{\"id\":2,\"track\":0,\"source\":\"a\",\"label\":"
+                     "\"b\",\"in\":0,"
+                     "\"out\":10,\"start\":10,\"rate\":1,\"effects\":[]}],\"transitions\":[]}",
+                     m, error));
+    // The same overlap on DIFFERENT tracks is fine.
+    CHECK(parseProject(
+        "{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"V2\",\"audio\":false,"
+        "\"locked\":false,\"muted\":false,\"solo\":false},{\"name\":\"V1\",\"audio\":false,"
+        "\"locked\":false,\"muted\":false,\"solo\":false}],\"clips\":[{\"id\":1,"
+        "\"track\":1,\"source\":\"a\",\"label\":\"a\",\"in\":0,\"out\":10,\"start\":0,"
+        "\"rate\":1,\"effects\":[]},{\"id\":2,\"track\":0,\"source\":\"a\",\"label\":\"b\",\"in\":"
+        "0,"
+        "\"out\":10,\"start\":5,\"rate\":1,\"effects\":[]}],\"transitions\":[]}",
+        m, error));
+
+    // 0-timeline-frame zombie at parse time: extent 1 at rate 3 rounds
+    // llround(1/3) to zero.
+    CHECK(
+        !parseProject("{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"V\",\"audio\":false,"
+                      "\"locked\":false,\"muted\":false,\"solo\":false}],\"clips\":[{\"id\":1,"
+                      "\"track\":0,\"source\":\"a\",\"label\":\"a\",\"in\":0,\"out\":1,\"start\":0,"
+                      "\"rate\":3}]}",
+                      m, error)); // zero-frame zombie
+
+    // A transition on a TEXT track is rejected (parser-level pin of the
+    // runtime rule: text lanes have no decoded stream to hold).
+    CHECK(!parseProject(
+        "{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"V\",\"audio\":false,"
+        "\"locked\":false,\"muted\":false,\"solo\":false},{\"name\":\"T\",\"audio\":false,"
+        "\"text\":true,\"locked\":false,\"muted\":false,\"solo\":false}],"
+        "\"clips\":[{\"id\":1,\"track\":1,\"label\":\"t1\",\"start\":0,\"duration\":10,"
+        "\"text\":{\"align\":\"center\",\"anchorX\":0.5,\"anchorY\":0.5,\"wrap\":0.8,"
+        "\"runs\":[]},\"effects\":[]},{\"id\":2,\"track\":1,\"label\":\"t2\",\"start\":10,"
+        "\"duration\":10,\"text\":{\"align\":\"center\",\"anchorX\":0.5,\"anchorY\":0.5,"
+        "\"wrap\":0.8,\"runs\":[]},\"effects\":[]}],\"transitions\":[{\"id\":1,\"track\":1,"
+        "\"left\":1,"
+        "\"right\":2,\"kind\":\"dissolve.cross\",\"duration\":5}]}",
+        m, error)); // transition on a text track
+
     // A valid minimal project loads.
     error.clear();
     CHECK(parseProject(

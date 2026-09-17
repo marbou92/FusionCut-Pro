@@ -886,6 +886,89 @@ static void testLayoutClusterAtomic() {
     }
 }
 
+// Regression pin for the TTC mid-parse state leak: a sub-font that
+// POPULATES parse state (a CBLC strike) and then fails (no cmap) used to
+// leak its strikes into the next face's attempt. bitmapFor() prefers CBDT
+// strikes and picks the LARGEST ppem, so the leaked high-ppem strike
+// hijacked the good face's lookups (wrong geometry straight out of the
+// broken face's records). resetState() at the top of parseFontAt must
+// keep the second face's parse clean.
+void testTtcMidParseLeak() {
+    using namespace fixture;
+
+    // Face 1: CBLC (one ppem-200 strike covering glyph 1) + a CBDT whose
+    // grin record is a DISTINCTIVE 20x20/advance-20 - and NO cmap, so
+    // parseFontAt fails right after the strike was recorded.
+    auto fmt17 = [](uint8_t h, uint8_t w, int8_t bx, int8_t by, uint8_t adv,
+                    const std::vector<uint8_t> &png) {
+        Bytes r;
+        r.u8(h);
+        r.u8(w);
+        r.s8(bx);
+        r.s8(by);
+        r.u8(adv);
+        r.u32(uint32_t(png.size()));
+        r.raw(png.data(), png.size());
+        return r;
+    };
+    const Bytes r1 = fmt17(20, 20, 1, 19, 20, fakePng(6));
+
+    const uint32_t arrayOffset = 8 + 48;
+    Bytes cblc;
+    cblc.u32(0x00020000u);
+    cblc.u32(1); // numSizes
+    cblc.u32(arrayOffset);
+    cblc.u32(8 + 12);
+    cblc.u32(1);
+    cblc.u32(0); // colorRef
+    for (int i = 0; i < 14; ++i) {
+        cblc.s16(0);
+    }
+    cblc.u8(200); // ppemX @44 - the distinctive leaked strike
+    cblc.u8(200);
+    cblc.u8(32);
+    cblc.u8(0);
+    cblc.u16(1);                     // first glyph
+    cblc.u16(1);                     // last glyph
+    cblc.u32(8);                     // subtable offset from array start
+    cblc.u16(1);                     // indexFormat 1
+    cblc.u16(17);                    // imageFormat
+    cblc.u32(0);                     // sbitOffset: CBDT at 0
+    cblc.u32(0);                     // glyph 1 AT sbitOffset
+    cblc.u32(uint32_t(r1.b.size())); // sentinel
+
+    TableRec cblcRec;
+    cblcRec.tag = "CBLC";
+    cblcRec.payload = cblc.b;
+    TableRec cbdtRec;
+    cbdtRec.tag = "CBDT";
+    cbdtRec.payload = r1.b;
+    const std::vector<uint8_t> broken = assembleSfnt({cblcRec, cbdtRec});
+    // Sanity: the broken face alone fails (no cmap) but HAS a strike.
+    {
+        EmojiFont lone;
+        CHECK(!lone.load(broken.data(), broken.size()));
+    }
+
+    // The collection: broken face first, the good CBDT face second.
+    const std::vector<uint8_t> good =
+        buildCbdtFont(fakePng(8), fakePng(7), fakePng(12), fakePng(10));
+    const std::vector<uint8_t> ttc = wrapTtc(broken, good);
+
+    EmojiFont font;
+    CHECK(font.load(ttc.data(), ttc.size()));
+    CHECK(font.codepointGlyph(0x1F600) == 1);
+    // The leak would push strikePpem to 200 and resolve the grin through
+    // the broken face's 20x20 record.
+    CHECK(font.strikePpem() == 10);
+    EmojiFont::Bitmap bm;
+    CHECK(font.bitmapFor(1, &bm));
+    CHECK(bm.ppem == 10);
+    CHECK(bm.metrics.width == 10);
+    CHECK(bm.metrics.height == 10);
+    CHECK(bm.metrics.advance == 10);
+}
+
 int main() {
     testSingles();
     testKeycaps();
@@ -903,6 +986,7 @@ int main() {
     testSbixFixture();
     testSbixDegenerate();
     testTtcAndProbes();
+    testTtcMidParseLeak();
     testCbdtMalformedBattery();
     testScaling();
     testLayoutClusterAtomic();

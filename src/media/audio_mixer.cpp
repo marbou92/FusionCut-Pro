@@ -120,11 +120,31 @@ bool AudioWindowMixer::pull(const std::vector<AudioSpan> &spans, int64_t startSa
             }
         }
 
-        // Position the rolling decode: seek when the decoder's next
-        // position is far behind the needed range (wasted forward
-        // decode) or anywhere ahead of it (the window moved back).
+        // Position the rolling decode. The decision reads the HELD
+        // chunks, not the raw decoder position: decoded chunks
+        // legitimately overhang the pull window (AAC 21 ms / MP3 26 ms /
+        // FLAC ~85 ms chunks vs ~10 ms WASAPI pulls), so the old
+        // position-based rule fired a clear+demuxer-seek+flush+re-decode
+        // cycle on EVERY audio callback. Coverage rule: seek only when
+        // the held audio does not reach the needed range - it starts
+        // after srcFrom (the window moved back into undecoded audio) or
+        // ends well before srcFrom (a jump too far forward to decode
+        // through).
         if (channel.primed) {
-            if (channel.nextSrcSec < srcFrom - 0.25 || channel.nextSrcSec > srcTo + 0.001) {
+            bool needSeek = false;
+            if (channel.chunks.empty()) {
+                // Nothing held (all dropped or eof): fall back to the
+                // decoder position - far behind wastes a forward
+                // re-decode, ahead of the window means the position
+                // moved back.
+                needSeek =
+                    channel.nextSrcSec < srcFrom - 0.25 || channel.nextSrcSec > srcTo + 0.001;
+            } else {
+                const double heldFrom = channel.chunks.front().ptsSec;
+                const double heldTo = chunkEndSec(channel.chunks.back(), rate);
+                needSeek = heldFrom > srcFrom + 1.0e-4 || heldTo < srcFrom - 0.25;
+            }
+            if (needSeek) {
                 channel.chunks.clear();
                 channel.eof = false;
                 std::string seekError;

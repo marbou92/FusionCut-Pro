@@ -98,9 +98,17 @@ bool MediaProbe::probe(const std::string &path, MediaInfo &out, std::string &err
 
     rc = avformat_find_stream_info(ctx.get(), nullptr);
     if (rc < 0) {
-        error = "stream info failed: " + fcError(rc);
+        error = "stream info failed (" + path + "): " + fcError(rc);
         return false;
     }
+
+    return probe(ctx.get(), path, out, error);
+}
+
+bool MediaProbe::probe(AVFormatContext *ctx, const std::string &path, MediaInfo &out,
+                       [[maybe_unused]] std::string &error) {
+    out = MediaInfo();
+    out.path = path;
 
     out.container = ctx->iformat->long_name ? ctx->iformat->long_name : "";
     out.formatName = ctx->iformat->name ? ctx->iformat->name : "";
@@ -126,7 +134,7 @@ bool MediaProbe::probe(const std::string &path, MediaInfo &out, std::string &err
     }
     if (videoIdx >= 0) {
         out.hasVideo = true;
-        fillVideoStream(ctx.get(), ctx->streams[videoIdx], out.video);
+        fillVideoStream(ctx, ctx->streams[videoIdx], out.video);
     }
 
     for (unsigned int i = 0; i < ctx->nb_streams; ++i) {

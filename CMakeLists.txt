@@ -39,6 +39,20 @@ if(FC_BUILD_MEDIA)
         libswresample)
 endif()
 
+# Warning flags for the dependency-free core and its tests: fully ours to
+# fix, and the -Wall -Wextra -Wpedantic -Wshadow set has already earned
+# its keep (the dead srt helper surfaced here). The media/app layers
+# compile FFmpeg's and Qt's headers and stay on the toolchain defaults so
+# third-party noise does not bury our warnings in CI logs. Not an error
+# set: new compiler versions may add diagnostics and the build must not
+# break for that alone.
+add_library(fc_warnings INTERFACE)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(fc_warnings INTERFACE -Wall -Wextra -Wpedantic -Wshadow)
+elseif(MSVC)
+    target_compile_options(fc_warnings INTERFACE /W4)
+endif()
+
 # Generated headers (version information).
 configure_file(cmake/version.h.in generated/fc/version.h @ONLY)
 

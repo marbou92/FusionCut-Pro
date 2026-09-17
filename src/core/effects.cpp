@@ -1535,6 +1535,10 @@ double EffectInstance::param(const std::string &key, double fallback) const {
     return fallback;
 }
 
+// Defined with the keyframe helpers below; setParam and setKeyframe
+// share this one clamp rule.
+static double clampToParam(const EffectDescriptor *d, const std::string &key, double value);
+
 void EffectInstance::setParam(const std::string &key, double value) {
     const EffectDescriptor *d = descriptor();
     if (!d) {
@@ -1549,7 +1553,7 @@ void EffectInstance::setParam(const std::string &key, double value) {
     }
     for (size_t i = 0; i < d->params.size(); ++i) {
         if (d->params[i].key == key) {
-            values[i] = std::min(std::max(value, d->params[i].minValue), d->params[i].maxValue);
+            values[i] = clampToParam(d, key, value);
             return;
         }
     }
@@ -1575,11 +1579,18 @@ static bool isNumberParam(const EffectDescriptor *d, const std::string &key) {
     return false;
 }
 
-// Clamps a value into the descriptor range of `key` (doubles pass through
-// when the key is unknown - never called for those).
+// Clamps `value` into the named param's descriptor range (doubles pass
+// through when the key is unknown - never called for those). NaN cannot
+// be clamped (every comparison fails, so it slips through min/max and
+// poisons the whole pixel loop downstream - lround(NaN * 255) is
+// undefined behavior) and falls back to the descriptor default; +-inf
+// clamps like any out-of-range number.
 static double clampToParam(const EffectDescriptor *d, const std::string &key, double value) {
     for (const EffectParamDescriptor &p : d->params) {
         if (p.key == key) {
+            if (std::isnan(value)) {
+                return p.defaultValue;
+            }
             return std::min(std::max(value, p.minValue), p.maxValue);
         }
     }

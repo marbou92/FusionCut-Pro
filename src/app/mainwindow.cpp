@@ -2262,6 +2262,11 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     std::map<std::string, std::unique_ptr<fc::VideoDecoder>> decoders;
     std::map<std::string, double> nextPts;
     std::map<int64_t, QImage> held;
+    // First hard decode failure (open/seek/decode error), job-local like
+    // every other write here. The exporter cannot distinguish a provider
+    // abort from a user cancel (both arrive as provider-false with a
+    // cleared error), so the app layers the reason on top after run().
+    std::string decodeError;
     // Rendered text layers cached per clip (time-invariant docs only)
     // at the export resolution. Animated clips render per frame. The
     // emoji painter is job-local: its caches are not thread-safe and
@@ -2316,6 +2321,9 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         // path only guards against a bug, not a normal case).
         const auto pathIt = decodePaths.find(clip.sourcePath);
         if (pathIt == decodePaths.end()) {
+            if (decodeError.empty()) {
+                decodeError = "no decoder path for source " + clip.sourcePath;
+            }
             return false;
         }
         const std::string &decPath = pathIt->second;
@@ -2324,6 +2332,9 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
             std::string openError;
             auto decoder = std::make_unique<fc::VideoDecoder>();
             if (!decoder->open(decPath, openError)) {
+                if (decodeError.empty()) {
+                    decodeError = "source decode failed (" + openError + "): " + decPath;
+                }
                 return false;
             }
             it = decoders.emplace(decPath, std::move(decoder)).first;
@@ -2334,11 +2345,21 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
         std::string err;
         if (srcSec < expect - 0.5 / fps || srcSec > expect + 2.5 / fps) {
             if (!dec->seekToSeconds(srcSec, err)) {
+                if (decodeError.empty()) {
+                    decodeError = "source decode failed (" + err + "): " + decPath;
+                }
                 return false;
             }
         }
         fc::DecodedFrame df;
         if (!dec->readFrame(df, err)) {
+            // A clean EOF (empty error) is tolerated: the source simply
+            // ends there and the frame renders black, like the audio
+            // side mixes silence. A real decode error aborts the export
+            // with an honest message instead of a misleading one.
+            if (!err.empty() && decodeError.empty()) {
+                decodeError = "source decode failed (" + err + "): " + decPath;
+            }
             return false;
         }
         // Skip forward to the requested time: a source whose fps differs
@@ -2393,6 +2414,8 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
                         QImage hf;
                         if (right && fetchFrame(*right, right->timelineStart, hf)) {
                             heldIt = held.emplace(sample.rightClipId, hf).first;
+                        } else if (right && !decodeError.empty()) {
+                            return false; // hard decode failure - honest error after run()
                         } else {
                             heldIt = held.emplace(sample.rightClipId, QImage()).first;
                         }
@@ -2426,6 +2449,8 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
                         live.scaled(width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
                             .convertToFormat(QImage::Format_RGBA8888);
                 }
+            } else if (!decodeError.empty()) {
+                return false; // hard decode failure - honest error after run()
             }
         }
 
@@ -2499,7 +2524,16 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     std::string error;
     const bool ok =
         fc::Exporter::run(path.toStdString(), config, provider, progressCb, error, audioProvider);
-    const QString errorText = QString::fromStdString(error);
+    // The exporter reports a user cancel as an empty error, and the
+    // provider aborts hard decode failures through the same channel -
+    // layer the recorded decode reason on top so a corrupt source no
+    // longer masquerades as "Export cancelled".
+    QString errorText;
+    if (!error.empty()) {
+        errorText = QString::fromStdString(error);
+    } else if (!decodeError.empty()) {
+        errorText = QString::fromStdString(decodeError);
+    }
     QMetaObject::invokeMethod(
         this,
         [this, ok, errorText, path, audioNote] { finishExport(ok, errorText, path, audioNote); },

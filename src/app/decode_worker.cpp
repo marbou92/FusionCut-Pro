@@ -101,7 +101,13 @@ void DecodeWorker::runProxyJob(const QString &src, const QString &dst) {
             return true;
         },
         error);
-    emit proxyDone(ok, ok ? dst : QString::fromStdString(error));
+    // An empty error means the caller cancelled (the ProxyGenerator
+    // contract mirrors the exporter's) - name that instead of showing a
+    // bare "Proxy failed:" line.
+    const QString result = ok ? dst
+                              : (error.empty() ? QStringLiteral("cancelled by caller")
+                                               : QString::fromStdString(error));
+    emit proxyDone(ok, result);
 }
 
 void DecodeWorker::shutdown() {

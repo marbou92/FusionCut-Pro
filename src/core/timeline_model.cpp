@@ -6,12 +6,24 @@
 
 namespace fc {
 
-int64_t Clip::durationFrames() const {
-    if (rate <= 0.0 || sourceOutFrames <= sourceInFrames) {
+namespace {
+
+// The timeline extent a source range yields at `rate` - Clip::durationFrames'
+// formula for a hypothetical state. The trim/roll/add guards must reject
+// mutations that collapse it below one frame: at rate > 1 a positive SOURCE
+// extent can round down to a 0-timeline-frame "zombie" clip that stays in
+// the model invisible, un-splittable and un-movable.
+int64_t durationFromRange(int64_t sourceIn, int64_t sourceOut, double rate) {
+    if (rate <= 0.0 || sourceOut <= sourceIn) {
         return 0;
     }
-    return static_cast<int64_t>(
-        std::llround(static_cast<double>(sourceOutFrames - sourceInFrames) / rate));
+    return static_cast<int64_t>(std::llround(static_cast<double>(sourceOut - sourceIn) / rate));
+}
+
+} // namespace
+
+int64_t Clip::durationFrames() const {
+    return durationFromRange(sourceInFrames, sourceOutFrames, rate);
 }
 
 void TimelineModel::setFps(double fps) {
@@ -163,6 +175,19 @@ int64_t TimelineModel::addClip(int trackIndex, const std::string &sourcePath,
     }
     if (rate <= 0.0) {
         return 0;
+    }
+    const int64_t duration = durationFromRange(sourceInFrames, sourceOutFrames, rate);
+    if (duration < 1) {
+        return 0; // 0-timeline-frame zombie (rate > 1 over a tiny extent)
+    }
+    // Every lane is non-overlapping (see the header) - addClip enforces it
+    // like moveClipTo/addTextClip do, so no caller can create an overlap.
+    const int64_t newEnd = timelineStart + duration;
+    for (const Clip &other : clips_) {
+        if (other.trackIndex == trackIndex && timelineStart < other.timelineEnd() &&
+            newEnd > other.timelineStart) {
+            return 0; // would overlap
+        }
     }
 
     Clip clip;
@@ -487,6 +512,11 @@ bool TimelineModel::trimClipStart(int64_t id, int64_t deltaFrames) {
     if (newSourceIn < 0 || newSourceIn >= clip->sourceOutFrames) {
         return false;
     }
+    // The source extent survived, but at rate > 1 the timeline duration
+    // can still collapse to zero - reject the zombie.
+    if (durationFromRange(newSourceIn, clip->sourceOutFrames, clip->rate) < 1) {
+        return false;
+    }
     if (newStart < 0) {
         return false;
     }
@@ -509,6 +539,11 @@ bool TimelineModel::trimClipEnd(int64_t id, int64_t deltaFrames) {
         static_cast<int64_t>(std::llround(static_cast<double>(deltaFrames) * clip->rate));
     const int64_t newSourceOut = clip->sourceOutFrames + sourceDelta;
     if (newSourceOut <= clip->sourceInFrames) {
+        return false;
+    }
+    // At rate > 1 a surviving source extent can still round down to a
+    // 0-timeline-frame zombie - reject it.
+    if (durationFromRange(clip->sourceInFrames, newSourceOut, clip->rate) < 1) {
         return false;
     }
     clip->sourceOutFrames = newSourceOut;
@@ -555,6 +590,11 @@ bool TimelineModel::rippleTrimClipEnd(int64_t id, int64_t deltaFrames) {
             static_cast<int64_t>(std::llround(static_cast<double>(deltaFrames) * clip->rate));
         const int64_t newSourceOut = clip->sourceOutFrames + sourceDelta;
         if (newSourceOut <= clip->sourceInFrames) {
+            return false;
+        }
+        // Same zombie guard as trimClipEnd: rate > 1 can collapse the
+        // surviving source extent to zero timeline frames.
+        if (durationFromRange(clip->sourceInFrames, newSourceOut, clip->rate) < 1) {
             return false;
         }
         clip->sourceOutFrames = newSourceOut;
@@ -618,11 +658,22 @@ bool TimelineModel::rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrame
     if (left->sourceOutFrames + leftSrcDelta <= left->sourceInFrames) {
         return false;
     }
+    // ...and >= 1 TIMELINE frame: rate > 1 can collapse the surviving
+    // source extent to a 0-frame zombie.
+    if (durationFromRange(left->sourceInFrames, left->sourceOutFrames + leftSrcDelta, left->rate) <
+        1) {
+        return false;
+    }
     // Right must keep >= 1 frame and a non-negative in-point.
     if (right->sourceInFrames + rightSrcDelta < 0) {
         return false;
     }
     if (right->sourceOutFrames <= right->sourceInFrames + rightSrcDelta) {
+        return false;
+    }
+    // Same timeline-frame zombie guard for the right side.
+    if (durationFromRange(right->sourceInFrames + rightSrcDelta, right->sourceOutFrames,
+                          right->rate) < 1) {
         return false;
     }
     if (right->timelineStart + deltaFrames <= left->timelineStart) {

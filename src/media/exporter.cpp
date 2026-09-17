@@ -47,6 +47,26 @@ bool writePacket(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AV
     return true;
 }
 
+// Receives every packet the encoder has ready and writes it through.
+// EAGAIN (encoder wants more input first) and EOF (drain finished) end
+// the loop cleanly; ANY other receive error is a real encoder failure -
+// treating it as "no more packets" silently truncated the output file
+// and still committed it.
+bool drainEncoderPackets(AVFormatContext *out, AVCodecContext *enc, AVStream *stream, AVPacket *pkt,
+                         std::string &error) {
+    int rc = 0;
+    while ((rc = avcodec_receive_packet(enc, pkt)) == 0) {
+        if (!writePacket(out, enc, stream, pkt, error)) {
+            return false;
+        }
+    }
+    if (rc != AVERROR(EAGAIN) && rc != AVERROR_EOF) {
+        error = "encoder read failed: " + fcError(rc);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
@@ -86,6 +106,17 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
         }
     } cleaner{dstPath, false};
 
+    // ---- Output container ----
+    // Allocated FIRST: the container format decides whether the encoders
+    // below must emit global headers (the flag right before each open).
+    AVFormatContext *rawOut = nullptr;
+    int rc = avformat_alloc_output_context2(&rawOut, nullptr, nullptr, dstPath.c_str());
+    if (rc < 0 || !rawOut) {
+        error = "output context alloc failed: " + fcError(rc);
+        return false;
+    }
+    OutputContextPtr out(rawOut);
+
     // ---- Encoder ----
     const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!codec) {
@@ -103,6 +134,14 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
     enc->width = config.width;
     enc->height = config.height;
     enc->pix_fmt = AV_PIX_FMT_YUV420P;
+    // MP4 wants extradata: without the flag libx264 keeps its headers
+    // in-band and file validity silently depends on movenc self-healing
+    // at trailer time, while the MPEG-4 fallback writes an esds with an
+    // EMPTY DecoderSpecificInfo - a malformed file some players reject
+    // outright.
+    if (out->oformat->flags & AVFMT_GLOBALHEADER) {
+        enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
     // Exact output frame rate as the timebase: pts == frame index, and
     // av_d2q keeps fractional rates (23.976 -> 1001/24000) exact.
     AVRational fpsQ = av_d2q(config.fps, 1001);
@@ -150,6 +189,9 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
         audioEnc->sample_fmt = AV_SAMPLE_FMT_FLTP; // the native AAC contract
         audioEnc->bit_rate = 192000;
         audioEnc->time_base = AVRational{1, config.sampleRate};
+        if (out->oformat->flags & AVFMT_GLOBALHEADER) {
+            audioEnc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        }
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 28, 100)
         av_channel_layout_default(&audioEnc->ch_layout, config.audioChannels);
 #else
@@ -182,14 +224,7 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
         }
     }
 
-    // ---- Output container ----
-    AVFormatContext *rawOut = nullptr;
-    int rc = avformat_alloc_output_context2(&rawOut, nullptr, nullptr, dstPath.c_str());
-    if (rc < 0 || !rawOut) {
-        error = "output context alloc failed: " + fcError(rc);
-        return false;
-    }
-    OutputContextPtr out(rawOut);
+    // ---- Streams + header ----
     AVStream *stream = avformat_new_stream(out.get(), nullptr);
     if (!stream) {
         error = "output stream alloc failed";
@@ -276,10 +311,8 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
             error = "audio encode send failed: " + fcError(sendRc);
             return false;
         }
-        while (avcodec_receive_packet(audioEnc.get(), pkt.get()) == 0) {
-            if (!writePacket(out.get(), audioEnc.get(), audioStream, pkt.get(), error)) {
-                return false;
-            }
+        if (!drainEncoderPackets(out.get(), audioEnc.get(), audioStream, pkt.get(), error)) {
+            return false;
         }
         return true;
     };
@@ -336,10 +369,8 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
             error = "encode send failed";
             return false;
         }
-        while (avcodec_receive_packet(enc.get(), pkt.get()) == 0) {
-            if (!writePacket(out.get(), enc.get(), stream, pkt.get(), error)) {
-                return false;
-            }
+        if (!drainEncoderPackets(out.get(), enc.get(), stream, pkt.get(), error)) {
+            return false;
         }
         if (progress &&
             !progress(static_cast<double>(f + 1) / static_cast<double>(config.totalFrames))) {
@@ -350,10 +381,8 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
 
     // ---- Drain + trailer ----
     avcodec_send_frame(enc.get(), nullptr);
-    while (avcodec_receive_packet(enc.get(), pkt.get()) == 0) {
-        if (!writePacket(out.get(), enc.get(), stream, pkt.get(), error)) {
-            return false;
-        }
+    if (!drainEncoderPackets(out.get(), enc.get(), stream, pkt.get(), error)) {
+        return false;
     }
     if (audioProvider && audioEnc) {
         // Pad the tail with silence to a whole AAC frame so the last
@@ -367,10 +396,8 @@ bool Exporter::run(const std::string &dstPath, const ExportConfig &configIn,
             audioFifo.clear();
         }
         avcodec_send_frame(audioEnc.get(), nullptr);
-        while (avcodec_receive_packet(audioEnc.get(), pkt.get()) == 0) {
-            if (!writePacket(out.get(), audioEnc.get(), audioStream, pkt.get(), error)) {
-                return false;
-            }
+        if (!drainEncoderPackets(out.get(), audioEnc.get(), audioStream, pkt.get(), error)) {
+            return false;
         }
     }
     rc = av_write_trailer(out.get());

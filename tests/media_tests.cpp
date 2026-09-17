@@ -498,7 +498,10 @@ void testAudioDecoder() {
     CHECK(all.size() >= 2 * 48000 * 2); // at least 2 seconds of samples
     CHECK(all.size() <= 2 * 48000 * 4);
     CHECK(std::fabs(firstPts) < 0.2);
-    CHECK(std::fabs(lastPts - 3.0) < 0.3);
+    // The encoded track is whole AAC frames (140*1024 = 2.987 s for a
+    // 3.0 s spec), and an uncompensated encoder priming would add ~21 ms
+    // - 50 ms guards a lost resampler tail without tripping on either.
+    CHECK(std::fabs(lastPts - 3.0) < 0.05);
     CHECK(rms(all) > 0.15); // the 0.4-amplitude tone survives
     CHECK(rms(all) < 0.6);
     CHECK(goertzel(all, 440.0, 48000) > 0.5); // the tone dominates
@@ -535,6 +538,61 @@ void testAudioDecoder() {
     fc::AudioDecoder none;
     CHECK(!none.open(silent, 48000, 2, error));
     CHECK(!error.empty());
+}
+
+// The UPSAMPLE battery (regression pin for the resampler's
+// output-sample budget): a 44.1 kHz source decoded at the 48 kHz target
+// is the exact direction where the old input-side budget undershot every
+// chunk, stranded input in the resampler forever, and truncated the
+// tail. The suite's other sources are all 48 kHz, so only this battery
+// can ever see the bug again.
+void testAudioDecoderUpsample() {
+    const std::string file = pathOf("audio_src_441.mp4");
+    std::string error;
+    fc::TestMediaSpec spec;
+    spec.width = 320;
+    spec.height = 180;
+    spec.fps = 24;
+    spec.seconds = 3.0;
+    spec.audioHz = 440;
+    spec.audioSampleRate = 44100; // the whole point of this test
+    CHECK(fc::generateTestVideo(file, spec, error));
+
+    fc::AudioDecoder decoder;
+    CHECK(decoder.open(file, 48000, 2, error));
+    CHECK(decoder.sampleRate() == 48000);
+
+    std::vector<float> all;
+    double prevEnd = -1.0;
+    fc::DecodedAudio chunk;
+    int chunks = 0;
+    while (decoder.readSamples(chunk, error)) {
+        CHECK(chunk.frames > 0);
+        // Monotone inter-chunk pts with no gaps: every chunk continues
+        // where the previous ended (a stranded-resampler regression
+        // shows up as a stalling or restarting timeline).
+        if (prevEnd >= 0.0) {
+            CHECK(chunk.ptsSeconds >= prevEnd - 1.0e-6);
+            CHECK(chunk.ptsSeconds <= prevEnd + 0.05); // <= one AAC chunk
+        }
+        prevEnd = chunk.ptsSeconds + double(chunk.frames) / 48000.0;
+        all.insert(all.end(), chunk.samples.begin(), chunk.samples.end());
+        ++chunks;
+    }
+    CHECK(error.empty());
+    CHECK(chunks >= 100); // ~1024-sample AAC frames over 3 s, upsampled
+    CHECK(all.size() >= 2 * 48000 * 2);
+    // Continuity: the decoded span covers the source within 20 ms. The
+    // encoded track is whole AAC frames (129 * 1024 / 44100 = 2.9954 s,
+    // ~4.6 ms short of 3.0 by construction) - a truncated tail flush
+    // loses at least one AAC frame (~21 ms) and trips this.
+    const double total = double(all.size() / 2) / 48000.0;
+    CHECK(std::fabs(total - 3.0) < 0.02);
+    CHECK(std::fabs(prevEnd - 3.0) < 0.02);
+    // The tone survives the resample and dominates.
+    CHECK(rms(all) > 0.15);
+    CHECK(rms(all) < 0.6);
+    CHECK(goertzel(all, 440.0, 48000) > 0.5);
 }
 
 void testAudioWindowMixer() {
@@ -764,6 +822,7 @@ int main() {
     testExport();
     testExportOddDimsAndCancellation();
     testAudioDecoder();
+    testAudioDecoderUpsample();
     testAudioWindowMixer();
     testExportWithAudio();
 

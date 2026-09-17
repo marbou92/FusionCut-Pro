@@ -97,24 +97,6 @@ bool parseTimestamp(const std::string &s, size_t &pos, int64_t *ms, std::string 
     return true;
 }
 
-// True when the line looks like it could START a timestamp (digit then
-// more digits/dots/colons). Used to decide "index line vs timestamp
-// line vs garbage".
-bool looksLikeTimestampStart(const std::string &line) {
-    if (line.empty() || !std::isdigit(static_cast<unsigned char>(line[0]))) {
-        return false;
-    }
-    // An index line is ALL digits; a timestamp line is not.
-    bool allDigits = true;
-    for (char c : line) {
-        if (!std::isdigit(static_cast<unsigned char>(c))) {
-            allDigits = false;
-            break;
-        }
-    }
-    return !allDigits;
-}
-
 bool isAllDigits(const std::string &line) {
     if (line.empty()) {
         return false;

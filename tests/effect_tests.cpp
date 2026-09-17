@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1167,6 +1168,81 @@ void testClipStackIntegration() {
     CHECK(model.clips()[1].effectStack[0].param("amount") == 0.5);
 }
 
+// Armor for the whole catalog: every effect x extreme parameter value
+// must (a) land clamped and finite in storage (NaN cannot be clamped and
+// falls back to the descriptor default), (b) run the pixel loop without
+// crashing, and (c) leave the alpha channel at 255 - the header's
+// "alpha preserved by every effect" contract, previously untested.
+void testExtremeParamsSweep() {
+    const std::vector<EffectDescriptor> &catalog = effectCatalog();
+    CHECK(catalog.size() == 52);
+
+    const double nanValue = std::numeric_limits<double>::quiet_NaN();
+    const double infValue = std::numeric_limits<double>::infinity();
+    const double extremes[] = {-1e30, 1e30, -infValue, infValue, nanValue};
+
+    for (const EffectDescriptor &desc : catalog) {
+        for (const double extreme : extremes) {
+            EffectInstance fx = makeEffectInstance(desc.id);
+            for (const EffectParamDescriptor &p : desc.params) {
+                if (p.type != EffectParamType::Number) {
+                    continue; // booleans coerce through paramBool, skip sweeps
+                }
+                fx.setParam(p.key, extreme);
+                const double stored = fx.param(p.key);
+                CHECK(std::isfinite(stored));
+                CHECK(stored >= p.minValue && stored <= p.maxValue);
+            }
+            TestImg img = gradient16();
+            applyEffectStack(img.px.data(), img.w, img.h, {fx});
+            bool alphaOk = true;
+            for (size_t i = 3; i < img.px.size(); i += 4) {
+                if (img.px[i] != 255) {
+                    alphaOk = false;
+                    break;
+                }
+            }
+            CHECK(alphaOk);
+        }
+        // The descriptor bounds themselves are legal values everywhere.
+        EffectInstance fx = makeEffectInstance(desc.id);
+        for (const EffectParamDescriptor &p : desc.params) {
+            if (p.type == EffectParamType::Number) {
+                fx.setParam(p.key, p.minValue);
+                fx.setParam(p.key, p.maxValue);
+            } else {
+                fx.setParam(p.key, 1.0);
+                fx.setParam(p.key, 0.0);
+            }
+        }
+        TestImg img = gradient16();
+        applyEffectStack(img.px.data(), img.w, img.h, {fx});
+        CHECK(img.px[3] == 255);
+    }
+}
+
+// A single-point track is constant everywhere: clamp-left, clamp-right,
+// and the point itself all read the same value (previously untested).
+void testSingleKeyframeParamAt() {
+    EffectInstance fx = makeEffectInstance("color.brightness");
+    fx.setParam("amount", 0.0);
+    fx.setKeyframe("amount", 10, 0.5);
+    CHECK(fx.keyframeTrack("amount")->size() == 1);
+    CHECK(fx.paramAt("amount", -100) == 0.5);
+    CHECK(fx.paramAt("amount", 0) == 0.5);
+    CHECK(fx.paramAt("amount", 10) == 0.5);
+    CHECK(fx.paramAt("amount", 1000) == 0.5);
+    // The stack applies it past every point without a crash.
+    TestImg img(8, 8, 100, 100, 100);
+    applyEffectStack(img.px.data(), img.w, img.h, {fx}, 999);
+    CHECK(img.at(3, 3, 0) == 228); // 0.5 -> +128
+
+    // Removing the only point drops the track -> the static value again.
+    CHECK(fx.removeKeyframe("amount", 10));
+    CHECK(fx.keyframeTrack("amount") == nullptr);
+    CHECK(fx.paramAt("amount", 5) == 0.0);
+}
+
 } // namespace
 
 int main() {
@@ -1187,5 +1263,7 @@ int main() {
     testCatalogAdditionsBlurDistortGenerate();
     testCatalogAdditionsStylize();
     testKeyframes();
+    testExtremeParamsSweep();
+    testSingleKeyframeParamAt();
     return testExitCode("effects");
 }

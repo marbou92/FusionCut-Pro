@@ -24,6 +24,10 @@ using ProxyProgress = std::function<bool(double fraction)>;
 // present in the FFmpeg build.
 class ProxyGenerator {
 public:
+    // Runs the transcode synchronously. Returns false on error (`error`
+    // filled) or cancellation via the progress callback (`error` stays
+    // empty - the same contract as Exporter::run); the partial output
+    // file is removed in both cases.
     static bool generate(const std::string &srcPath, const std::string &dstPath,
                          const ProxyConfig &config, const ProxyProgress &progress,
                          std::string &error);

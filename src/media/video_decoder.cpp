@@ -9,14 +9,6 @@ namespace fc {
 bool VideoDecoder::open(const std::string &path, std::string &error) {
     close();
 
-    if (!MediaProbe::probe(path, info_, error)) { // includes media_probe.h via chain
-        return false;
-    }
-    if (!info_.hasVideo) {
-        error = "no video stream in " + path;
-        return false;
-    }
-
     AVFormatContext *rawFmt = nullptr;
     int rc = avformat_open_input(&rawFmt, path.c_str(), nullptr, nullptr);
     if (rc < 0) {
@@ -24,8 +16,21 @@ bool VideoDecoder::open(const std::string &path, std::string &error) {
         return false;
     }
     format_.reset(rawFmt);
-    if (avformat_find_stream_info(format_.get(), nullptr) < 0) {
-        error = "stream info failed";
+    rc = avformat_find_stream_info(format_.get(), nullptr);
+    if (rc < 0) {
+        error = "stream info failed (" + path + "): " + fcError(rc);
+        return false;
+    }
+
+    // Probe the ALREADY-OPEN context: the previous flow paid a full
+    // open + find_stream_info twice per source (once inside MediaProbe,
+    // once here) and find_stream_info is the expensive pass - it reads
+    // and parses packets to pin down every stream parameter.
+    if (!MediaProbe::probe(format_.get(), path, info_, error)) {
+        return false;
+    }
+    if (!info_.hasVideo) {
+        error = "no video stream in " + path;
         return false;
     }
 

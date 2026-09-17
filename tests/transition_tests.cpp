@@ -305,11 +305,15 @@ void testDissolves() {
         CHECK(out.at(3, 4, 2) == 104);
 
         const TestImg g = gradient16();
-        const TestImg near = runKind("dissolve.blur", g, b, 0.05);
-        const TestImg cross = runKind("dissolve.cross", g, b, 0.05);
+        // A 16x16 pair (channels16 is the same size as gradient16 - the
+        // engine reads BOTH inputs at a's dimensions, so a mismatched
+        // pair overreads; found by the ASan CI leg).
+        const TestImg gb = channels16();
+        const TestImg near = runKind("dissolve.blur", g, gb, 0.05);
+        const TestImg cross = runKind("dissolve.cross", g, gb, 0.05);
         CHECK(near == cross); // radius = lround(10*0.05*0.95) = 0
 
-        const TestImg mid = runKind("dissolve.blur", g, b, 0.5);
+        const TestImg mid = runKind("dissolve.blur", g, gb, 0.5);
         CHECK(!(mid == cross)); // radius 3 actually blurs
     }
 }
@@ -320,14 +324,14 @@ void testWipes() {
     const bool isB = true;
 
     // Helper: full-frame column/row mapping check.
-    auto columnsAre = [](const TestImg &out, const TestImg &a, const TestImg &b,
+    auto columnsAre = [](const TestImg &out, const TestImg &pa, const TestImg &pb,
                          const std::vector<bool> &wantB) {
         for (int y = 0; y < out.h; ++y) {
             for (int x = 0; x < out.w; ++x) {
                 for (int c = 0; c < 4; ++c) {
                     const uint8_t got = out.at(x, y, c);
                     const uint8_t expect =
-                        wantB[static_cast<size_t>(x)] ? b.at(0, 0, c) : a.at(0, 0, c);
+                        wantB[static_cast<size_t>(x)] ? pb.at(0, 0, c) : pa.at(0, 0, c);
                     CHECK(got == expect);
                 }
             }
