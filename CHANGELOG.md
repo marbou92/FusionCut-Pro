@@ -57,7 +57,16 @@ version stays at 0.1.0 until the first public build.
   caller cancel now reports an empty error - the same contract as the
   exporter - so the app can name "cancelled" instead of a bare
   "Proxy failed:" line. The audio decoder's "stream discovery
-  failed" error carries the path and the FFmpeg error string.
+  failed" error carries the path and the FFmpeg error string. The
+  audio decoder stamps each chunk's pts on the OUTPUT timeline -
+  anchored at the source pts but never allowed to run backwards:
+  resampling upward makes one input frame's output span slightly
+  LONGER than that frame's own pts step (1024 samples at 44.1 kHz
+  turn into 1114-1115 at the 48 kHz mixer target), so raw source pts
+  started the next chunk up to ~9 us before the previous one ended -
+  backwards jumps on a large fraction of chunks that broke the
+  chunk-to-chunk continuity the window mixer's coverage logic and
+  the upsample regression battery rely on.
 - **Deterministic core primitives:** rational frame rates and
   timecode math, fixed-block memory pools, LRU frame-cache eviction -
   integer math and pinned unit tests, identical on every platform.

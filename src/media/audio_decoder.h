@@ -82,6 +82,11 @@ private:
     double seekTarget_ = -1.0; // >= 0 while skipping to the seek target
     bool tailFlushed_ = false; // the end-of-stream resampler flush ran
     double tailPts_ = 0.0;     // expected pts of the next chunk (seconds)
+    // Running end of the pts timeline handed out so far, in seconds: the
+    // value the NEXT emitted chunk must not start before. -1 until the
+    // first chunk anchors it at the source pts. Kept equal to tailPts_
+    // after every emission (see readSamples).
+    double outputPts_ = -1.0;
     // Source geometry the current resampler was built for (0 = unset).
     int resamplerSrcChannels_ = 0;
     int resamplerSrcRate_ = 0;

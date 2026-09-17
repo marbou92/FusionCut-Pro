@@ -84,6 +84,7 @@ bool AudioDecoder::open(const std::string &path, int sampleRate, int channels, s
     seekTarget_ = -1.0;
     tailFlushed_ = false;
     tailPts_ = 0.0;
+    outputPts_ = -1.0;
     return true;
 }
 
@@ -100,6 +101,7 @@ void AudioDecoder::close() {
     seekTarget_ = -1.0;
     tailFlushed_ = false;
     tailPts_ = 0.0;
+    outputPts_ = -1.0;
     resamplerSrcChannels_ = 0;
     resamplerSrcRate_ = 0;
     resamplerSrcFormat_ = -1;
@@ -179,6 +181,7 @@ bool AudioDecoder::seekToSeconds(double seconds, std::string &error) {
     seekTarget_ = seconds;
     tailFlushed_ = false;
     tailPts_ = seconds;
+    outputPts_ = -1.0; // the next emitted chunk re-anchors at its source pts
     return true;
 }
 
@@ -250,8 +253,24 @@ bool AudioDecoder::readSamples(DecodedAudio &out, std::string &error) {
             }
             out.samples.resize(static_cast<size_t>(converted) * channels_);
             out.frames = converted;
-            out.ptsSeconds = ptsSeconds;
-            tailPts_ = ptsSeconds + static_cast<double>(converted) / rate_;
+            // Stamp the chunk's pts on the OUTPUT timeline: anchored at
+            // the source pts, but never allowed to run backwards.
+            // Upsampling stretches one input frame's output slightly
+            // LONGER than that frame's own pts step (1024 samples at
+            // 44.1 kHz turn into 1114-1115 samples at 48 kHz), so raw
+            // source pts made the next chunk start up to ~9 us before
+            // this one ended - a backwards jump on a large fraction of
+            // chunks, which reads downstream as a stalling or
+            // restarting audio timeline. A real source discontinuity
+            // (dropped packets, post-seek entry) jumps the source pts
+            // past the running value and re-anchors right here.
+            double chunkPts = ptsSeconds;
+            if (chunkPts < outputPts_) {
+                chunkPts = outputPts_;
+            }
+            outputPts_ = chunkPts + static_cast<double>(converted) / rate_;
+            out.ptsSeconds = chunkPts;
+            tailPts_ = outputPts_;
             return true;
         }
         if (rc != AVERROR(EAGAIN)) {
@@ -313,7 +332,8 @@ bool AudioDecoder::readSamples(DecodedAudio &out, std::string &error) {
                         out.frames = produced;
                         out.ptsSeconds = tailPts_;
                         tailPts_ += static_cast<double>(produced) / rate_;
-                        return true; // the next call drains to zero below
+                        outputPts_ = tailPts_; // stay in sync with tailPts_
+                        return true;           // the next call drains to zero below
                     }
                 }
                 tailFlushed_ = true;
