@@ -5,13 +5,23 @@ on:
     branches: ["**"]
   pull_request:
 
+# Superseded pushes stop burning runners: a new run for the same branch
+# (or PR merge ref) cancels the previous in-progress one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Third-party actions are pinned to commit SHAs (the comment after each
+# `uses:` names the released tag the SHA was resolved from). Bump them
+# deliberately, not implicitly with a moving tag.
+
 jobs:
   lint:
     name: Format check
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Pinned to the exact version the project formats with, so local and
       # CI results are byte-identical. Bump together with .clang-format.
@@ -22,7 +32,7 @@ jobs:
 
       - name: Check formatting
         run: |
-          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
+          find src tests -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.c' \) -print0 \
             | xargs -0 -r clang-format --dry-run --Werror
 
   core-tests:
@@ -34,7 +44,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Configure (core only, no FFmpeg needed)
         run: cmake -S . -B build -DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=OFF
@@ -53,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Configure (core only, Debug + sanitizers)
         run: >
@@ -73,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install FFmpeg development libraries
         run: |
@@ -108,7 +118,7 @@ jobs:
             libswscale-dev libswresample-dev
 
       - name: Checkout (git >= 2.18 for actions/checkout)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Configure
         run: cmake -S . -B build -DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=ON
@@ -132,10 +142,10 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up MSYS2 (MinGW64, FFmpeg)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MINGW64
           release: true
@@ -165,20 +175,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Qt 5.15 + FFmpeg development packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qtbase5-dev pkg-config libavformat-dev libavcodec-dev \
-            libavutil-dev libswscale-dev libswresample-dev
+            libavutil-dev libswscale-dev libswresample-dev ccache
+
+      - name: Read ccache rotation month
+        run: echo "CCACHE_MONTH=$(date +%Y-%m)" >> "$GITHUB_ENV"
+
+      # The key is unique per run (the post-job save never collides with a
+      # restored entry); restore-keys fall back to the newest cache saved
+      # this month. Rotating the month into the prefix is what expires old
+      # caches: once the calendar rolls over, nothing matches them again.
+      - name: Restore ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-qt-app-ubuntu-${{ env.CCACHE_MONTH }}-${{ github.run_id }}
+          restore-keys: ccache-${{ runner.os }}-qt-app-ubuntu-${{ env.CCACHE_MONTH }}-
 
       - name: Configure
-        run: cmake -S . -B build -DFC_BUILD_APP=ON -DFC_BUILD_MEDIA=ON
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DFC_BUILD_APP=ON
+          -DFC_BUILD_MEDIA=ON
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
         run: cmake --build build --config Release --parallel
+        env:
+          CCACHE_MAXSIZE: "200M"
 
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release

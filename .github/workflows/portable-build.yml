@@ -4,6 +4,11 @@ name: Portable Build
 # all runtime DLLs in one folder - no installer, no registry writes).
 #   - Manual:  Actions tab -> Portable Build -> Run workflow
 #   - Release: pushing a tag named v* attaches the zip to a GitHub Release
+#
+# Least-privilege split: the build job runs with a read-only token; a
+# separate release job - the only one holding contents: write - merely
+# downloads the zip artifact and calls the release API. No third-party
+# release action ever runs inside a job that can write.
 on:
   workflow_dispatch:
   push:
@@ -15,15 +20,15 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     permissions:
-      contents: write # required to attach artifacts to releases (tags only)
+      contents: read # build job is read-only; the separate release job holds write
     defaults:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up MSYS2 (MinGW64, Qt 5.15, FFmpeg)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MINGW64
           release: true
@@ -428,14 +433,37 @@ jobs:
           Write-Host "Packaged $zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}
           if-no-files-found: error
 
-      - name: Attach to GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  release:
+    # Separate least-privilege job: the only place the workflow holds
+    # contents: write, and it runs no project build code - it downloads
+    # the zip artifact the build job uploaded and hands it to the release
+    # API. Tags only; a manual workflow_dispatch run still produces the
+    # downloadable artifact above. (The artifact name carries the version,
+    # so the download matches it by glob pattern.)
+    name: Attach zip to GitHub Release
+    needs: windows-portable
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # required to create the Release and attach the zip
+    steps:
+      # No checkout on purpose: this job deliberately executes zero
+      # repository code.
+      - name: Download portable zip artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          files: ${{ env.ZIP_NAME }}
+          pattern: FusionCutPro-*-win64-portable.zip
+          merge-multiple: true
+          path: artifact
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: artifact/*.zip
