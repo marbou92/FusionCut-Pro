@@ -372,6 +372,67 @@ static void testGuardsAndRevisions() {
     CHECK(m2.clipById(f)->sourceInFrames == 12);
 }
 
+// ---- undo/redo snapshots ----
+static void testSnapshotRestore() {
+    TimelineModel model;
+    model.addTrack("V1", false);
+    model.addTrack("A1", true);
+    const int64_t a = model.addClip(0, "v.mp4", "A", 0, 48, 0);
+    CHECK(a > 0);
+    const uint64_t revAtSnapshot = model.revision();
+
+    // The snapshot is a plain deep copy: mutating afterwards leaves it
+    // frozen at the old state.
+    const TimelineModel snap = model.snapshot();
+    const int64_t b = model.addClip(0, "v.mp4", "B", 48, 96, 48);
+    CHECK(b > 0);
+    CHECK(model.clips().size() == 2);
+    CHECK(snap.clips().size() == 1);
+    CHECK(model.revision() > revAtSnapshot);
+
+    // Restore brings the exact state back...
+    model.restoreSnapshot(snap);
+    CHECK(model.clips().size() == 1);
+    CHECK(model.clipById(a) != nullptr);
+    CHECK(model.clipById(b) == nullptr);
+    CHECK(model.fps() == snap.fps());
+    CHECK(model.tracks().size() == snap.tracks().size());
+    CHECK(model.trackAt(0)->locked == snap.trackAt(0)->locked);
+    CHECK(model.durationFrames() == snap.durationFrames());
+    CHECK(model.masterGainDb() == snap.masterGainDb());
+
+    // ...and the revision stays MONOTONE: views that already saw the
+    // newer revisions must still see the restore as a change (a plain
+    // assignment would run the counter backwards past what they
+    // observed, and the restore would look like a no-op).
+    CHECK(model.revision() > revAtSnapshot);
+
+    // Restoring twice in a row keeps the monotone guarantee.
+    const uint64_t afterFirst = model.revision();
+    model.restoreSnapshot(snap);
+    CHECK(model.revision() > afterFirst);
+
+    // Mutations after a restore keep working.
+    const int64_t c = model.addClip(0, "v.mp4", "C", 48, 96, 48);
+    CHECK(c > 0);
+    CHECK(model.clips().size() == 2);
+
+    // Audio state rides the snapshot: track strips + the master fader.
+    TimelineModel m2;
+    m2.addTrack("A1", true);
+    const int64_t t = m2.addClip(0, "a.wav", "T", 0, 24, 0);
+    CHECK(t > 0);
+    CHECK(m2.setTrackAudio(0, -3.0, 0.5));
+    m2.setMasterGainDb(-6.0);
+    const TimelineModel audioSnap = m2.snapshot();
+    CHECK(m2.setTrackAudio(0, 0.0, 0.0));
+    m2.setMasterGainDb(3.0);
+    m2.restoreSnapshot(audioSnap);
+    CHECK(m2.trackAt(0)->gainDb == -3.0);
+    CHECK(m2.trackAt(0)->pan == 0.5);
+    CHECK(m2.masterGainDb() == -6.0);
+}
+
 int main() {
     testTracks();
     testAddClip();
@@ -386,5 +447,6 @@ int main() {
     testRollEdit();
     testActiveVideoClipAt();
     testGuardsAndRevisions();
+    testSnapshotRestore();
     return testExitCode("timeline");
 }

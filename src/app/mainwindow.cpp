@@ -130,8 +130,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                 rebuildAudioSnapshot();
             }
             playhead_ = audioStartSeconds_ + audioPreview_->playedSeconds();
+            playWall_.restart(); // fresh handoff if the device dies mid-run
         } else {
-            playhead_ += 1.0 / fps_;
+            // The timer interval rounds to whole milliseconds (1000/24
+            // -> 41 ms), so a fixed frame-step per tick made silent
+            // timelines play ~1.7% fast. Advance by the REAL elapsed
+            // wall time instead; a stall (system sleep, debugger stop)
+            // clamps to a quarter second so resume does not teleport
+            // the playhead.
+            double elapsed = playWall_.restart() / 1000.0;
+            if (elapsed > 0.25) {
+                elapsed = 0.25;
+            }
+            playhead_ += elapsed;
             // A device that died mid-run (USB dock unplugged, Bluetooth
             // headset dropped) used to freeze the whole transport: the
             // audio clock stopped but running() stayed true, so every
@@ -261,7 +272,14 @@ void MainWindow::buildDecodeThread() {
                 duration_ = duration;
                 transport_->setMedia(duration_, fps_);
                 updateSequenceDuration();
-                statusBar()->showMessage(summary, 8000);
+                // A probe that belongs to a project open must not
+                // overwrite the "Project loaded" status the open just
+                // showed; import-style loads keep their summary.
+                if (quietProbeStatus_) {
+                    quietProbeStatus_ = false;
+                } else {
+                    statusBar()->showMessage(summary, 8000);
+                }
                 if (pendingAddToken_ != 0 && token == pendingAddToken_ &&
                     !pendingAddClipPath_.isEmpty()) {
                     // Map the SOURCE's own length into sequence frames at
@@ -325,6 +343,9 @@ void MainWindow::buildDecodeThread() {
         // retries the source on the next switch, and requestFrame on a
         // closed decoder no-ops silently, so nothing storms).
         pendingProgramSeek_ = false;
+        // ...and release a project-open's suppressed status so the next
+        // import's probe summary shows again.
+        quietProbeStatus_ = false;
     });
 
     decodeThread_->start();
@@ -427,6 +448,12 @@ void MainWindow::buildProWorkspace() {
         markDirty();
         rebuildAudioSnapshot(); // fader/pan/mute/solo land in the live mix
         timeline_->update();    // mute/solo dimming mirrors the strips
+        // Same as toggleTrackState: un-muting mid-playback when the
+        // device never opened (playback began with zero audio spans)
+        // must bring the mix up instead of leaving silence forever.
+        if (playing_ && audioPreview_ && !audioPreview_->running()) {
+            startAudioPreview();
+        }
     });
     auto *bottomDock = makeDock(tr("Timeline"), bottomTabs, this);
     addDockWidget(Qt::BottomDockWidgetArea, bottomDock);
@@ -620,8 +647,11 @@ void MainWindow::buildProWorkspace() {
                                          .arg(QString::fromStdString(track->name)));
             return;
         }
+        pushUndo();
         if (model_.splitAt(frame, trackIndex)) {
             updateSequenceDuration();
+        } else {
+            cancelUndoPush(); // nothing to split at that frame
         }
     });
     // ---- timeline editing wiring ----
@@ -645,9 +675,11 @@ void MainWindow::buildProWorkspace() {
                                                  .arg(QString::fromStdString(track->name)));
                     return;
                 }
+                pushUndo();
                 if (model_.rollEdit(leftId, rightId, deltaFrames)) {
                     updateSequenceDuration();
                 } else {
+                    cancelUndoPush(); // the rolling edit was rejected
                     statusBar()->showMessage(tr("Rolling edit rejected (boundary limit reached)."));
                 }
             });
@@ -705,8 +737,15 @@ void MainWindow::buildMenus() {
 
     // ---- Edit ----
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
-    addMenuAction(edit, tr("&Undo"), QKeySequence::Undo)->setEnabled(false);
-    addMenuAction(edit, tr("&Redo"), QKeySequence::Redo)->setEnabled(false);
+    // Snapshot-based undo/redo over the timeline model: the actions'
+    // enabled state mirrors the stacks, and the standard Undo/Redo key
+    // sequences (Ctrl+Z / Ctrl+Shift+Z) come with the menu actions.
+    undoAction_ = addMenuAction(edit, tr("&Undo"), QKeySequence::Undo);
+    undoAction_->setEnabled(false);
+    connect(undoAction_, &QAction::triggered, this, [this] { undo(); });
+    redoAction_ = addMenuAction(edit, tr("&Redo"), QKeySequence::Redo);
+    redoAction_->setEnabled(false);
+    connect(redoAction_, &QAction::triggered, this, [this] { redo(); });
     edit->addSeparator();
     addMenuAction(edit, tr("&Keyboard Shortcuts..."))->setEnabled(false);
 
@@ -833,6 +872,12 @@ void MainWindow::importMedia() {
         // clip on the audio lane.
         if (hasAudio && !hasVideo) {
             startPlayback(false);
+            // Track creation is part of the change: a rejected placement
+            // after a lazily created A1 keeps the undo entry (undo
+            // removes the lane); only a no-op at every level pops it.
+            const bool hadAudioTrack = std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                                                   [](const fc::Track &t) { return t.isAudio; });
+            pushUndo(); // one entry covers the track-ensure + the clip
             const int audioTrack = ensureAudioTrack();
             const int64_t frames = std::max<int64_t>(
                 1, static_cast<int64_t>(std::llround(info.durationSeconds() * fps_)));
@@ -844,6 +889,8 @@ void MainWindow::importMedia() {
                     tr("Imported audio-only file: %1 (clip on the audio track)")
                         .arg(item.displayName),
                     8000);
+            } else if (hadAudioTrack) {
+                cancelUndoPush(); // nothing changed at any level
             }
             updateSequenceDuration();
             timeline_->setModel(&model_);
@@ -886,18 +933,35 @@ void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFram
     // video lanes (shifting V1 off index 1) and loaded projects can
     // carry any track order - the old hardcoded index 1 silently
     // dropped the clip (an out-of-range addClip is a no-op).
+    // One undo entry covers the video clip, the audio rider, and a
+    // lazily created track. Track creation is part of the change: a
+    // rejected placement after a created lane keeps the entry (undo
+    // removes the lane); only a no-op at every level pops it.
+    const bool hadVideoTrack =
+        std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                    [](const fc::Track &t) { return !t.isAudio && !t.isText; });
+    const bool hadAudioTrack = std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                                           [](const fc::Track &t) { return t.isAudio; });
+    pushUndo();
     const int videoTrack = firstVideoTrack();
     const int64_t start = static_cast<int64_t>(std::llround(playhead_ * fps_));
     const int64_t out = std::max<int64_t>(1, sourceOutFrames);
     const QString label = QFileInfo(sourcePath).completeBaseName();
-    model_.addClip(videoTrack, sourcePath.toStdString(), label.toStdString(), 0, out, start);
+    bool placedAny = model_.addClip(videoTrack, sourcePath.toStdString(), label.toStdString(), 0,
+                                    out, start) > 0;
     if (withAudio) {
         // The sound track rides along: an audio clip with the SAME
         // source range and placement on the audio lane under the video
         // clip (moves/trims independently - the audio fades editor
         // lives in Effect Controls while it is selected).
         const int audioTrack = ensureAudioTrack();
-        model_.addClip(audioTrack, sourcePath.toStdString(), label.toStdString(), 0, out, start);
+        if (model_.addClip(audioTrack, sourcePath.toStdString(), label.toStdString(), 0, out,
+                           start) > 0) {
+            placedAny = true;
+        }
+    }
+    if (!placedAny && hadVideoTrack && (!withAudio || hadAudioTrack)) {
+        cancelUndoPush(); // nothing changed at any level
     }
     updateSequenceDuration();
     rebuildAudioSnapshot();
@@ -917,8 +981,11 @@ void MainWindow::splitAtPlayhead() {
                                      .arg(QString::fromStdString(track->name)));
         return;
     }
+    pushUndo();
     if (model_.splitAt(frame, trackIndex)) {
         updateSequenceDuration();
+    } else {
+        cancelUndoPush(); // nothing to split at that frame
     }
 }
 
@@ -934,6 +1001,9 @@ void MainWindow::deleteSelectedClip() {
         }
     }
     // with the Ripple toggle on, the gap closes; otherwise classic.
+    // Either path mutates (the clip id exists - checked above), so the
+    // undo entry always lands.
+    pushUndo();
     if (!(timeline_ && timeline_->isRippleEnabled() && model_.rippleDelete(selectedClipId_))) {
         model_.removeClip(selectedClipId_);
     }
@@ -964,9 +1034,11 @@ void MainWindow::moveClipTo(int64_t clipId, int trackIndex, int64_t startFrame) 
                                      .arg(QString::fromStdString(origin->name)));
         return;
     }
+    pushUndo();
     if (model_.moveClipTo(clipId, trackIndex, startFrame)) {
         updateSequenceDuration();
     } else {
+        cancelUndoPush(); // the drop was rejected
         statusBar()->showMessage(tr("Move rejected - the drop would overlap another clip."));
     }
 }
@@ -981,6 +1053,7 @@ void MainWindow::trimClip(int64_t clipId, int edge, int64_t deltaFrames) {
             tr("Track %1 is locked - trim rejected.").arg(QString::fromStdString(track->name)));
         return;
     }
+    pushUndo();
     bool ok = false;
     if (edge == 1 && timeline_ && timeline_->isRippleEnabled()) {
         ok = model_.rippleTrimClipEnd(clipId, deltaFrames);
@@ -992,6 +1065,7 @@ void MainWindow::trimClip(int64_t clipId, int edge, int64_t deltaFrames) {
     if (ok) {
         updateSequenceDuration();
     } else {
+        cancelUndoPush(); // the trim was rejected
         statusBar()->showMessage(tr("Trim rejected - the clip cannot shrink/extend further."));
     }
 }
@@ -1017,6 +1091,12 @@ void MainWindow::toggleTrackState(int row, int which) {
     default:
         return;
     }
+    // A toggle that changes nothing is not an edit: no revision bump
+    // (the model no-ops it), no dirty flag, no undo entry.
+    if (locked == track->locked && muted == track->muted && solo == track->solo) {
+        return;
+    }
+    pushUndo();
     model_.setTrackState(row, locked, muted, solo);
     // The state is persisted in the .fcp - close used to lose it
     // silently because no dirty flag was raised; the mixer strips also
@@ -1026,6 +1106,14 @@ void MainWindow::toggleTrackState(int row, int which) {
         mixer_->refreshFromModel(&model_);
     }
     timeline_->update();
+    // Un-muting/un-soloing the only audible track mid-playback must
+    // bring the mix up: playback that began with zero audio spans
+    // never opened the device (startAudioPreview bails before begin),
+    // and the tick's revision check only REBUILDS the snapshot - it
+    // never starts the device.
+    if (playing_ && audioPreview_ && !audioPreview_->running()) {
+        startAudioPreview();
+    }
     QString state;
     switch (which) {
     case 0:
@@ -1095,7 +1183,12 @@ void MainWindow::startPlayback(bool playing) {
             playhead_ = 0.0;
             requestFrameAt(0.0);
         }
-        playClock_->start(static_cast<int>(1000.0 / fps_));
+        // qRound instead of truncation: 1000/24 truncates to 41 ms
+        // (24.4 Hz) where 42 ms (23.8 Hz) is the nearer cadence. The
+        // tick advances by MEASURED wall time anyway - this interval
+        // only sets the refresh granularity.
+        playClock_->start(qRound(1000.0 / fps_));
+        playWall_.start();
         startAudioPreview();
     } else {
         playClock_->stop();
@@ -1372,6 +1465,12 @@ int MainWindow::ensureTextTrack() {
 }
 
 void MainWindow::addTextClip() {
+    // One undo entry covers the text track (if one gets created) and
+    // the clip. A rejected placement still keeps the entry when the
+    // call created the lane - undo then removes the empty lane.
+    const bool hadTextTrack = std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                                          [](const fc::Track &t) { return t.isText; });
+    pushUndo();
     const int textTrack = ensureTextTrack();
 
     // Default document: a centered 72 px white title for 4 s.
@@ -1395,6 +1494,9 @@ void MainWindow::addTextClip() {
     }
     const int64_t id = model_.addTextClip(textTrack, doc, start, duration);
     if (id <= 0) {
+        if (hadTextTrack) {
+            cancelUndoPush(); // no lane was created and nothing changed
+        }
         statusBar()->showMessage(tr("Could not add the text clip (the text track is full)."), 4000);
         return;
     }
@@ -1665,6 +1767,12 @@ void MainWindow::importCaptions() {
         return;
     }
 
+    // One undo entry covers the track (if one gets created) and EVERY
+    // cue of the import; when the track had to be created, it stays
+    // part of the change even if every cue is skipped.
+    const bool hadTextTrack = std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                                          [](const fc::Track &t) { return t.isText; });
+    pushUndo();
     const int track = ensureTextTrack();
     int added = 0;
     int skipped = 0;
@@ -1693,6 +1801,9 @@ void MainWindow::importCaptions() {
             continue;
         }
         ++added;
+    }
+    if (added == 0 && hadTextTrack) {
+        cancelUndoPush(); // no cue landed and no lane was created
     }
     updateSequenceDuration();
     timeline_->update();
@@ -1761,15 +1872,20 @@ void MainWindow::exportCaptions() {
     if (path.isEmpty()) {
         return;
     }
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    // Atomic save (the same QSaveFile discipline as saveProject): a
+    // crash or full disk mid-write leaves any previous subtitle file
+    // intact instead of a truncated one.
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
         QMessageBox::warning(this, tr("Export Subtitles"),
                              tr("Could not open %1 for writing.").arg(path));
         return;
     }
     const std::string out = fc::writeSrt(cues);
     if (file.write(out.data(), static_cast<qint64>(out.size())) !=
-        static_cast<qint64>(out.size())) {
+            static_cast<qint64>(out.size()) ||
+        !file.commit()) {
+        file.cancelWriting();
         QMessageBox::warning(this, tr("Export Subtitles"),
                              tr("Writing %1 failed (disk full or permissions?).").arg(path));
         return;
@@ -1834,8 +1950,10 @@ void MainWindow::addTransitionToSelectedClip(const QString &kind) {
     if (want > cap) {
         want = cap;
     }
+    pushUndo();
     const int64_t id = model_.addTransition(clip->id, right->id, kind.toStdString(), want);
     if (id <= 0) {
+        cancelUndoPush(); // the transition was rejected
         statusBar()->showMessage(tr("Transition rejected - unknown kind or invalid duration."),
                                  6000);
         return;
@@ -1930,6 +2048,110 @@ void MainWindow::updateKeyframePanels() {
     } else {
         effectControls_->setClipFrame(-1);
         colorPanel_->setClipFrame(-1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// undo / redo (snapshot-based).
+// ---------------------------------------------------------------------------
+
+void MainWindow::pushUndo() {
+    undoStack_.push_back(model_);
+    // Bound the memory: a snapshot is a whole model copy (clips with
+    // text documents + effect stacks), and 50 edits of a heavy project
+    // stay far inside the desktop budget.
+    if (undoStack_.size() > kUndoDepthCap) {
+        undoStack_.erase(undoStack_.begin());
+    }
+    redoStack_.clear(); // a new edit kills the redo branch
+    updateUndoActions();
+}
+
+void MainWindow::cancelUndoPush() {
+    // The mutation after pushUndo() was rejected: drop the entry again.
+    // The redo branch stays cleared - a rejected edit is still a user
+    // action that invalidates it.
+    if (!undoStack_.empty()) {
+        undoStack_.pop_back();
+    }
+    updateUndoActions();
+}
+
+void MainWindow::undo() {
+    if (undoStack_.empty()) {
+        return;
+    }
+    startPlayback(false); // the restore re-anchors the whole transport
+    redoStack_.push_back(model_);
+    model_.restoreSnapshot(undoStack_.back());
+    undoStack_.pop_back();
+    afterUndoRedo();
+    statusBar()->showMessage(tr("Undo."), 3000);
+}
+
+void MainWindow::redo() {
+    if (redoStack_.empty()) {
+        return;
+    }
+    startPlayback(false);
+    undoStack_.push_back(model_);
+    model_.restoreSnapshot(redoStack_.back());
+    redoStack_.pop_back();
+    afterUndoRedo();
+    statusBar()->showMessage(tr("Redo."), 3000);
+}
+
+void MainWindow::afterUndoRedo() {
+    // The restored model is authoritative - mirror a project load's
+    // panel reset (minus the file/library round trip: the media library
+    // is not part of the undoable document).
+    fps_ = model_.fps();
+    selectedClipId_ = -1;
+    selectedTransitionId_ = -1;
+    lastProgramClipId_ = -1;
+    frameClipId_ = -1;
+    rawProgramFrame_ = QImage();
+    clearTextLayers(); // layers belong to the pre-restore clips
+    heldIncomingFrame_ = QImage();
+    heldIncomingClipId_ = -1;
+    pendingBFirstClipId_ = -1;
+    pendingBFirst_ = false;
+    bRequestInFlight_ = false;
+    bFailedClipId_ = -1;
+    timeline_->clearSelection();
+    timeline_->clearTransitionSelection();
+    effectControls_->setStack(-1, {});
+    effectControls_->setClipFrame(-1);
+    effectControls_->setTransition(-1, QString(), 0, 1, QString(), fps_);
+    colorPanel_->setClip(-1, {});
+    colorPanel_->setClipFrame(-1);
+    textPanel_->setClip(-1, nullptr);
+    mixer_->refreshFromModel(&model_); // the restored strips
+    rebuildAudioSnapshot();
+    updateUndoActions(); // the swap moved both stacks
+    // The extent may have shrunk below the playhead (an undone import
+    // can leave the timeline empty): clamp before the funnel re-reads
+    // it - playback/stepping follow sequenceDuration_.
+    const double seq = model_.durationSeconds();
+    if (playhead_ > seq) {
+        playhead_ = seq;
+    }
+    updateSequenceDuration(); // transport + transition editor + dirty
+    timeline_->setModel(&model_);
+    timeline_->update();
+    // Re-resolve the monitor at the (clamped) playhead from the
+    // restored timeline - the frame it showed belongs to the old
+    // model. On an empty restored timeline this re-resolves to the
+    // idle source (a closed decoder no-ops silently).
+    requestFrameAt(playhead_);
+}
+
+void MainWindow::updateUndoActions() {
+    if (undoAction_) {
+        undoAction_->setEnabled(!undoStack_.empty());
+    }
+    if (redoAction_) {
+        redoAction_->setEnabled(!redoStack_.empty());
     }
 }
 
@@ -2037,6 +2259,10 @@ void MainWindow::openProject() {
     projectPath_ = path;
     dirty_ = false;
     updateWindowTitle();
+    // A different document: the edit history of the old one is void.
+    undoStack_.clear();
+    redoStack_.clear();
+    updateUndoActions();
     // The loaded project's fps is authoritative - the session either
     // had no media yet or a DIFFERENT sequence; sync the shell to the
     // model (the old code kept whatever fps the last probe adopted).
@@ -2103,6 +2329,10 @@ void MainWindow::openProject() {
         }
         const fc::Track *track = model_.trackAt(clip.trackIndex);
         if (track && !track->isAudio) {
+            // Armed only when a load actually happens: this probe's
+            // summary must not clobber the "Project loaded" status
+            // below (a failed load releases it in the failed handler).
+            quietProbeStatus_ = true;
             loadClip(QString::fromStdString(clip.sourcePath));
             break;
         }

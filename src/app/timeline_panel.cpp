@@ -30,6 +30,10 @@ constexpr int kToolRowHeight = 30;
 constexpr int kHScrollHeight = 14;
 constexpr int kLanePad = 160;  // tail padding past the last frame (px)
 constexpr int kEdgeGrabPx = 8; // edge-trim / roll grab zone
+// Ruler label-step floor: each label draws into a 96 px rect anchored
+// 3 px right of its tick, so two adjacent labels need at least
+// 96 + 3 px between their ticks or the timecodes overlap.
+constexpr double kRulerLabelMinPx = 99.0;
 
 const QColor kPanelBg(0x1B, 0x1B, 0x1B);
 const QColor kVideoTrack(0x2B, 0x30, 0x3A);
@@ -252,6 +256,11 @@ double TimelinePanel::trackDimFactor(int index) const {
 
 void TimelinePanel::setModel(const fc::TimelineModel *model) {
     model_ = model;
+    // The selection ids belonged to the previous model content: a
+    // replacement model may not contain them (or may reuse the ids for
+    // different clips), so the highlight must not survive the swap.
+    selectedClipId_ = -1;
+    selectedTransitionId_ = -1;
     updateScrollRange();
     update();
 }
@@ -402,8 +411,11 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     double step = 1.0;
     // One step is `step` seconds; its pixel distance is step * fps * pps
     // (pps_ is pixels-per-frame). Without the fps factor the ticks land
-    // fps-times sparser than the 70 px target.
-    while (step * fps_ * pps_ < 70.0) {
+    // fps-times sparser than the 70 px target. The ladder exits at the
+    // label spacing floor (not 70 px) so adjacent timecode labels can
+    // never overlap: a 70-96 px step would leave the 96 px label rect
+    // of one tick running into the text of the next.
+    while (step * fps_ * pps_ < kRulerLabelMinPx) {
         step *= 5.0;
     }
     const fc::FrameRate rate{static_cast<uint32_t>(std::lround(fps_ * 1000.0)), 1000, false};
@@ -655,6 +667,15 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
         resetDrag();
         return;
     }
+    // Locked lanes must never start the drag lifecycle (no ghost, no
+    // capture): the press behaves as a no-clip interaction and falls
+    // through to the playhead scrub. The release-side lock checks stay
+    // as a safety net for models that change mid-drag.
+    const fc::Track *track = model_->trackAt(clip->trackIndex);
+    if (track && track->locked) {
+        resetDrag();
+        return;
+    }
     dragClipId_ = clip->id;
     dragOriginStart_ = clip->timelineStart;
     dragOriginEnd_ = clip->timelineEnd();
@@ -665,11 +686,16 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
     const int contentX = pos.x() + scrollX_;
     const int clipX0 = frameToX(clip->timelineStart);
     const int clipX1 = frameToX(clip->timelineEnd());
+    // Adaptive edge zones: a clip narrower than 3 * kEdgeGrabPx would
+    // otherwise be ALL edge (no grabbable body), so each zone shrinks
+    // to a third of the clip's pixel width and the middle stays a
+    // move handle.
+    const int edgePx = std::min(kEdgeGrabPx, (clipX1 - clipX0) / 3);
 
     // Alt + edge press where two clips touch => rolling edit on that
     // boundary; plain edge press => trim; body press => move.
     const bool altHeld = QGuiApplication::queryKeyboardModifiers() & Qt::AltModifier;
-    if (contentX - clipX0 <= kEdgeGrabPx && clipX1 - contentX > kEdgeGrabPx) {
+    if (contentX - clipX0 <= edgePx && clipX1 - contentX > edgePx) {
         const fc::Clip *left = nullptr;
         // Left edge of THIS clip: it is the right side of the pair.
         for (const fc::Clip &other : model_->clips()) {
@@ -691,7 +717,7 @@ void TimelinePanel::beginClipDrag(const QPoint &pos) {
             dragMode_ = DragMode::TrimStart;
             ghostStart_ = clip->timelineStart;
         }
-    } else if (clipX1 - contentX <= kEdgeGrabPx) {
+    } else if (clipX1 - contentX <= edgePx) {
         const fc::Clip *right = rightNeighborOf(clip);
         if (altHeld && right) {
             dragMode_ = DragMode::RollBoundary;
@@ -744,14 +770,23 @@ void TimelinePanel::mousePressEvent(QMouseEvent *event) {
         return;
     }
 
-    if (x < kHeaderWidth || row < 0 || y > areaHeight() + contentTop()) {
+    // The ruler band (between the tool row and the lanes) is a seek
+    // surface: a press there falls through to the same playhead scrub
+    // the empty-lane path uses below (and mouse-move dragging from the
+    // ruler keeps scrubbing through the existing move handler).
+    const bool inRuler = y >= contentTop() && y < contentTop() + kRulerHeight;
+    if (x < kHeaderWidth || (row < 0 && !inRuler) || y > areaHeight() + contentTop()) {
         resetDrag();
         return;
     }
 
     const int64_t frame = xToFrame(x);
     if (razorMode_) {
-        emit splitRequested(row, frame);
+        // Razor splits need a lane; a ruler click in razor mode stays a
+        // no-op (as it was before the ruler learned to seek).
+        if (row >= 0) {
+            emit splitRequested(row, frame);
+        }
         return;
     }
 
@@ -796,6 +831,14 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
     }
 
     if (dragMode_ != DragMode::None && model_) {
+        // The implicit grab can be lost (system gesture, window switch):
+        // without the button there will be no release to commit from,
+        // so resolve the drag exactly the way a release would instead
+        // of ghosting forever.
+        if (!(event->buttons() & Qt::LeftButton)) {
+            finishDrag();
+            return;
+        }
         const fc::Clip *clip = model_->clipById(dragClipId_);
         if (!clip) {
             resetDrag();
@@ -855,7 +898,10 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
             const int contentX = x + scrollX_; // frameToX is content-space
             const int x0 = frameToX(clip->timelineStart);
             const int x1 = frameToX(clip->timelineEnd());
-            const bool nearEdge = (contentX - x0 <= kEdgeGrabPx) || (x1 - contentX <= kEdgeGrabPx);
+            // Same adaptive zone as beginClipDrag: the cursor must not
+            // advertise an edge drag where the body grab now lives.
+            const int edgePx = std::min(kEdgeGrabPx, (x1 - x0) / 3);
+            const bool nearEdge = (contentX - x0 <= edgePx) || (x1 - contentX <= edgePx);
             const fc::Track *track = model_->trackAt(clip->trackIndex);
             setCursor(track && track->locked ? Qt::ForbiddenCursor
                                              : (nearEdge ? Qt::SizeHorCursor : Qt::ArrowCursor));
@@ -865,8 +911,8 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
     }
 }
 
-void TimelinePanel::mouseReleaseEvent(QMouseEvent *event) {
-    if (event->button() != Qt::LeftButton || dragMode_ == DragMode::None || !model_) {
+void TimelinePanel::finishDrag() {
+    if (dragMode_ == DragMode::None || !model_) {
         resetDrag();
         return;
     }
@@ -918,6 +964,14 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent *event) {
         break;
     }
     resetDrag();
+}
+
+void TimelinePanel::mouseReleaseEvent(QMouseEvent *event) {
+    if (event->button() != Qt::LeftButton || dragMode_ == DragMode::None || !model_) {
+        resetDrag();
+        return;
+    }
+    finishDrag();
 }
 
 void TimelinePanel::leaveEvent(QEvent *event) {

@@ -385,46 +385,95 @@ void applyChromatic(const EffectInstance &fx, uint8_t *rgba, int w, int h) {
     }
 }
 
+// One horizontal sliding-window box pass (source -> destination, RGB
+// only): each output pixel averages the taps of a radius-r window
+// clamped to the row, out-of-range taps replicating the border pixel.
+// Sliding the window one pixel right drops the sample leaving the
+// clamped window and adds the one entering, so a pass is O(w * h) in
+// the radius - exact integer arithmetic, bit-identical to re-summing
+// every tap. src and dst must not alias.
+void boxPassH(const uint8_t *src, uint8_t *dst, int w, int h, int r) {
+    const int window = 2 * r + 1;
+    for (int y = 0; y < h; ++y) {
+        const uint8_t *row = src + static_cast<size_t>(y) * static_cast<size_t>(w) * 4;
+        int sum[3] = {0, 0, 0};
+        // Window at x = 0: the r taps left of the row replicate pixel 0.
+        for (int k = 0; k <= r; ++k) {
+            const size_t i = static_cast<size_t>(std::min(k, w - 1)) * 4;
+            sum[0] += row[i];
+            sum[1] += row[i + 1];
+            sum[2] += row[i + 2];
+        }
+        for (int c = 0; c < 3; ++c) {
+            sum[c] += r * row[c];
+        }
+        for (int x = 0; x < w; ++x) {
+            Px p = pxAt(dst, w, x, y);
+            *p.r = clampByte(std::lround(double(sum[0]) / window));
+            *p.g = clampByte(std::lround(double(sum[1]) / window));
+            *p.b = clampByte(std::lround(double(sum[2]) / window));
+            if (x + 1 < w) {
+                // Slide to x + 1: one tap of clamp(x - r) leaves, one of
+                // clamp(x + r + 1) enters.
+                const size_t leave = static_cast<size_t>(std::max(x - r, 0)) * 4;
+                const size_t enter = static_cast<size_t>(std::min(x + r + 1, w - 1)) * 4;
+                sum[0] += row[enter] - row[leave];
+                sum[1] += row[enter + 1] - row[leave + 1];
+                sum[2] += row[enter + 2] - row[leave + 2];
+            }
+        }
+    }
+}
+
+// One vertical sliding-window box pass (source -> destination, RGB
+// only), the column-wise twin of boxPassH. src and dst must not alias.
+void boxPassV(const uint8_t *src, uint8_t *dst, int w, int h, int r) {
+    const int window = 2 * r + 1;
+    for (int x = 0; x < w; ++x) {
+        int sum[3] = {0, 0, 0};
+        // Window at y = 0: the r taps above the column replicate row 0.
+        for (int k = 0; k <= r; ++k) {
+            const size_t i = (static_cast<size_t>(std::min(k, h - 1)) * w + x) * 4;
+            sum[0] += src[i];
+            sum[1] += src[i + 1];
+            sum[2] += src[i + 2];
+        }
+        for (int c = 0; c < 3; ++c) {
+            sum[c] += r * src[x * 4 + c];
+        }
+        for (int y = 0; y < h; ++y) {
+            Px p = pxAt(dst, w, x, y);
+            *p.r = clampByte(std::lround(double(sum[0]) / window));
+            *p.g = clampByte(std::lround(double(sum[1]) / window));
+            *p.b = clampByte(std::lround(double(sum[2]) / window));
+            if (y + 1 < h) {
+                // Slide to y + 1: one tap of clamp(y - r) leaves, one of
+                // clamp(y + r + 1) enters.
+                const size_t leave = (static_cast<size_t>(std::max(y - r, 0)) * w + x) * 4;
+                const size_t enter = (static_cast<size_t>(std::min(y + r + 1, h - 1)) * w + x) * 4;
+                sum[0] += src[enter] - src[leave];
+                sum[1] += src[enter + 1] - src[leave + 1];
+                sum[2] += src[enter + 2] - src[leave + 2];
+            }
+        }
+    }
+}
+
 // Separable box blur over RGB (alpha untouched). Two passes with edge
-// clamping; uniform images are exact identities.
+// clamping; uniform images are exact identities. Each pass runs a
+// sliding-window running sum (O(w*h), independent of the radius):
+// stepping the window drops the sample leaving the clamped window and
+// adds the one entering - exact integer arithmetic, bit-identical to
+// re-summing every tap.
 void boxBlurRGBA(uint8_t *rgba, int w, int h, int radius) {
     const int r = std::max(1, radius);
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
     std::vector<uint8_t> src(rgba, rgba + n);
-    const int window = 2 * r + 1;
     // Horizontal: src -> rgba.
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            int sum[3] = {0, 0, 0};
-            for (int k = -r; k <= r; ++k) {
-                const size_t i = (static_cast<size_t>(y) * w + clampIdx(x + k, 0, w - 1)) * 4;
-                sum[0] += src[i];
-                sum[1] += src[i + 1];
-                sum[2] += src[i + 2];
-            }
-            Px p = pxAt(rgba, w, x, y);
-            *p.r = clampByte(std::lround(double(sum[0]) / window));
-            *p.g = clampByte(std::lround(double(sum[1]) / window));
-            *p.b = clampByte(std::lround(double(sum[2]) / window));
-        }
-    }
+    boxPassH(src.data(), rgba, w, h, r);
     // Vertical: rgba -> src, then copy back.
     std::memcpy(src.data(), rgba, n);
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            int sum[3] = {0, 0, 0};
-            for (int k = -r; k <= r; ++k) {
-                const size_t i = (static_cast<size_t>(clampIdx(y + k, 0, h - 1)) * w + x) * 4;
-                sum[0] += src[i];
-                sum[1] += src[i + 1];
-                sum[2] += src[i + 2];
-            }
-            Px p = pxAt(rgba, w, x, y);
-            *p.r = clampByte(std::lround(double(sum[0]) / window));
-            *p.g = clampByte(std::lround(double(sum[1]) / window));
-            *p.b = clampByte(std::lround(double(sum[2]) / window));
-        }
-    }
+    boxPassV(src.data(), rgba, w, h, r);
 }
 
 void applyBoxBlur(const EffectInstance &fx, uint8_t *rgba, int w, int h) {
@@ -919,27 +968,13 @@ void applyHalftone(const EffectInstance &fx, uint8_t *rgba, int w, int h) {
     }
 }
 
-// Horizontal-only box average (one separable axis of the box blur).
+// Horizontal-only box average (one separable axis of the box blur),
+// running the same sliding-window pass as boxBlurRGBA.
 void applyMotionBlurH(const EffectInstance &fx, uint8_t *rgba, int w, int h) {
     const int r = std::max(1, static_cast<int>(std::lround(fx.param("radius"))));
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
     std::vector<uint8_t> src(rgba, rgba + n);
-    const int window = 2 * r + 1;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            int sum[3] = {0, 0, 0};
-            for (int k = -r; k <= r; ++k) {
-                const size_t i = (static_cast<size_t>(y) * w + clampIdx(x + k, 0, w - 1)) * 4;
-                sum[0] += src[i];
-                sum[1] += src[i + 1];
-                sum[2] += src[i + 2];
-            }
-            Px p = pxAt(rgba, w, x, y);
-            *p.r = clampByte(std::lround(double(sum[0]) / window));
-            *p.g = clampByte(std::lround(double(sum[1]) / window));
-            *p.b = clampByte(std::lround(double(sum[2]) / window));
-        }
-    }
+    boxPassH(src.data(), rgba, w, h, r);
 }
 
 // Vertical-only box average.
@@ -947,22 +982,7 @@ void applyMotionBlurV(const EffectInstance &fx, uint8_t *rgba, int w, int h) {
     const int r = std::max(1, static_cast<int>(std::lround(fx.param("radius"))));
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
     std::vector<uint8_t> src(rgba, rgba + n);
-    const int window = 2 * r + 1;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            int sum[3] = {0, 0, 0};
-            for (int k = -r; k <= r; ++k) {
-                const size_t i = (static_cast<size_t>(clampIdx(y + k, 0, h - 1)) * w + x) * 4;
-                sum[0] += src[i];
-                sum[1] += src[i + 1];
-                sum[2] += src[i + 2];
-            }
-            Px p = pxAt(rgba, w, x, y);
-            *p.r = clampByte(std::lround(double(sum[0]) / window));
-            *p.g = clampByte(std::lround(double(sum[1]) / window));
-            *p.b = clampByte(std::lround(double(sum[2]) / window));
-        }
-    }
+    boxPassV(src.data(), rgba, w, h, r);
 }
 
 // Zoom (radial) blur: average of 8 nearest-neighbor samples along the ray

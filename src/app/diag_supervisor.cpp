@@ -28,6 +28,10 @@ constexpr int kMaxVisited = 512;
 constexpr int kMaxDepth = 24;
 constexpr int kMaxMods = 400;
 constexpr int kMaxExcs = 128;
+// Bounded wait after TerminateProcess: 5 quiet ticks of the 2 s
+// WaitForDebugEvent timeout (~10 s) for the EXIT_PROCESS event to
+// arrive before the watch gives up and reports killStuck.
+constexpr int kMaxKillWaitTries = 5;
 
 struct Visited {
     char name[256];
@@ -182,7 +186,13 @@ void walkImports(HMODULE h, const char *contextName, int depth) {
 
     auto imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(reinterpret_cast<BYTE *>(h) +
                                                            dir.VirtualAddress);
-    for (; imp->Name != 0; ++imp) {
+    // The directory holds exactly dir.Size bytes of descriptors; a
+    // corrupt / truncated image must not walk past that bound (the
+    // terminator imp->Name == 0 never arrives and the loop would read
+    // outside the mapped image). Cap the iterations at the descriptor
+    // count the directory can physically hold.
+    const SIZE_T maxDescriptors = dir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    for (SIZE_T i = 0; i < maxDescriptors && imp->Name != 0; ++i, ++imp) {
         const char *name = reinterpret_cast<const char *>(reinterpret_cast<BYTE *>(h) + imp->Name);
         if (alreadyVisited(name))
             continue;
@@ -335,6 +345,7 @@ struct WatchResult {
     DWORD exitCode;
     int fatalIdx; // index into g_excs of the second-chance exception (-1)
     DWORD spawnErr;
+    bool killStuck; // TerminateProcess never produced EXIT_PROCESS; we bailed
 };
 
 void runWatch(const char *selfPath, const char *workDir, WatchResult &res) {
@@ -343,6 +354,7 @@ void runWatch(const char *selfPath, const char *workDir, WatchResult &res) {
     res.exitCode = 0;
     res.fatalIdx = -1;
     res.spawnErr = 0;
+    res.killStuck = false;
 
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
@@ -368,6 +380,7 @@ void runWatch(const char *selfPath, const char *workDir, WatchResult &res) {
     bool exited = false;
     bool weKilled = false;
     bool killAfter = false;
+    int killWaitTries = 0; // bounded wait for the EXIT_PROCESS drain
 
     for (;;) {
         DEBUG_EVENT ev;
@@ -388,9 +401,18 @@ void runWatch(const char *selfPath, const char *workDir, WatchResult &res) {
                 weKilled = true;
             }
             if (weKilled) {
-                // Loop once more so the EXIT_PROCESS_DEBUG_EVENT drains.
+                // Loop again so the EXIT_PROCESS_DEBUG_EVENT drains.
+                // TerminateProcess is asynchronous: the exit event
+                // normally follows within one wait tick, but a process
+                // stuck in an unkillable kernel call would spin here
+                // forever (re-killing every 2 s). Bail out after a
+                // bounded number of retries and report it.
                 if (exited)
                     break;
+                if (++killWaitTries > kMaxKillWaitTries) {
+                    res.killStuck = true;
+                    break;
+                }
             }
             continue;
         }
@@ -430,10 +452,25 @@ void runWatch(const char *selfPath, const char *workDir, WatchResult &res) {
         case CREATE_PROCESS_DEBUG_EVENT:
             recordModule((unsigned long long)(uintptr_t)ev.u.CreateProcessInfo.lpBaseOfImage,
                          ev.u.CreateProcessInfo.hFile);
+            // The DEBUG_EVENT contract hands these handles to the
+            // DEBUGGER: every one left open is a leak, and the DLL-load
+            // events below fire dozens of times per watch. recordModule
+            // consumes hFile synchronously, so all of them can close
+            // here (hFile may be NULL on some systems; CloseHandle of a
+            // NULL handle would clobber GetLastError, hence the guards).
+            if (ev.u.CreateProcessInfo.hFile &&
+                ev.u.CreateProcessInfo.hFile != INVALID_HANDLE_VALUE)
+                CloseHandle(ev.u.CreateProcessInfo.hFile);
+            if (ev.u.CreateProcessInfo.hProcess)
+                CloseHandle(ev.u.CreateProcessInfo.hProcess);
+            if (ev.u.CreateProcessInfo.hThread)
+                CloseHandle(ev.u.CreateProcessInfo.hThread);
             break;
         case LOAD_DLL_DEBUG_EVENT:
             recordModule((unsigned long long)(uintptr_t)ev.u.LoadDll.lpBaseOfDll,
                          ev.u.LoadDll.hFile);
+            if (ev.u.LoadDll.hFile && ev.u.LoadDll.hFile != INVALID_HANDLE_VALUE)
+                CloseHandle(ev.u.LoadDll.hFile);
             break;
         case EXIT_PROCESS_DEBUG_EVENT:
             res.exitCode = ev.u.ExitProcess.dwExitCode;
@@ -478,6 +515,13 @@ void logWatch(const WatchResult &res) {
         return;
     }
     logLine("");
+    if (res.killStuck) {
+        logLine("NOTE: the debuggee ignored TerminateProcess for ~10 s after the watch");
+        logLine("gave up waiting for EXIT_PROCESS_DEBUG_EVENT (stuck in an unkillable");
+        logLine("kernel call?). The verdict below is based on the events seen before");
+        logLine("the bail-out, and the child may still be alive.");
+        logLine("");
+    }
 
     char line[1200];
     snprintf(line, sizeof(line), "Module load trail (%d modules):", g_modCount);

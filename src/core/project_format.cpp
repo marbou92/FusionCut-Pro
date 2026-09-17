@@ -251,7 +251,17 @@ private:
                         }
                         if (lo >= 0xDC00 && lo <= 0xDFFF) {
                             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        } else {
+                            // Not a pair: back out so the second escape
+                            // decodes on its own; the high surrogate is
+                            // reported as U+FFFD below.
+                            pos_ -= 6;
                         }
+                    }
+                    if (cp >= 0xD800 && cp <= 0xDFFF) {
+                        // A lone surrogate is not a Unicode scalar value:
+                        // emit the replacement character, never CESU-8.
+                        cp = 0xFFFD;
                     }
                     appendUtf8(out, cp);
                     break;
@@ -408,9 +418,11 @@ void appendEscaped(std::string &out, const std::string &in) {
     out += '"';
 }
 
-// Integral values print exactly; others use %.10g (shortest sensible,
-// round-trips every value this format ever stores). Locale-independent:
-// the C locale is never changed by the app or its dependencies.
+// Integral values print exactly; others use the shortest %g form that
+// reads back bit-exactly through strtod (1..17 significant digits; 17
+// always round-trips). NTSC rates (30000/1001 & co.) need 16-17 digits,
+// which the old fixed %.10g silently truncated. Locale-independent: the
+// C locale is never changed by the app or its dependencies.
 void appendDouble(std::string &out, double v) {
     if (std::isfinite(v) && v == std::floor(v) && std::fabs(v) < 1e15) {
         char buf[32];
@@ -419,7 +431,12 @@ void appendDouble(std::string &out, double v) {
         return;
     }
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.10g", v);
+    for (int precision = 1; precision <= 17; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
+        if (std::strtod(buf, nullptr) == v) {
+            break;
+        }
+    }
     out += buf;
 }
 

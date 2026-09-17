@@ -752,6 +752,16 @@ double TimelineModel::durationSeconds() const {
     return static_cast<double>(durationFrames()) / fps_;
 }
 
+void TimelineModel::restoreSnapshot(const TimelineModel &snapshot) {
+    const uint64_t seen = revision_;
+    *this = snapshot;
+    // Monotone past everything this instance ever reported: assignment
+    // reset the counter to the snapshot's own (possibly older) value,
+    // and a revision that went BACKWARDS would let a revision-watching
+    // view mistake the restore for "nothing changed since rev N".
+    revision_ = std::max(seen, snapshot.revision_) + 1;
+}
+
 // ---------------------------------------------------------------------------
 // cut transitions.
 // ---------------------------------------------------------------------------

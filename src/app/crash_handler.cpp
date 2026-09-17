@@ -533,6 +533,141 @@ unsigned appendBacktrace(std::string &out) {
 // ---------- Windows VEH (covers all threads, including qwindows init) ----
 
 #if defined(_WIN32)
+
+// ---------- stack-overflow emergency report path --------------------------
+// EXCEPTION_STACK_OVERFLOW means the faulting thread's stack is already
+// exhausted to the guard page: the general VEH path below grows
+// std::string / std::vector and deep CRT calls, which pushes the stack
+// FURTHER and usually faults a second time before any report survives.
+// The classic mitigation: a file-scope buffer whose pages are committed
+// at install time (see installCrashHandler) plus a report path that
+// uses ONLY this buffer, snprintf into fixed storage, and raw Win32
+// file calls. No std::string, no std::vector, no CRT streams here.
+constexpr size_t kEmergencyReportSize = 8192;
+char g_emergencyReport[kEmergencyReportSize];
+
+// snprintf-append into the emergency buffer; `off` always advances and
+// the buffer stays NUL-terminated. Truncation drops only tail content.
+void emergencyAppend(char *buf, size_t cap, size_t &off, const char *fmt, ...) {
+    if (off + 1 >= cap) {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    const int n = std::vsnprintf(buf + off, cap - off, fmt, args);
+    va_end(args);
+    if (n <= 0) {
+        return;
+    }
+    off += (static_cast<size_t>(n) < cap - off) ? static_cast<size_t>(n) : cap - off - 1;
+}
+
+// Candidate-order mirror of resolveReportDir() (configured dir, exe
+// dir, %TEMP%, cwd) without the std::string plumbing; returns an open
+// write handle or INVALID_HANDLE_VALUE. `pathOut` receives the path of
+// the attempt that is about to be made.
+HANDLE emergencyOpenReportFile(const char *leafFmt, unsigned long leafTid, char *pathOut,
+                               size_t pathCap) {
+    pathOut[0] = '\0';
+    HANDLE h = INVALID_HANDLE_VALUE;
+    if (!g_reportDir.empty()) {
+        std::snprintf(pathOut, pathCap, "%s\\", g_reportDir.c_str());
+        const size_t len = strlen(pathOut);
+        std::snprintf(pathOut + len, pathCap - len, leafFmt, leafTid);
+        h = CreateFileA(pathOut, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                        nullptr);
+    }
+    if (h == INVALID_HANDLE_VALUE) {
+        char exe[MAX_PATH];
+        const DWORD m = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        const char *slash = nullptr;
+        for (DWORD i = m; i > 0; --i) {
+            if (exe[i - 1] == '\\' || exe[i - 1] == '/') {
+                slash = exe + (i - 1);
+                break;
+            }
+        }
+        if (slash) {
+            std::snprintf(pathOut, pathCap, "%.*s\\", static_cast<int>(slash - exe), exe);
+            const size_t len = strlen(pathOut);
+            std::snprintf(pathOut + len, pathCap - len, leafFmt, leafTid);
+            h = CreateFileA(pathOut, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+        }
+    }
+    if (h == INVALID_HANDLE_VALUE) {
+        // GetTempPathA's result already ends in a backslash.
+        char temp[MAX_PATH];
+        const DWORD n = GetTempPathA(MAX_PATH, temp);
+        if (n > 0 && n < MAX_PATH) {
+            std::snprintf(pathOut, pathCap, "%s", temp);
+            const size_t len = strlen(pathOut);
+            std::snprintf(pathOut + len, pathCap - len, leafFmt, leafTid);
+            h = CreateFileA(pathOut, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+        }
+    }
+    if (h == INVALID_HANDLE_VALUE) {
+        // Last resort: cwd-relative leaf.
+        std::snprintf(pathOut, pathCap, leafFmt, leafTid);
+        h = CreateFileA(pathOut, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                        nullptr);
+    }
+    return h;
+}
+
+// The stack-overflow special case: build a minimal report in the
+// pre-allocated buffer and write it out. Everything here runs on a
+// nearly empty stack, so the report is deliberately short: header,
+// code/address, RIP/RSP, and a note explaining the omitted sections.
+// No user dialog (it would run user32 on a depleted stack); the OS
+// default disposition (terminate + WER) still follows via
+// EXCEPTION_CONTINUE_SEARCH, and WER shows its own UI.
+void writeStackOverflowReport(PEXCEPTION_POINTERS ep) {
+    char *buf = g_emergencyReport;
+    const size_t cap = kEmergencyReportSize;
+    size_t off = 0;
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    emergencyAppend(buf, cap, off,
+                    "FusionCut Pro crash report\n"
+                    "Version: %s\n"
+                    "Kind: VectoredException (stack-overflow special case)\n"
+                    "ThreadId: %lu\n"
+                    "ExceptionCode: 0x%08lX (%s)\n"
+                    "ExceptionAddress: 0x%p\n",
+                    g_appVersion.c_str(), static_cast<unsigned long>(GetCurrentThreadId()),
+                    static_cast<unsigned long>(code), exceptionCodeName(code),
+                    ep->ExceptionRecord->ExceptionAddress);
+#if defined(_M_X64) || defined(__x86_64__)
+    if (ep->ContextRecord) {
+        emergencyAppend(buf, cap, off, "RIP=0x%016llX RSP=0x%016llX\n",
+                        static_cast<unsigned long long>(ep->ContextRecord->Rip),
+                        static_cast<unsigned long long>(ep->ContextRecord->Rsp));
+    }
+#endif
+    emergencyAppend(buf, cap, off,
+                    "Note: stack walk, module snapshot and boot trace are skipped on this "
+                    "allocation-free path.\n");
+
+    // Raw write. The leaf carries the thread id so two concurrently
+    // overflowing threads cannot clobber each other's report; the
+    // CREATE_ALWAYS retry semantics match the general path's fopen
+    // chain (each candidate overwrites only its own previous run).
+    char path[MAX_PATH];
+    HANDLE h = emergencyOpenReportFile("FusionCutPro-crash-so-%lu.log",
+                                       static_cast<unsigned long>(GetCurrentThreadId()), path,
+                                       sizeof(path));
+    if (h != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(h, buf, static_cast<DWORD>(off), &written, nullptr);
+        CloseHandle(h);
+        std::fprintf(stderr, "FusionCut Pro: stack-overflow report written to %s\n", path);
+    } else {
+        std::fprintf(stderr, "FusionCut Pro: FAILED to write the stack-overflow report.\n");
+    }
+    std::fflush(stderr);
+}
+
 LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
     // Filter: act only on truly fatal exceptions. VEH sees EVERY exception
     // raised in the process, including C++ throw (which the runtime will
@@ -559,6 +694,15 @@ LONG WINAPI vectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
     const bool firstCrash = g_crashing.exchange(true) == false;
     if (!firstCrash) {
         return EXCEPTION_CONTINUE_SEARCH; // recursive crash - bail out
+    }
+
+    // Stack overflow: the faulting thread has no usable stack left, so
+    // the general path's std::string/std::vector building below would
+    // fault again before the report survives. Take the pre-allocated
+    // allocation-free emergency route instead (see the block above).
+    if (code == EXCEPTION_STACK_OVERFLOW) {
+        writeStackOverflowReport(ep);
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 
     // Build the report body. VEH runs in ordinary thread context, so
@@ -966,6 +1110,17 @@ void installCrashHandler(const std::string &appVersion, const std::string &repor
         openBootTrace();
 
 #if defined(_WIN32)
+        // Commit every page of the emergency stack-overflow report
+        // buffer while the stack and page machinery are healthy: .bss
+        // pages fault in on first touch, and the stack-overflow path
+        // must not be the first toucher. Volatile so the dead stores
+        // survive optimization.
+        volatile char *touch = g_emergencyReport;
+        for (size_t i = 0; i < kEmergencyReportSize; i += 4096) {
+            touch[i] = 0;
+        }
+        touch[kEmergencyReportSize - 1] = 0;
+
         // VEH first: catches all SEH exceptions in all threads, including
         // the qwindows.dll platform-plugin init path. FirstHandler=1
         // means we run *before* any other VEH registered later by Qt or

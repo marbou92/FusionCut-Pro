@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #include "test_harness.h"
@@ -96,6 +97,29 @@ static void testTimecode() {
     CHECK(!(df == ndf));
     CHECK(df == Timecode::fromFrames(1800, FrameRate::Fps2997DF));
     CHECK(ndf == Timecode::fromFrames(1800, FrameRate::Fps2997NDF));
+
+    // Sanity cap (regression pin): past the largest frame count whose
+    // hour field fits an int, hours() used to truncate silently - inputs
+    // are saturated to that boundary instead (the timecode twin of the
+    // project reader's 9.0e15 integral guard). Values below stay exact.
+    const int64_t cap = static_cast<int64_t>(std::numeric_limits<int>::max()) * 24 * 3600; // 24 fps
+    const Timecode atCap = Timecode::fromFrames(cap, FrameRate::Fps24);
+    CHECK(atCap.totalFrames() == cap);
+    CHECK(atCap.hours() == std::numeric_limits<int>::max());
+    CHECK(atCap.toString() == "2147483647:00:00:00"); // exact fields, no wrap
+    const Timecode over = Timecode::fromFrames(cap + 98765, FrameRate::Fps24);
+    CHECK(over.totalFrames() == cap); // saturated, not truncated
+    CHECK(over.hours() == std::numeric_limits<int>::max());
+    const Timecode under = Timecode::fromFrames(cap - 1, FrameRate::Fps24);
+    CHECK(under.totalFrames() == cap - 1); // below the cap: untouched
+    CHECK(under.hours() == std::numeric_limits<int>::max() - 1);
+    // Negative side saturates symmetrically (components use |frames|).
+    CHECK(Timecode::fromFrames(-cap, FrameRate::Fps24).totalFrames() == -cap);
+    CHECK(Timecode::fromFrames(-cap - 1, FrameRate::Fps24).totalFrames() == -cap);
+    CHECK(Timecode::fromFrames(-cap - 1, FrameRate::Fps24).hours() ==
+          std::numeric_limits<int>::max());
+    // Ordinary magnitudes are unaffected by the clamp.
+    CHECK(Timecode::fromFrames(90000, FrameRate::Fps25).totalFrames() == 90000);
 }
 
 static void testLruCache() {

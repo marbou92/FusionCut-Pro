@@ -32,6 +32,11 @@ struct FrameRate {
 
 // Non-drop timecode over a rational frame rate.
 // Format: "HH:MM:SS:FF" (with optional leading '-' for negative values).
+//
+// Frame counts are saturated at construction to the largest magnitude
+// whose hour component still fits an int exactly (the timecode twin of
+// the project reader's 9.0e15 integral sanity cap), so component
+// extraction never truncates silently on absurd inputs.
 class Timecode {
 public:
     Timecode() = default;

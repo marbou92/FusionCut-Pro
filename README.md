@@ -133,8 +133,11 @@ Planned next: AI-assisted features (face tracking, background removal, auto-capt
 > transition, and every text clip composited live - to an H.264 MP4 (MPEG-4 fallback
 > encoder) at the project fps with CRF quality control and your choice of resolution.
 > The job runs on a background thread with a progress dialog and Cancel; partial files
-> are cleaned up on failure or cancellation. Video only for now: timeline audio mixing
-> (multi-track summing, crossfades) ships later.
+> are cleaned up on failure or cancellation. The timeline mix lands as an AAC track
+> muxed with the H.264 video (the *Include audio* toggle in the export dialog) - the
+> identical span/gain/fade math preview plays. A hard source-decode failure mid-job
+> aborts with an honest error instead of silent black frames; a clean end of source
+> still renders the tail, and broken audio mixes as silence.
 >
 > **Text:** titles are first-class timeline citizens. Text tracks (T1, created at the very
 > top of the timeline when you add your first title) host TEXT clips - generated frames,
@@ -283,10 +286,8 @@ The core library and tests build with no third-party dependencies
 (`-DFC_BUILD_APP=OFF -DFC_BUILD_MEDIA=OFF`), which is what the fast CI
 matrix verifies on every push. The media layer (`-DFC_BUILD_MEDIA=ON`,
 default ON) needs FFmpeg development libraries via pkg-config and compiles
-against both the FFmpeg 4.4 and 5.1+/7.x API generations - CI runs its
-integration suite on Ubuntu (FFmpeg 7.x), an Ubuntu 22.04 container
-(FFmpeg 4.4, the Windows 7 target generation), and MinGW/Windows (portable
-workflow).
+against both the FFmpeg 4.4 and 5.1+/7.x API generations - see the CI
+matrix below. Contributions are described in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Tests
 
@@ -339,6 +340,22 @@ clip, missing-source tolerance) and the export's AAC track
 (probe/decode round-trips, tone fidelity, cancellation) - and the
 export pipeline: encode/probe/decode round-trips, per-frame progress,
 both cancellation paths) when the media layer is enabled.
+
+## Continuous integration
+
+Seven jobs run on every push and pull request (`.github/workflows/ci.yml`):
+
+- **Format check** - the whole tree must be byte-identical under the pinned clang-format (22.1.8)
+- **Core tests (ubuntu-latest / windows-latest)** - the dependency-free core suites, both compilers
+- **Core tests (ubuntu, ASan+UBSan)** - the same suites in Debug under AddressSanitizer + UBSan
+- **Media tests (ubuntu, FFmpeg 6.1)** - media layer + integration suite against apt FFmpeg dev
+- **Media tests (jammy container, FFmpeg 4.4)** - the 4.4 API generation the Windows 7 build ships with
+- **Media tests (windows, MinGW64 FFmpeg)** - MSYS2 MinGW64 + FFmpeg, the exact portable-build toolchain
+- **Qt app build (Ubuntu, Qt 5.15)** - full app + media compile (ccache-cached) plus the media suite
+
+`.github/workflows/portable-build.yml` additionally packages the Windows x64 portable zip. Its
+build job runs with a read-only token; a separate release job - the only one with
+`contents: write` - downloads the zip artifact and attaches it to a GitHub Release on `v*` tags.
 
 ## Project layout
 

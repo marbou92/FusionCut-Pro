@@ -87,7 +87,11 @@ version stays at 0.1.0 until the first public build.
   hand-edited rate-3 file could create one). addClip enforces the
   lane's non-overlap invariant exactly like moveClipTo and
   addTextClip always have, so no caller can build a state the parser
-  rejects.
+  rejects. Whole-model snapshots power the undo/redo: snapshot()
+  copies the plain-value model and restoreSnapshot() re-assigns it
+  with the revision bumped past anything the instance ever handed
+  out, so a restore is always visible to revision-watching views
+  even when the restored state is the older one.
 - **Effects:** 52 CPU effects across 7 categories (Color, Tone,
   Filter, Blur & Sharpen, Distort, Generate, Stylize), per-clip
   stacks, per-parameter keyframe tracks with linear interpolation
@@ -96,7 +100,13 @@ version stays at 0.1.0 until the first public build.
   clamped (every comparison fails) and used to slip through min/max
   into the pixel loops (lround(NaN * 255) is undefined behavior); it
   now lands on the descriptor default, and ±inf clamps like any
-  out-of-range number.
+  out-of-range number. The box-blur family (box blur, horizontal and
+  vertical motion blur) runs sliding-window running sums - O(w·h)
+  per pass instead of O(w·h·r), bit-identical output (exact integer
+  arithmetic; the dropped and entering taps of the clamped window
+  cancel to the same sums) - radius-32 motion blur on 1080p drops
+  from ~166 ms to ~30 ms per frame, and an independent naive
+  reference pins the results byte-exact across shapes and radii.
 - **Transitions:** 36 endpoint-exact cut transitions (dissolves,
   wipes, slides, pushes, zooms) on the no-overlap window model: the
   outgoing clip plays live while the incoming clip's held first frame
@@ -198,7 +208,16 @@ version stays at 0.1.0 until the first public build.
   collapses below one frame at their rate; effect parameter values
   and keyframe values are re-clamped to the descriptor ranges on
   load - the writer's clamp is no longer trusted (1e300 used to
-  reach the pixel math as-is).
+  reach the pixel math as-is). Lone UTF-16 surrogates in string
+  escapes now decode to U+FFFD instead of CESU-8 bytes (a surrogate
+  is not a scalar value; a broken escape no longer corrupts the
+  following one - the parser backs out so it decodes on its own,
+  and real surrogate pairs still combine). Numbers serialize through
+  a genuine shortest-round-trip loop (the first %g precision from 1
+  to 17 that strtod reads back bit-exactly): NTSC rates (30000/1001
+  & co.) need 16-17 digits, and the old fixed %.10g silently broke
+  the header's shortest-exact promise on exactly the rates editors
+  ship at.
 - **Export:** H.264 MP4 (MPEG-4 fallback) through the exact program
   pipeline - effects with per-frame keyframe interpolation, live
   transitions, text/emoji compositing - with CRF control, progress,
@@ -213,9 +232,59 @@ version stays at 0.1.0 until the first public build.
   trace, plus the `--diag` two-phase loader/startup diagnostic (PE
   import-tree walk + debug-API watch) and the `--crash-test` synthetic
   report. Confirmed booting end-to-end on a real Windows 7 machine.
+  A stack overflow now takes an allocation-free emergency path (a
+  pre-committed static buffer, snprintf into fixed storage, raw
+  Win32 file writes) instead of growing std::string on an exhausted
+  stack - the report survives where it previously almost never
+  could - and the diagnostic supervisor closes every debug-event
+  handle it is handed, bounds the import-descriptor walk by the
+  data-directory size, and gives up on an unkillable process after
+  a bounded wait instead of spinning forever.
 
 ### Application
 
+- **Undo / redo (Edit menu, Ctrl+Z / Ctrl+Shift+Z):** every discrete
+  timeline edit pushes a whole-model snapshot before it mutates (up
+  to 50 steps) and undo/redo restores it with every panel and
+  selection-dependent editor re-synced exactly like a project load.
+  Covered: import (video+audio rider or audio-only), text-clip add,
+  caption import (one step for the whole file), split, move, trim,
+  roll, delete/ripple-delete, transition add/remove, track
+  lock/mute/solo. A rejected edit pops its own snapshot; a lazily
+  created track counts as part of the change (undo removes the empty
+  lane); any new edit clears the redo branch; loading a different
+  project clears the history. Continuous value-scrubbing (effect and
+  color sliders, fades, transition duration, text typing) stays
+  live-only for now - one snapshot per slider tick would flood the
+  stack, and a coalescing pass is future work.
+- The play clock advances by MEASURED wall time when no audio device
+  is running: the timer interval rounds to whole milliseconds
+  (1000/24 -> 41 ms), and the old fixed frame-step per tick made
+  silent timelines play ~1.7% fast; a stalled tick (system sleep,
+  debugger) clamps to a quarter second instead of teleporting the
+  playhead on resume.
+- Unmuting or un-soloing the only audible track mid-playback brings
+  the mix up even when playback started with zero audio spans (the
+  device used to never open, leaving silence for the whole run).
+- Timeline interaction polish: the ruler seeks on click and drag;
+  drags can no longer START on locked tracks (the press falls
+  through to a scrub); clips narrower than three trim-edge zones
+  keep a grabbable body; a lost mouse grab (system gesture, window
+  switch) commits the pending drag exactly as a release would
+  instead of ghosting forever; swapping the model clears stale
+  selection highlights; ruler timecode labels no longer overlap at
+  small zoom steps; Quick Mode's play button tracks its state in a
+  property instead of comparing translated button labels, and the
+  inert "Custom" aspect entry is disabled with a tooltip.
+- Persistence and library hygiene: subtitle export writes atomically
+  through QSaveFile (the same discipline as project save - a crash
+  mid-write leaves the previous .srt intact); the media library
+  hands out stable item pointers (items are heap-owned, so nothing
+  invalidates on add) and Remove no longer leaks a QListWidgetItem;
+  effect-controls sliders guard degenerate zero-span descriptors;
+  a track-state toggle that changes nothing no longer marks the
+  project dirty; and a project open's monitor-load probe no longer
+  overwrites the "Project loaded" status message.
 - Dual-mode workspace: Pro Mode dockable panels (Project, Effects,
   Transitions, Color, Text, Effect Controls, Mixer) vs. Quick Mode
   one-tap flow.
@@ -373,8 +442,8 @@ version stays at 0.1.0 until the first public build.
 
 ### Tests
 
-Ten ctest suites, ~41,000 checks total: core (91), timeline (155),
-audio (1714), effects (3775), transitions (4531), project (136),
+Ten ctest suites, ~41,600 checks total: core (102), timeline (178),
+audio (1714), effects (3833), transitions (4531), project (171),
 text (453), emoji (374), srt (83), media (30,166, including the
 upsample battery). Synthetic media is generated at runtime; the emoji suite
 pins its expectations against hand-built synthetic font fixtures
@@ -402,7 +471,16 @@ overread its 8×8 second input as 16×16 (silently, in Release) was
 caught by the new sanitizer leg and fixed. The proxy's cancellation
 contract is pinned to the exporter's: false with an empty error (the
 app maps that to "cancelled by caller") and no partial output left
-behind.
+behind. The undo/redo snapshot API is pinned by a roundtrip battery
+(deep-copy independence, exact state restore, revision monotonicity
+across repeated restores, audio-strip ride-along); the rewritten box
+blur is pinned byte-exact against an independent naive reference
+across 7 shapes x 4 radii and motion H/V x 5 radii up to 32 (1x1,
+1x7, 7x1, and r >= w included); lone surrogates decode to U+FFFD
+while real pairs still combine; NTSC rates write-read bit-exactly
+with the shortest spelling pinned for plain 24/12.5; and absurd
+timecode inputs saturate at the exact representable cap instead of
+truncating.
 
 ### Build & CI
 
@@ -429,6 +507,20 @@ behind.
   went stale the moment VERSION moved. The portable zip now ships the
   license text and third-party notices alongside the binaries (GPL
   distribution convention).
+- Third-party actions are pinned to commit SHAs (checkout,
+  setup-msys2, cache, upload/download-artifact, gh-release),
+  superseded pushes cancel through a concurrency group, the Qt app
+  job compiles through ccache (month-rotated cache), and the lint
+  glob covers .c files too. The portable release step moved to a
+  separate least-privilege job: the build runs with contents: read,
+  and only the tag-triggered release job - which executes no
+  repository code - holds contents: write. Windows builds compile
+  with _WIN32_WINNT=0x0601 (the Win7 gate exists at compile time,
+  not only as the runtime tripwires) and MinGW links the C/C++
+  runtimes statically, so the portable exe needs no
+  libgcc/libstdc++ DLLs beside it. CMakePresets.json (core / media /
+  app presets) and a CONTRIBUTING.md document the build, test, and
+  formatting workflow.
 
 ### Notable engineering finds along the way
 

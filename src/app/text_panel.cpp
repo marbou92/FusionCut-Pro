@@ -131,7 +131,12 @@ void TextPanel::buildUi() {
     layout->addWidget(addButton_);
 
     editor_ = new QTextEdit(this);
-    editor_->setAcceptRichText(true);
+    // Plain text only: a rich-text paste inserts HTML/image fragments
+    // the caption model cannot represent (documentFromEditor walks
+    // character fragments; images and tables silently vanish or
+    // corrupt the runs). The flag routes paste through the plain-text
+    // path, which is the documented fix.
+    editor_->setAcceptRichText(false);
     editor_->setMinimumHeight(120);
     editor_->setPlaceholderText(tr("Type the title text..."));
     connect(editor_, &QTextEdit::textChanged, this, [this] {

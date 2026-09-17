@@ -39,6 +39,29 @@ if(FC_BUILD_MEDIA)
         libswresample)
 endif()
 
+# Windows API surface gate. Without it the MinGW/MSVC headers default to
+# _WIN32_WINNT=0x0A00 (Windows 10), so a Win8/10-only declaration would
+# compile in locally and only fail on the Windows 7 runtime the project
+# targets - the Win7 gate must exist at compile time too, not just as the
+# runtime tripwires (import blocklist, api-set shim). 0x0601 = Windows 7,
+# the oldest supported OS, hides later declarations at compile time.
+# WINVER follows _WIN32_WINNT on current MinGW/MSVC headers, but is pinned
+# as well so header revisions that treat the two independently cannot
+# drift. Applies to every target below (core, media, app, tests).
+if(WIN32)
+    add_compile_definitions(_WIN32_WINNT=0x0601 WINVER=0x0601)
+endif()
+
+# MinGW portable build: link the C/C++ runtimes statically so the shipped
+# exe does not need libgcc/libstdc++ DLLs beside it (the portable tree
+# carries only Qt + FFmpeg). Directory-wide, so the test executables the
+# MSYS2 media-tests CI job builds get it too - static libgcc/libstdc++ is
+# safe and standard for MinGW binaries, and the FFmpeg DLLs they load are
+# resolved from PATH exactly as before.
+if(MINGW)
+    add_link_options(-static-libgcc -static-libstdc++)
+endif()
+
 # Warning flags for the dependency-free core and its tests: fully ours to
 # fix, and the -Wall -Wextra -Wpedantic -Wshadow set has already earned
 # its keep (the dead srt helper surfaced here). The media/app layers

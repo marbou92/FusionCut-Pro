@@ -402,7 +402,11 @@ void EffectControlsPanel::rebuildParams() {
         } else {
             auto *slider = new QSlider(Qt::Horizontal, rowWidget);
             slider->setRange(0, kSliderSteps);
-            const double t = (value - p.minValue) / (p.maxValue - p.minValue);
+            // A degenerate zero-span descriptor (max == min) would
+            // divide by zero here; treat it as t = 0 (slider parks at
+            // the minimum).
+            const double span = p.maxValue - p.minValue;
+            const double t = span > 0.0 ? (value - p.minValue) / span : 0.0;
             slider->setValue(static_cast<int>(std::lround(t * kSliderSteps)));
             auto *valueLabel = new QLabel(formatValue(p, value), rowWidget);
             valueLabel->setMinimumWidth(56);
@@ -512,7 +516,10 @@ void EffectControlsPanel::refreshParamValues() {
             continue;
         }
         const double v = (kfFrame >= 0) ? fx.paramAt(r.key, kfFrame) : fx.param(r.key);
-        const double t = (v - r.minValue) / (r.maxValue - r.minValue);
+        // Same zero-span guard as the build path above (max == min
+        // descriptors read as t = 0 instead of dividing by zero).
+        const double span = r.maxValue - r.minValue;
+        const double t = span > 0.0 ? (v - r.minValue) / span : 0.0;
         r.slider->blockSignals(true);
         r.slider->setValue(static_cast<int>(std::lround(t * kSliderSteps)));
         r.slider->blockSignals(false);

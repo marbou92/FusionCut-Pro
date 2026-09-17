@@ -54,7 +54,10 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     connect(removeButton_, &QPushButton::clicked, this, [this] {
         const int row = list_->currentRow();
         if (row >= 0) {
-            list_->takeItem(row);
+            // takeItem unparents the row WITHOUT deleting it - the
+            // widget item must be freed here or every Remove leaks one
+            // QListWidgetItem (the Qt idiom: takeItem + delete).
+            delete list_->takeItem(row);
             library_.removeAt(row);
             removeButton_->setEnabled(false);
             metaName_->setText(tr("-"));

@@ -1,0 +1,82 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 21,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "core",
+            "inherits": "base",
+            "displayName": "Core only (no FFmpeg, no Qt)",
+            "cacheVariables": {
+                "FC_BUILD_APP": "OFF",
+                "FC_BUILD_MEDIA": "OFF"
+            }
+        },
+        {
+            "name": "media",
+            "inherits": "base",
+            "displayName": "Core + media (FFmpeg, no Qt)",
+            "cacheVariables": {
+                "FC_BUILD_APP": "OFF",
+                "FC_BUILD_MEDIA": "ON"
+            }
+        },
+        {
+            "name": "app",
+            "inherits": "base",
+            "displayName": "Full app (Qt 5.15 + FFmpeg)",
+            "cacheVariables": {
+                "FC_BUILD_APP": "ON",
+                "FC_BUILD_MEDIA": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "core",
+            "configurePreset": "core"
+        },
+        {
+            "name": "media",
+            "configurePreset": "media"
+        },
+        {
+            "name": "app",
+            "configurePreset": "app"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "core",
+            "configurePreset": "core",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "media",
+            "configurePreset": "media",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "app",
+            "configurePreset": "app",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

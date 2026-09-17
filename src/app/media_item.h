@@ -34,37 +34,46 @@ struct MediaItem {
     bool hasProxy() const { return !proxyPath.isEmpty(); }
 };
 
-// Simple ownership list of imported media. No signals of its own; panels
-// that mutate it emit their own notifications.
+// Ownership list of imported media. The items are heap-allocated and
+// the library owns them, so MediaLibrary::at() can hand out a pointer
+// that stays valid across add() (a plain QList<MediaItem> would
+// reallocate under the caller and invalidate the interior pointer).
+// No signals of its own; panels that mutate it emit their own
+// notifications.
 class MediaLibrary {
 public:
-    const QList<MediaItem> &items() const { return items_; }
+    const QList<MediaItem *> &items() const { return items_; }
 
     int indexOfPath(const QString &path) const {
         for (int i = 0; i < items_.size(); ++i) {
-            if (items_[i].path == path) {
+            if (items_[i]->path == path) {
                 return i;
             }
         }
         return -1;
     }
 
-    void add(const MediaItem &item) { items_.append(item); }
+    void add(const MediaItem &item) { items_.append(new MediaItem(item)); }
 
     void removeAt(int index) {
         if (index >= 0 && index < items_.size()) {
-            items_.removeAt(index);
+            delete items_.takeAt(index);
         }
     }
 
     MediaItem *at(int index) {
-        return (index >= 0 && index < items_.size()) ? &items_[index] : nullptr;
+        return (index >= 0 && index < items_.size()) ? items_[index] : nullptr;
     }
 
-    void clear() { items_.clear(); }
+    void clear() {
+        for (MediaItem *item : items_) {
+            delete item;
+        }
+        items_.clear();
+    }
 
 private:
-    QList<MediaItem> items_;
+    QList<MediaItem *> items_;
 };
 
 } // namespace fc

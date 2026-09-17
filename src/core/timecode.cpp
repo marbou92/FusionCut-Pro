@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <vector>
 
 namespace fc {
@@ -39,7 +40,21 @@ int toInt(const std::string &digits) {
 
 } // namespace
 
-Timecode::Timecode(int64_t frames, FrameRate rate) : frames_(frames), rate_(rate) {}
+Timecode::Timecode(int64_t frames, FrameRate rate) : frames_(frames), rate_(rate) {
+    // Sanity cap, mirroring the project reader's 9.0e15 integral guard:
+    // past the largest frame count whose hour field still fits an int,
+    // hours() would truncate silently (static_cast<int> of an out-of-range
+    // int64). Saturate instead so every component stays an exact integer.
+    if (rate_.isValid()) {
+        const int64_t cap = static_cast<int64_t>(std::numeric_limits<int>::max()) *
+                            static_cast<int64_t>(displayFps(rate_)) * 3600;
+        if (frames_ > cap) {
+            frames_ = cap;
+        } else if (frames_ < -cap) {
+            frames_ = -cap;
+        }
+    }
+}
 
 Timecode Timecode::fromFrames(int64_t frames, FrameRate rate) {
     return Timecode(frames, rate);

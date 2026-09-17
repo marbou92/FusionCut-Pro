@@ -4,6 +4,7 @@
 // far from rounding boundaries) so results are identical on every
 // toolchain.
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1168,6 +1169,92 @@ void testClipStackIntegration() {
     CHECK(model.clips()[1].effectStack[0].param("amount") == 0.5);
 }
 
+// The blur family runs a sliding-window running sum (O(w*h),
+// radius-independent; the old code re-summed every tap, O(w*h*r)). This
+// reference implements the naive clamped-window average the slow way
+// and pins the optimized output byte-exact to it, including degenerate
+// shapes and windows wider than the row (border replication on both
+// edges at once).
+void testBoxBlurReference() {
+    // Deterministic pseudo-random fixture (no uniform runs, every byte
+    // differs) with opaque alpha.
+    auto fixture = [](int w, int h) {
+        TestImg img(w, h, 0, 0, 0);
+        uint32_t seed = 0x1234567u;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                seed = seed * 1103515245u + 12345u;
+                img.set(x, y, 0, static_cast<uint8_t>((seed >> 16) & 0xFF));
+                img.set(x, y, 1, static_cast<uint8_t>((seed >> 8) & 0xFF));
+                img.set(x, y, 2, static_cast<uint8_t>(seed & 0xFF));
+            }
+        }
+        return img;
+    };
+    // Naive single-axis pass: full re-summation over the clamped window
+    // (horizontal when vertical == false, column-wise otherwise).
+    auto naivePass = [](const TestImg &src, int radius, bool vertical) {
+        TestImg out = src;
+        const int r = std::max(1, radius);
+        const int window = 2 * r + 1;
+        const int along = vertical ? src.h : src.w;
+        const int across = vertical ? src.w : src.h;
+        for (int a = 0; a < along; ++a) {
+            for (int b = 0; b < across; ++b) {
+                int sum[3] = {0, 0, 0};
+                for (int k = -r; k <= r; ++k) {
+                    // The window slides over the `along` axis (a): clamp
+                    // that tap; horizontal a = x, b = y; vertical a = y,
+                    // b = x.
+                    const int c = std::min(std::max(a + k, 0), along - 1);
+                    const int sx = vertical ? b : c;
+                    const int sy = vertical ? c : b;
+                    for (int ch = 0; ch < 3; ++ch) {
+                        sum[ch] += src.at(sx, sy, ch);
+                    }
+                }
+                const int ox = vertical ? b : a;
+                const int oy = vertical ? a : b;
+                for (int ch = 0; ch < 3; ++ch) {
+                    out.set(ox, oy, ch,
+                            static_cast<uint8_t>(std::lround(double(sum[ch]) / window)));
+                }
+            }
+        }
+        return out;
+    };
+    auto matches = [](const TestImg &a, const TestImg &b) {
+        return a.w == b.w && a.h == b.h && a.px == b.px;
+    };
+
+    const int shapes[][2] = {{1, 1}, {1, 7}, {7, 1}, {3, 3}, {8, 5}, {5, 17}, {16, 16}};
+    for (const auto &shape : shapes) {
+        for (const int radius : {1, 2, 5, 16}) {
+            // blur.box = horizontal pass, then vertical pass on its result.
+            const TestImg src = fixture(shape[0], shape[1]);
+            TestImg got = src;
+            run("blur.box", got, {{"radius", static_cast<double>(radius)}});
+            const TestImg mid = naivePass(src, radius, false);
+            const TestImg want = naivePass(mid, radius, true);
+            CHECK(matches(got, want));
+        }
+    }
+    // Single-axis motion blurs, one pass each (radius up to the
+    // descriptor max of 32 - the case the optimization exists for).
+    const int motionShapes[][2] = {{8, 5}, {5, 17}, {16, 16}};
+    for (const auto &shape : motionShapes) {
+        for (const int radius : {1, 2, 8, 16, 32}) {
+            const TestImg src = fixture(shape[0], shape[1]);
+            TestImg gotH = src;
+            run("blur.motionH", gotH, {{"radius", static_cast<double>(radius)}});
+            CHECK(matches(gotH, naivePass(src, radius, false)));
+            TestImg gotV = src;
+            run("blur.motionV", gotV, {{"radius", static_cast<double>(radius)}});
+            CHECK(matches(gotV, naivePass(src, radius, true)));
+        }
+    }
+}
+
 // Armor for the whole catalog: every effect x extreme parameter value
 // must (a) land clamped and finite in storage (NaN cannot be clamped and
 // falls back to the descriptor default), (b) run the pixel loop without
@@ -1253,6 +1340,7 @@ int main() {
     testToneEffects();
     testFilterEffects();
     testBlurSharpen();
+    testBoxBlurReference();
     testStylizeEffects();
     testStackSemantics();
     testClipStackIntegration();

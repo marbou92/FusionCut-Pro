@@ -131,6 +131,11 @@ private:
     // Start a drag interaction from a press inside a clip.
     void beginClipDrag(const QPoint &pos);
     void resetDrag();
+    // Commit a live drag exactly as mouseReleaseEvent would (emits the
+    // move / trim / roll request when the ghost differs from the
+    // origin), then reset. The release handler and the mouse-move
+    // implicit-grab-lost guard share this path.
+    void finishDrag();
     // The adjacent right neighbor of a clip (for rolling), or nullptr.
     const fc::Clip *rightNeighborOf(const fc::Clip *clip) const;
     void syncToolButtons();

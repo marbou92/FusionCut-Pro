@@ -19,21 +19,27 @@
 //   0x13f3), load trail stopped at FusionCutPro.exe -> avcodec-62.dll
 //   -> ... -> librav1e.dll -> api-ms-win-core-synch-l1-2-0.dll.
 //
-//   On Windows 8.x the loader maps the System32 placeholder stub for
-//   that name and faults reading its invalid export data while
-//   snapping librav1e's imports - before any user code runs, so WER
-//   never engages (no Event Viewer entry, no crash log; only the bare
-//   "unable to start correctly (0xc0000005)" dialog).
-//
 //   On Windows 7 the name resolves to no file at all (Win7 has neither
-//   the schema entry nor a System32 placeholder for it).
+//   the schema entry nor a System32 file for it): the loader falls back
+//   to the normal file search, finds nothing, and the import snap of
+//   librav1e.dll dies before any user code runs - so WER never engages
+//   (no Event Viewer entry, no crash log; only the bare "unable to start
+//   correctly (0xc0000005)" dialog).
 //
-//   The DLL search order tries the application directory BEFORE
-//   System32, so a real DLL with this exact name placed next to
-//   FusionCutPro.exe wins the bind on Windows 7 and 8.x. On
-//   Windows 10/11 the ApiSetSchema resolves the name to KernelBase
-//   before the file search runs, so this DLL is never even touched -
-//   shipping it everywhere is safe and inert.
+//   Windows 8.x does NOT need this shim: the futex api set was
+//   introduced in Windows 8, so the schema entry exists there and the
+//   OS implements the functions natively - the import resolves through
+//   the schema without any file search. (An earlier revision of this
+//   comment claimed the 8.x loader maps a System32 placeholder stub
+//   with invalid export data and faults on it; that story is wrong -
+//   the futex set is native to Windows 8 and later.)
+//
+//   For names the schema does not claim, the DLL search order tries the
+//   application directory BEFORE System32. That is exactly the Windows
+//   7 situation: a real DLL with this exact name placed next to
+//   FusionCutPro.exe wins the bind. On Windows 8.x and later the schema
+//   resolves the name before any file search runs, so this DLL is never
+//   even touched - shipping it everywhere is safe and inert.
 //
 // WHY REAL IMPLEMENTATIONS (not forwarders, as the first attempt)
 //   A forwarder-only stub would export WaitOnAddress as a forwarder

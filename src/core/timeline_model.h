@@ -312,6 +312,19 @@ public:
     int64_t durationFrames() const;
     double durationSeconds() const;
 
+    // ---- undo/redo snapshot support ----
+
+    // The model is a plain value (every member copies), so a snapshot IS
+    // a copy - the export machinery already ships whole-model copies
+    // across threads. restoreSnapshot() re-assigns that state and bumps
+    // the revision past anything THIS instance has ever handed out, so
+    // revision-watching views always see the restore as a change - even
+    // when the restored snapshot is OLDER than the last revision they
+    // observed (a plain assignment would reset the counter backwards and
+    // a view could mistake the restore for "nothing changed").
+    TimelineModel snapshot() const { return *this; }
+    void restoreSnapshot(const TimelineModel &snapshot);
+
 private:
     // Drops transitions whose pair broke (adjacency lost, clip removed,
     // moved away) and clamps durations that no longer fit the left clip.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QMainWindow>
 #include <QSize>
@@ -11,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include "audio_preview.h"
 #include "audio_timeline.h"
@@ -21,6 +23,7 @@
 
 class QLabel;
 class QThread;
+class QAction;
 class QStackedWidget;
 class DecodeWorker;
 class ColorPanel;
@@ -94,6 +97,27 @@ private:
     bool confirmSaveChanges();
     void markDirty();
     void updateWindowTitle();
+
+    // ---- undo / redo (snapshot-based) ----
+    // Every DISCRETE user-facing edit pushes a full model copy before
+    // it mutates (pushUndo); a mutation that then gets rejected pops it
+    // again (cancelUndoPush). undo()/redo() swap the stacks around
+    // restoreSnapshot and re-sync every panel; any NEW edit clears the
+    // redo branch, and loading a different document clears both.
+    // Continuous value-scrubbing (effect/color/fade sliders, transition
+    // duration, text typing) does NOT push - it would flood the stack
+    // with one entry per tick; those stay live-only until a coalescing
+    // pass exists.
+    void pushUndo();
+    void cancelUndoPush();
+    void undo();
+    void redo();
+    // The restored model is authoritative: re-sync every panel and
+    // selection-dependent editor exactly like a project load (minus the
+    // file/library round trip), clamp the playhead, re-resolve the
+    // monitor frame.
+    void afterUndoRedo();
+    void updateUndoActions();
 
     // export. exportMedia() runs on the UI thread (dialogs) and FREEZES
     // everything the job reads (model snapshot, fps, source->decode-path
@@ -275,6 +299,23 @@ private:
     // Project persistence state.
     QString projectPath_;
     bool dirty_ = false;
+
+    // Undo/redo history (bounded whole-model snapshots) and the Edit
+    // menu actions whose enabled state mirrors the stacks.
+    static constexpr size_t kUndoDepthCap = 50;
+    std::vector<fc::TimelineModel> undoStack_; // front = oldest
+    std::vector<fc::TimelineModel> redoStack_; // front = oldest
+    QAction *undoAction_ = nullptr;
+    QAction *redoAction_ = nullptr;
+    // Set while a probe that belongs to a PROJECT OPEN is in flight:
+    // its mediaInfo must not overwrite the "Project loaded" status the
+    // open just showed (the summary is for import-style loads).
+    bool quietProbeStatus_ = false;
+    // The no-audio play-clock tick measures REAL elapsed wall time per
+    // tick: the timer interval rounds to whole milliseconds (1000/24 ->
+    // 41 ms), and a fixed frame-step per tick made silent timelines
+    // play ~1.7% fast.
+    QElapsedTimer playWall_;
 
     // Text state. The layer cache holds rendered layers for text clips
     // (LRU-bounded: one full-res RGBA layer per clip is ~4-8 MB, and an

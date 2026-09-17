@@ -5,6 +5,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSlider>
+#include <QStandardItem>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -13,6 +15,10 @@
 
 namespace {
 constexpr int kMaxSlider = 100000;
+
+// Dynamic QObject property on the play button that mirrors the playing
+// state (see setPlaying) - state, not translated label text.
+constexpr char kPlayingProperty[] = "fcPlaying";
 
 const char *kAccentStyle = "QPushButton { background: #00A8FF; color: #101010; font-weight: bold; "
                            "border-radius: 4px; padding: 6px 18px; }"
@@ -65,8 +71,16 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     root->addLayout(transport);
     root->addWidget(buildToolbar());
 
-    connect(playButton_, &QPushButton::clicked, this,
-            [this] { emit playToggled(playButton_->text() == tr("Play")); });
+    connect(playButton_, &QPushButton::clicked, this, [this] {
+        // The playing STATE lives on the button as a dynamic property
+        // kept in sync by setPlaying(); the old text() == tr("Play")
+        // comparison broke under translation (the label reads
+        // tr("Pause") while playing, and either string can change).
+        // An unset property reads false = not playing, matching the
+        // initial "Play" label.
+        const bool playing = playButton_->property(kPlayingProperty).toBool();
+        emit playToggled(!playing);
+    });
     connect(stepBack_, &QPushButton::clicked, this, [this] { emit stepRequested(-1); });
     connect(stepFwd_, &QPushButton::clicked, this, [this] { emit stepRequested(1); });
     auto seekBySlider = [this](int value) {
@@ -106,10 +120,22 @@ QWidget *QuickModeView::buildTopBar() {
     aspectBox_->addItem(tr("1:1"));
     aspectBox_->addItem(tr("4:3"));
     aspectBox_->addItem(tr("Custom"));
+    // Quick Mode has no way to enter a custom aspect, so the entry is
+    // DISABLED (with a tooltip) instead of silently doing nothing when
+    // chosen. QComboBox's default model is a QStandardItemModel; the
+    // cast is guarded so an exotic model only degrades to the old
+    // inert-choice behavior. The aspects[] > 0 check below stays as the
+    // belt-and-suspenders no-op for a programmatic selection.
+    if (auto *items = qobject_cast<QStandardItemModel *>(aspectBox_->model())) {
+        if (QStandardItem *custom = items->item(aspectBox_->count() - 1)) {
+            custom->setEnabled(false);
+            custom->setToolTip(tr("Custom aspect ratios are configured in Pro Mode"));
+        }
+    }
     connect(aspectBox_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
                 const double aspects[] = {16.0 / 9.0, 9.0 / 16.0, 1.0, 4.0 / 3.0, 0.0};
-                if (aspects[index] > 0.0) {
+                if (index >= 0 && index < 5 && aspects[index] > 0.0) {
                     canvas_->setAspectHint(aspects[index]);
                 }
             });
@@ -170,6 +196,7 @@ void QuickModeView::setPosition(double seconds) {
 }
 
 void QuickModeView::setPlaying(bool playing) {
+    playButton_->setProperty(kPlayingProperty, playing);
     playButton_->setText(playing ? tr("Pause") : tr("Play"));
 }
 

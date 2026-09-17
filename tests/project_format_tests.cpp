@@ -4,6 +4,8 @@
 // doubles (halves, integers) so field-by-field equality is exact.
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -340,6 +342,112 @@ void testJsonStringsAndNumbers() {
     CHECK(loaded.fps() == 24.0);
 }
 
+void testSurrogateDecoding() {
+    // A lone UTF-16 surrogate is not a scalar value: the decoder must
+    // emit U+FFFD ("EF BF BD"), never CESU-8 bytes ("ED A0 xx").
+    TimelineModel loaded;
+    std::string error;
+    const char *head = "{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"";
+    const char *tail = "\",\"audio\":false,\"locked\":false,\"muted\":false,"
+                       "\"solo\":false}],\"clips\":[],\"transitions\":[]}";
+    const std::string replacement = "\xEF\xBF\xBD";
+
+    // Lone high surrogate.
+    CHECK(parseProject(std::string(head) + "\\uD83D" + tail, loaded, error));
+    CHECK(loaded.tracks()[0].name == replacement);
+    // Lone low surrogate.
+    CHECK(parseProject(std::string(head) + "\\uDE00" + tail, loaded, error));
+    CHECK(loaded.tracks()[0].name == replacement);
+    // A PAIRED surrogate still decodes to the astral code point
+    // (U+1F600 = "F0 9F 98 80") - unharmed by the lone-surrogate rule.
+    CHECK(parseProject(std::string(head) + "\\uD83D\\uDE00" + tail, loaded, error));
+    CHECK(loaded.tracks()[0].name == "\xF0\x9F\x98\x80");
+    // High surrogate followed by an unrelated escape: replacement first,
+    // then the second escape decodes on its own.
+    CHECK(parseProject(std::string(head) + "\\uD800\\u0041" + tail, loaded, error));
+    CHECK(loaded.tracks()[0].name == replacement + "A");
+    // Two high surrogates: two replacements.
+    CHECK(parseProject(std::string(head) + "\\uD83D\\uD83D" + tail, loaded, error));
+    CHECK(loaded.tracks()[0].name == replacement + replacement);
+    // A lone surrogate mid-string keeps the surrounding text.
+    CHECK(parseProject(std::string(head) + "a\\uD800b" + tail, loaded, error));
+    CHECK(loaded.tracks()[0].name == "a" + replacement + "b");
+
+    // U+FFFD is ordinary UTF-8 for the writer: raw bytes out, stable
+    // fixed point on re-save.
+    TimelineModel m;
+    m.setFps(24.0);
+    m.addTrack(replacement, false);
+    const std::string text = serializeProject(m);
+    CHECK(parseProject(text, loaded, error));
+    CHECK(loaded.tracks()[0].name == replacement);
+    CHECK(serializeProject(loaded) == text);
+}
+
+void testShortestExactNumbers() {
+    // The writer emits the SHORTEST %g form that reads back bit-exactly
+    // through strtod (1..17 significant digits; 17 always suffices).
+    // NTSC rates need 16-17 digits - the old fixed %.10g silently
+    // truncated them, contradicting the header's shortest-exact claim.
+    const double rates[] = {24000.0 / 1001.0, 30000.0 / 1001.0, 60000.0 / 1001.0};
+    for (const double fps : rates) {
+        TimelineModel m;
+        m.setFps(fps);
+        m.addTrack("V1", false);
+        const std::string text = serializeProject(m);
+        TimelineModel loaded;
+        std::string error;
+        CHECK(parseProject(text, loaded, error));
+        CHECK(loaded.fps() == fps); // bitwise-exact round-trip
+        // Pin that the old %.10g form is genuinely lossy for these.
+        char lossy[32];
+        std::snprintf(lossy, sizeof(lossy), "%.10g", fps);
+        CHECK(std::strtod(lossy, nullptr) != fps);
+    }
+
+    // A plain decimal rate keeps its familiar shortest spelling and
+    // round-trips exactly.
+    {
+        TimelineModel m;
+        m.setFps(29.97);
+        m.addTrack("V1", false);
+        const std::string text = serializeProject(m);
+        CHECK(text.find("\"fps\":29.97,") != std::string::npos);
+        TimelineModel loaded;
+        std::string error;
+        CHECK(parseProject(text, loaded, error));
+        CHECK(loaded.fps() == 29.97);
+    }
+
+    // The exact shortest token for 30000/1001 (16 significant digits:
+    // shorter forms lose the value, 17 would print a redundant digit).
+    TimelineModel m;
+    m.setFps(30000.0 / 1001.0);
+    m.addTrack("V1", false);
+    // 30000 source frames at the NTSC rate = 1001 timeline frames (a
+    // tiny extent would round to a 0-frame zombie and be rejected).
+    m.addClip(0, "a.mp4", "a", 0, 30000, 0, 30000.0 / 1001.0);
+    const std::string text = serializeProject(m);
+    CHECK(text.find("\"fps\":29.97002997002997,") != std::string::npos);
+    CHECK(text.find("\"rate\":29.97002997002997") != std::string::npos);
+    TimelineModel loaded;
+    std::string error;
+    CHECK(parseProject(text, loaded, error));
+    CHECK(loaded.fps() == 30000.0 / 1001.0);
+    CHECK(loaded.clips().size() == 1);
+    CHECK(loaded.clips()[0].rate == 30000.0 / 1001.0);
+
+    // Integral rates still write shortest-form ("24", not "24.0"), and
+    // ordinary fractions keep their familiar shortest spelling.
+    TimelineModel plain;
+    plain.setFps(24.0);
+    plain.addTrack("V1", false);
+    const std::string plainText = serializeProject(plain);
+    CHECK(plainText.find("\"fps\":24,") != std::string::npos);
+    plain.setFps(12.5);
+    CHECK(serializeProject(plain).find("\"fps\":12.5,") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // Text animations ride inside the text document: additive on write
 // (default = no key), strict on read.
@@ -593,6 +701,8 @@ int main() {
     testRoundTrip();
     testParserStrictness();
     testJsonStringsAndNumbers();
+    testSurrogateDecoding();
+    testShortestExactNumbers();
     testTextAnimationRoundTrip();
     testTextAnimationRejections();
     testAudioStateRoundTrip();
