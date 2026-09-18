@@ -3,6 +3,7 @@
 // Generates synthetic media at runtime (no binary assets in the repo),
 // then exercises probe -> decode -> proxy -> re-probe against it.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -765,8 +766,12 @@ void testAudioSpanRate() {
     // Past the span's TIMELINE end the mix is silent even though the
     // source has 3 more seconds of content: the extent stays in
     // timeline seconds (a naive endSec*rate implementation leaks here).
+    std::fill(in.begin(), in.end(), 1.0f);                   // poison
     CHECK(mixer.pull(spans, 52800, 2400, in.data(), error)); // tl [1.1, 1.15)
-    for (size_t i = 0; i < in.size(); ++i) {
+    // pull() zeroes exactly sampleCount*channels floats - this window is
+    // 2,400 frames, so pin only the 4,800 samples the mixer wrote; the
+    // poisoned tail is outside its write contract.
+    for (size_t i = 0; i < 2 * 2400; ++i) {
         CHECK(in[i] == 0.0f);
     }
 

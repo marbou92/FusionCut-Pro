@@ -484,8 +484,12 @@ the project reader/writer round-trips clip rates bitwise while
 rejecting 0 and >100, and the audio mixer pins a rate-2 span by its
 880 Hz Goertzel peak (with the absent 440), a rate-0.5 span by its
 220 Hz peak, the timeline-extent leak check past a sped-up span's
-end, a clean EOF mid-coverage, the explicit-1.0 integer path, and
-defensive 0/NaN rates mixing as 1.0; per-track clip overlaps, zero-frame
+end (pinned over exactly the frames its pull wrote - the poisoned
+2,400-frame window in the larger test buffer keeps the check inside
+the mixer's write contract instead of reading stale samples from the
+previous window), a clean EOF mid-coverage, the explicit-1.0 integer
+path, and defensive 0/NaN rates mixing as 1.0; per-track clip
+overlaps, zero-frame
 clips, and text-track transitions are pinned at the PARSER level; a
 TTC whose first face fails mid-parse (a ppem-200 strike with no cmap)
 no longer hijacks the surviving face's bitmaps - the leak the reset
