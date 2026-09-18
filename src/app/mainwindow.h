@@ -78,6 +78,10 @@ private:
     void addPendingClip(const QString &sourcePath, int64_t sourceOutFrames, bool withAudio);
     void splitAtPlayhead();
     void deleteSelectedClip();
+    // The Clip > Speed / Duration dialog: rescales the selected clip's
+    // playback rate (timeline length follows), optionally pushing the
+    // same rate to its linked audio siblings from the same source.
+    void editClipSpeed();
     void generateProxy(const QString &sourcePath);
     void startPlayback(bool playing);
     void stepFrames(int frames);

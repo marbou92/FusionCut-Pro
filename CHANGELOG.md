@@ -87,7 +87,13 @@ version stays at 0.1.0 until the first public build.
   hand-edited rate-3 file could create one). addClip enforces the
   lane's non-overlap invariant exactly like moveClipTo and
   addTextClip always have, so no caller can build a state the parser
-  rejects. Whole-model snapshots power the undo/redo: snapshot()
+  rejects. setClipRate changes a placed clip's playback speed: the
+  timeline start stays anchored while the duration rescales from the
+  UNCHANGED source extent - faster rates shrink the clip and leave a
+  gap, slower ones grow it into free space (an overlap with a
+  neighbor is rejected exactly like any placement), and transitions
+  on a boundary the change breaks are pruned like a trim would.
+  Whole-model snapshots power the undo/redo: snapshot()
   copies the plain-value model and restoreSnapshot() re-assigns it
   with the revision bumped past anything the instance ever handed
   out, so a restore is always visible to revision-watching views
@@ -158,7 +164,12 @@ version stays at 0.1.0 until the first public build.
   clear + demuxer-seek + flush + re-decode cycle on EVERY audio
   callback - correct output, real CPU burn, and a glitch risk on
   FLAC sources and fast export pulls alike. A jump too far forward
-  to decode through (250 ms) still seeks.
+  to decode through (250 ms) still seeks. Audio spans now carry
+  their clip's playback rate: a sped-up clip consumes source seconds
+  proportionally faster (the tone's pitch shifts with it - the
+  speed == 1 blend stays bit-identical to the pinned integer-stride
+  scatter, any other rate linearly interpolates between output
+  samples), so audio keeps step with its video sibling at any speed.
 - **Color emoji from the machine's own fonts:** no font is bundled.
   The app discovers the emoji-capable fonts installed on the PC -
   scanning the platform font directories AND the Windows font
@@ -243,6 +254,18 @@ version stays at 0.1.0 until the first public build.
 
 ### Application
 
+- **Clip Speed / Duration (Clip menu, Ctrl+R):** a dialog edits the
+  selected clip's playback rate - the timeline length rescales from
+  the unchanged source extent (live preview in frames and seconds;
+  OK is disabled when the rate would collapse the clip below one
+  frame), and the preview monitor, the export, and the audio mix all
+  follow the same rate-aware timeline-to-source mapping. Audio clips
+  a video+audio import linked to the edited clip (same source,
+  source range, placement, and current speed) can ride along so
+  picture and sound stay in step; a slow-down that would not fit on
+  the track is rejected with an explanation instead of overlapping
+  a neighbor, and a rescaled clip sheds or clamps transitions exactly
+  like a trim would.
 - **Undo / redo (Edit menu, Ctrl+Z / Ctrl+Shift+Z):** every discrete
   timeline edit pushes a whole-model snapshot before it mutates (up
   to 50 steps) and undo/redo restores it with every panel and
@@ -442,17 +465,27 @@ version stays at 0.1.0 until the first public build.
 
 ### Tests
 
-Ten ctest suites, ~41,600 checks total: core (102), timeline (178),
-audio (1714), effects (3833), transitions (4531), project (171),
-text (453), emoji (374), srt (83), media (30,166, including the
-upsample battery). Synthetic media is generated at runtime; the emoji suite
+Ten ctest suites, ~46,500 checks total: core (102), timeline (273),
+audio (1714), effects (3833), transitions (4531), project (190),
+text (453), emoji (374), srt (83), media (34,994, including the
+upsample and span-rate batteries). Synthetic media is generated at runtime; the emoji suite
 pins its expectations against hand-built synthetic font fixtures
 (nothing font-shaped lives in the repo).
 
 The regression armor added alongside the round-2 fixes: the drop-frame
 timecode equality and the track-state no-op revision are pinned;
 rate-collapse ("zombie") trims/rolls/adds and their parser-level
-counterparts are rejected by test; per-track clip overlaps, zero-frame
+counterparts are rejected by test; setClipRate carries its own
+battery (llround duration pins, failure pairs that leave both the
+rate and the revision untouched, the extreme-rate zombie guard,
+overlap rejection in both grow directions, transition pruning vs.
+survival, rate-2 split/trim interplay, snapshot/restore round-trip),
+the project reader/writer round-trips clip rates bitwise while
+rejecting 0 and >100, and the audio mixer pins a rate-2 span by its
+880 Hz Goertzel peak (with the absent 440), a rate-0.5 span by its
+220 Hz peak, the timeline-extent leak check past a sped-up span's
+end, a clean EOF mid-coverage, the explicit-1.0 integer path, and
+defensive 0/NaN rates mixing as 1.0; per-track clip overlaps, zero-frame
 clips, and text-track transitions are pinned at the PARSER level; a
 TTC whose first face fails mid-parse (a ppem-200 strike with no cmap)
 no longer hijacks the surviving face's bitmaps - the leak the reset

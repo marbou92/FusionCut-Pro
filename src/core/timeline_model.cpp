@@ -689,6 +689,35 @@ bool TimelineModel::rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrame
     return true;
 }
 
+bool TimelineModel::setClipRate(int64_t clipId, double rate) {
+    if (!std::isfinite(rate) || rate <= 0.0) {
+        return false;
+    }
+    Clip *clip = clipById(clipId);
+    if (!clip || clip->isText) {
+        return false;
+    }
+    const int64_t newDur = durationFromRange(clip->sourceInFrames, clip->sourceOutFrames, rate);
+    if (newDur < 1) {
+        return false; // the extreme-rate zombie guard, same as the trims
+    }
+    // The grown/shrunk extent may not overlap any other clip on the
+    // track (zero-overlap invariant, same check moveClipTo uses).
+    const int64_t newEnd = clip->timelineStart + newDur;
+    for (const Clip &other : clips_) {
+        if (other.id == clip->id || other.trackIndex != clip->trackIndex) {
+            continue;
+        }
+        if (other.timelineStart < newEnd && clip->timelineStart < other.timelineEnd()) {
+            return false;
+        }
+    }
+    clip->rate = rate;
+    pruneTransitions();
+    ++revision_;
+    return true;
+}
+
 const Clip *TimelineModel::clipAt(int64_t frame, int trackIndex) const {
     for (const Clip &clip : clips_) {
         if (clip.trackIndex != trackIndex) {

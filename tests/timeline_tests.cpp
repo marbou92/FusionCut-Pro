@@ -2,6 +2,7 @@
 // Pure data + operations; no Qt, no FFmpeg - runs anywhere ctest runs.
 
 #include <cmath>
+#include <limits>
 #include <string>
 
 #include "test_harness.h"
@@ -297,6 +298,183 @@ static void testRollEdit() {
     CHECK(!model.rollEdit(9, b, 10));
 }
 
+// ---- clip playback rate (setClipRate) ----
+static void testSetClipRate() {
+    TimelineModel model;
+    model.addTrack("V1", false);
+    model.addTrack("A1", true);
+    const int textTrack = model.insertTrack(2, "T1", false, true);
+    CHECK(textTrack == 2);
+
+    // Success at 2.0: the timeline duration halves, the source extent and
+    // the anchored start stay put, and the edit dirties the model.
+    const int64_t a = model.addClip(0, "v.mp4", "A", 100, 200, 40); // tl 40..140
+    CHECK(a > 0);
+    const uint64_t rev0 = model.revision();
+    CHECK(model.setClipRate(a, 2.0));
+    CHECK(model.revision() == rev0 + 1);
+    CHECK(model.clipById(a)->durationFrames() == 50); // llround(100/2.0)
+    CHECK(model.clipById(a)->timelineStart == 40);
+    CHECK(model.clipById(a)->sourceInFrames == 100);
+    CHECK(model.clipById(a)->sourceOutFrames == 200);
+    CHECK(model.clipById(a)->timelineEnd() == 90);
+
+    // Success at 0.5: the extent doubles (no follower - room to grow).
+    CHECK(model.setClipRate(a, 0.5));
+    CHECK(model.clipById(a)->durationFrames() == 200);
+    CHECK(model.clipById(a)->timelineStart == 40);
+    CHECK(model.clipById(a)->sourceInFrames == 100);
+    CHECK(model.clipById(a)->sourceOutFrames == 200);
+
+    // llround pin on a 3-frame source extent: 2.0 -> 2 (1.5 rounds away
+    // from zero), 1.5 -> 2 (exact), 0.75 -> 4 (exact).
+    const int64_t b = model.addClip(0, "v.mp4", "B", 500, 503, 1000); // tl 1000..1003
+    CHECK(b > 0);
+    CHECK(model.clipById(b)->durationFrames() == 3);
+    CHECK(model.setClipRate(b, 2.0));
+    CHECK(model.clipById(b)->durationFrames() == 2);
+    CHECK(model.clipById(b)->timelineStart == 1000);
+    CHECK(model.setClipRate(b, 1.5));
+    CHECK(model.clipById(b)->durationFrames() == 2);
+    CHECK(model.setClipRate(b, 0.75));
+    CHECK(model.clipById(b)->durationFrames() == 4);
+
+    // Failure pairs: every rejection leaves the rate AND the revision
+    // exactly as they were.
+    const uint64_t revFail = model.revision();
+    CHECK(!model.setClipRate(9999, 2.0)); // unknown id
+    CHECK(!model.setClipRate(b, 0.0));    // rate 0
+    CHECK(!model.setClipRate(b, -2.0));   // negative rate
+    CHECK(!model.setClipRate(b, std::numeric_limits<double>::quiet_NaN()));
+    CHECK(!model.setClipRate(b, std::numeric_limits<double>::infinity()));
+    CHECK(model.clipById(b)->rate == 0.75);
+    CHECK(model.revision() == revFail);
+
+    // Text clips have generated content - no speed.
+    TextDocument doc;
+    const int64_t t = model.addTextClip(textTrack, doc, 0, 30);
+    CHECK(t > 0);
+    const uint64_t revText = model.revision();
+    CHECK(!model.setClipRate(t, 2.0));
+    CHECK(model.clipById(t)->rate == 1.0);
+    CHECK(model.revision() == revText);
+
+    // Zombie guard: a 1-frame extent collapses to zero timeline frames at
+    // a huge (but finite) rate - rejected, same as the trims.
+    const int64_t z = model.addClip(0, "v.mp4", "Z", 900, 901, 2000); // tl 2000..2001
+    CHECK(z > 0);
+    const uint64_t revZ = model.revision();
+    CHECK(!model.setClipRate(z, 1.0e9)); // llround(1e-9) = 0
+    CHECK(model.clipById(z)->rate == 1.0);
+    CHECK(model.clipById(z)->durationFrames() == 1);
+    CHECK(model.revision() == revZ);
+
+    // Overlap rejection: slowing a clip into a follower is rejected and
+    // changes nothing; speeding up away from it opens a gap.
+    TimelineModel m2;
+    m2.addTrack("V1", false);
+    const int64_t l = m2.addClip(0, "v.mp4", "L", 0, 100, 0);   // 0..100
+    const int64_t f = m2.addClip(0, "v.mp4", "F", 0, 100, 100); // 100..200
+    CHECK(l > 0 && f > 0);
+    const uint64_t rev2 = m2.revision();
+    CHECK(!m2.setClipRate(l, 0.5)); // would grow 0..100 into 0..200
+    CHECK(m2.clipById(l)->rate == 1.0);
+    CHECK(m2.clipById(l)->durationFrames() == 100);
+    CHECK(m2.revision() == rev2);
+    CHECK(m2.setClipRate(l, 2.0));
+    CHECK(m2.clipById(l)->durationFrames() == 50);
+    CHECK(m2.clipById(l)->timelineEnd() == 50);
+    CHECK(m2.clipById(f)->timelineStart == 100); // follower untouched
+    CHECK(m2.clipAt(75, 0) == nullptr);          // the gap [50, 100)
+
+    // Head/tail nuance: growth is forward-only, so a clip can reach the
+    // tail of a clip that PRECEDES it in the clips vector. That is an
+    // overlap like any other - rejected - while landing exactly on the
+    // previous clip's head is legal (touching is not overlapping).
+    TimelineModel m3;
+    m3.addTrack("V1", false);
+    const int64_t p = m3.addClip(0, "v.mp4", "P", 0, 100, 200); // added first, tl 200..300
+    const int64_t q = m3.addClip(0, "v.mp4", "Q", 0, 200, 0);   // tl 0..200, touching P
+    CHECK(p > 0 && q > 0);
+    CHECK(m3.clips()[0].id == p);    // the previous clip comes first in clips
+    CHECK(m3.setClipRate(q, 1.002)); // llround(200/1.002) = 200: end stays on P's head
+    CHECK(m3.clipById(q)->durationFrames() == 200);
+    CHECK(m3.clipById(q)->timelineEnd() == 200);
+    CHECK(!m3.setClipRate(q, 0.5)); // grows into P's tail
+    CHECK(m3.clipById(q)->rate == 1.002);
+    // ...and an ADJACENT previous clip at the head must never cause a
+    // false rejection either (only the follower side can be hit).
+    TimelineModel m4;
+    m4.addTrack("V1", false);
+    m4.addClip(0, "v.mp4", "H", 0, 100, 0);                     // 0..100
+    const int64_t g = m4.addClip(0, "v.mp4", "G", 0, 100, 100); // 100..200
+    CHECK(g > 0);
+    CHECK(m4.setClipRate(g, 0.5)); // grows to 100..300, H adjacent before it
+    CHECK(m4.clipById(g)->durationFrames() == 200);
+    CHECK(m4.clipById(g)->timelineStart == 100);
+
+    // Transitions: a rate change that keeps the boundary adjacent keeps
+    // the transition (duration still fits -> kept); a speed-up that
+    // breaks adjacency prunes it, same policy as the trims.
+    TimelineModel m5;
+    m5.addTrack("V1", false);
+    const int64_t c1 = m5.addClip(0, "v.mp4", "C1", 0, 100, 0);   // 0..100
+    const int64_t c2 = m5.addClip(0, "v.mp4", "C2", 0, 100, 100); // 100..200
+    CHECK(c1 > 0 && c2 > 0);
+    CHECK(m5.addTransition(c1, c2, "dissolve.cross", 40) > 0);
+    CHECK(m5.setClipRate(c1, 1.004)); // llround(100/1.004) = 100: end stays put
+    CHECK(m5.clipById(c1)->durationFrames() == 100);
+    CHECK(m5.transitions().size() == 1);
+    CHECK(m5.transitions()[0].durationFrames == 40); // fits -> kept
+    CHECK(m5.setClipRate(c2, 2.0));                  // right side: start anchored, boundary intact
+    CHECK(m5.transitions().size() == 1);
+    CHECK(m5.transitions()[0].durationFrames == 40);
+    CHECK(m5.setClipRate(c1, 2.0)); // C1 -> 0..50: adjacency to C2 breaks
+    CHECK(m5.transitions().empty());
+
+    // Interplay: splitting a rate-2 clip keeps the rate on BOTH halves
+    // with rate-correct source halves; one timeline frame of trim-start
+    // consumes rate source frames.
+    TimelineModel m6;
+    m6.addTrack("V1", false);
+    const int64_t s = m6.addClip(0, "v.mp4", "S", 0, 200, 0, 2.0); // 0..100, rate 2
+    CHECK(s > 0);
+    CHECK(m6.clipById(s)->durationFrames() == 100);
+    CHECK(m6.splitAt(50, 0));
+    CHECK(m6.clips().size() == 2);
+    const Clip &sl = m6.clips()[0];
+    const Clip &sr = m6.clips()[1];
+    CHECK(sl.rate == 2.0 && sr.rate == 2.0);
+    CHECK(sl.sourceInFrames == 0 && sl.sourceOutFrames == 100);
+    CHECK(sr.sourceInFrames == 100 && sr.sourceOutFrames == 200);
+    CHECK(sl.durationFrames() == 50 && sr.durationFrames() == 50);
+    CHECK(sl.timelineStart == 0 && sr.timelineStart == 50);
+    CHECK(m6.trimClipStart(sr.id, 1));
+    CHECK(m6.clipById(sr.id)->sourceInFrames == 102); // 1 * rate 2
+    CHECK(m6.clipById(sr.id)->timelineStart == 51);
+    CHECK(m6.clipById(sr.id)->durationFrames() == 49); // llround(98/2)
+
+    // The snapshot round-trip carries the rate exactly.
+    const TimelineModel snap = m6.snapshot();
+    CHECK(m6.setClipRate(sr.id, 1.0));
+    CHECK(m6.clipById(sr.id)->rate == 1.0);
+    m6.restoreSnapshot(snap);
+    CHECK(m6.clipById(sr.id)->rate == 2.0);
+    CHECK(m6.clipById(sr.id)->sourceInFrames == 102);
+    CHECK(m6.clipById(sr.id)->durationFrames() == 49);
+
+    // Audio fades are TIMELINE frames: they ride a rate change unchanged.
+    TimelineModel m7;
+    m7.addTrack("A1", true);
+    const int64_t w = m7.addClip(0, "a.wav", "W", 0, 200, 0); // 0..200
+    CHECK(w > 0);
+    CHECK(m7.setClipAudioFades(w, 10, 20));
+    CHECK(m7.setClipRate(w, 2.0));
+    CHECK(m7.clipById(w)->durationFrames() == 100);
+    CHECK(m7.clipById(w)->fadeInFrames == 10);
+    CHECK(m7.clipById(w)->fadeOutFrames == 20);
+}
+
 static void testActiveVideoClipAt() {
     TimelineModel model;
     model.addTrack("V2", false); // index 0 = topmost
@@ -445,6 +623,7 @@ int main() {
     testRippleDelete();
     testRippleTrim();
     testRollEdit();
+    testSetClipRate();
     testActiveVideoClipAt();
     testGuardsAndRevisions();
     testSnapshotRestore();

@@ -49,6 +49,7 @@
 #include "project_format.h"
 #include "project_panel.h"
 #include "quick_mode_view.h"
+#include "speed_dialog.h"
 #include "srt.h"
 #include "text.h"
 #include "text_panel.h"
@@ -756,7 +757,12 @@ void MainWindow::buildMenus() {
         tr("Splits the selected clip (or the clip under the playhead on V1) at "
            "the current playhead position"));
     connect(splitMenuAction, &QAction::triggered, this, [this] { splitAtPlayhead(); });
-    addMenuAction(clip, tr("&Speed / Duration..."), QKeySequence(tr("Ctrl+R")))->setEnabled(false);
+    QAction *speedMenuAction =
+        addMenuAction(clip, tr("&Speed / Duration..."), QKeySequence(tr("Ctrl+R")));
+    speedMenuAction->setToolTip(
+        tr("Changes the selected clip's playback speed; its length rescales, linked "
+           "audio can follow"));
+    connect(speedMenuAction, &QAction::triggered, this, [this] { editClipSpeed(); });
     addMenuAction(clip, tr("&Reverse Clip"))->setEnabled(false);
     clip->addSeparator();
     QAction *proxyMenuAction =
@@ -1019,6 +1025,82 @@ void MainWindow::deleteSelectedClip() {
     updateSequenceDuration();
 }
 
+void MainWindow::editClipSpeed() {
+    const fc::Clip *clip = selectedClipId_ > 0 ? model_.clipById(selectedClipId_) : nullptr;
+    if (!clip) {
+        statusBar()->showMessage(tr("Select a clip to change its speed."), 6000);
+        return;
+    }
+    if (const fc::Track *track = model_.trackAt(clip->trackIndex); track && track->locked) {
+        statusBar()->showMessage(tr("Track %1 is locked - unlock it (header L) to change speed.")
+                                     .arg(QString::fromStdString(track->name)));
+        return;
+    }
+    if (clip->isText) {
+        statusBar()->showMessage(tr("Text clips have no playback speed."), 6000);
+        return;
+    }
+    // Linked audio siblings: a video+audio import places an audio clip
+    // with the SAME source range and placement on the audio lane under
+    // the video clip. Same source + in/out + start + current rate is
+    // the fingerprint those riders carry (they move/trim independently,
+    // so the check stays conservative - only exactly-linked clips are
+    // offered the shared speed change).
+    std::vector<int64_t> siblings;
+    for (const fc::Clip &other : model_.clips()) {
+        if (other.id == clip->id || other.isText || other.sourcePath != clip->sourcePath ||
+            other.sourceInFrames != clip->sourceInFrames ||
+            other.sourceOutFrames != clip->sourceOutFrames ||
+            other.timelineStart != clip->timelineStart || other.rate != clip->rate) {
+            continue;
+        }
+        if (const fc::Track *track = model_.trackAt(other.trackIndex); track && track->isAudio) {
+            siblings.push_back(other.id);
+        }
+    }
+    fc::SpeedDialog dlg(QString::fromStdString(clip->label), clip->rate,
+                        clip->sourceOutFrames - clip->sourceInFrames, clip->durationFrames(), fps_,
+                        !siblings.empty(), this);
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+    pushUndo();
+    // The video (or audio) clip first: a slower rate lengthens it, and
+    // a longer clip needs room on its own track (the model rejects the
+    // overlap instead of pushing neighbors).
+    if (!model_.setClipRate(clip->id, dlg.rate())) {
+        cancelUndoPush(); // the rescale was rejected
+        statusBar()->showMessage(
+            tr("Speed change rejected - there is no room on the track for the longer "
+               "clip."),
+            6000);
+        return;
+    }
+    int failedSiblings = 0;
+    if (dlg.includeLinkedAudio()) {
+        for (int64_t siblingId : siblings) {
+            if (!model_.setClipRate(siblingId, dlg.rate())) {
+                ++failedSiblings; // no room on the sibling's track
+            }
+        }
+    }
+    // The full extent-changing tail: the funnel refreshes the transport
+    // extent and the timeline, syncs the transition editor (a rescaled
+    // clip can shed or clamp a transition) and marks the project dirty;
+    // the audio snapshot re-flattens so the spans reach the live mix
+    // with the new rate; the monitor re-resolves the frame under the
+    // playhead through the new timeline->source mapping.
+    updateSequenceDuration();
+    rebuildAudioSnapshot();
+    requestFrameAt(playhead_);
+    QString note = tr("Clip speed set to %1%.").arg(QString::number(dlg.rate() * 100.0, 'f', 2));
+    if (failedSiblings > 0) {
+        note += tr(" %1 linked audio clip(s) kept their speed - no room on their track.")
+                    .arg(failedSiblings);
+    }
+    statusBar()->showMessage(note, 6000);
+}
+
 void MainWindow::moveClipTo(int64_t clipId, int trackIndex, int64_t startFrame) {
     const fc::Clip *clip = model_.clipById(clipId);
     if (!clip) {
@@ -1238,7 +1320,8 @@ void MainWindow::requestFrameAt(double seconds) {
     updateKeyframePanels();
     // composite program monitor: resolve the topmost video clip
     // under the timeline playhead and map the position into that
-    // clip's source (timeline frame - clip start + source in-point).
+    // clip's source (timeline frame - clip start, scaled by the
+    // clip's rate, + source in-point).
     // One decoder serves the whole timeline: moving the playhead into
     // a clip from a different source lazily switches the decode source
     // (the switch is debounced per clip, not per frame).
@@ -1273,8 +1356,14 @@ void MainWindow::requestFrameAt(double seconds) {
             ensureHeldIncomingFrame(sample);
         }
     }
-    const double srcSeconds =
-        static_cast<double>(frame - clip->timelineStart + clip->sourceInFrames) / fps_;
+    // Timeline frames -> source seconds THROUGH THE CLIP'S RATE: a
+    // clip at rate 2 burns source frames twice as fast, so its
+    // timeline offset scales by `rate` before the source in-point is
+    // added. At rate 1.0 the multiplication is by exactly 1.0 - the
+    // formula is bit-identical to the old no-rate mapping.
+    const double srcSeconds = (static_cast<double>(frame - clip->timelineStart) * clip->rate +
+                               static_cast<double>(clip->sourceInFrames)) /
+                              fps_;
     const QString clipSource = QString::fromStdString(clip->sourcePath);
     if (clipSource != loadedPath_) {
         // Source switch: open the clip's media (proxy when available)
@@ -2544,8 +2633,13 @@ void MainWindow::runExportJob(const QString &path, int width, int height, int cr
     }
 
     auto fetchFrame = [&](const fc::Clip &clip, int64_t timelineFrame, QImage &out) -> bool {
-        const double srcSec =
-            static_cast<double>(timelineFrame - clip.timelineStart + clip.sourceInFrames) / fps;
+        // The preview's mapping exactly: timeline offset scaled by the
+        // clip's playback rate, then the source in-point (at rate 1.0
+        // the multiplication is exact, so the old formula is preserved
+        // bit-for-bit for every rate-free project).
+        const double srcSec = (static_cast<double>(timelineFrame - clip.timelineStart) * clip.rate +
+                               static_cast<double>(clip.sourceInFrames)) /
+                              fps;
         // the frozen map is const - look up, never insert (every source
         // in the snapshot was resolved on the GUI thread, so the miss
         // path only guards against a bug, not a normal case).

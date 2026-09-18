@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -697,6 +698,60 @@ void testAudioStateRejections() {
     }
 }
 
+// Clip playback rates round-trip bitwise (the writer's shortest-exact
+// number format reproduces every double exactly), and the reader
+// enforces the (0, 100] rate range at parse time.
+void testRateRoundTrip() {
+    TimelineModel m;
+    m.setFps(24.0);
+    m.addTrack("V1", false);
+    // One clip per rate, laid out with rate-correct durations so the
+    // model's own invariants hold: 2.0 -> 100, 0.5 -> 200, 1.25 -> 400.
+    const int64_t fast = m.addClip(0, "a.mp4", "fast", 0, 200, 0, 2.0);    // 0..100
+    const int64_t slow = m.addClip(0, "b.mp4", "slow", 0, 100, 100, 0.5);  // 100..300
+    const int64_t frac = m.addClip(0, "c.mp4", "frac", 0, 500, 300, 1.25); // 300..700
+    CHECK(fast > 0 && slow > 0 && frac > 0);
+    CHECK(m.clips()[0].durationFrames() == 100);
+    CHECK(m.clips()[1].durationFrames() == 200);
+    CHECK(m.clips()[2].durationFrames() == 400);
+
+    const std::string text = serializeProject(m);
+    CHECK(text.find("\"rate\":2") != std::string::npos);
+    CHECK(text.find("\"rate\":0.5") != std::string::npos);
+    CHECK(text.find("\"rate\":1.25") != std::string::npos);
+
+    TimelineModel loaded;
+    std::string error;
+    CHECK(parseProject(text, loaded, error));
+    CHECK(error.empty());
+    CHECK(loaded.clips().size() == 3);
+    CHECK(loaded.clips()[0].durationFrames() == 100);
+    CHECK(loaded.clips()[1].durationFrames() == 200);
+    CHECK(loaded.clips()[2].durationFrames() == 400);
+    // Bitwise rate equality: memcmp the stored doubles, not ==.
+    for (size_t i = 0; i < m.clips().size(); ++i) {
+        CHECK(std::memcmp(&m.clips()[i].rate, &loaded.clips()[i].rate, sizeof(double)) == 0);
+    }
+    // Deterministic re-serialization of the loaded model.
+    CHECK(serializeProject(loaded) == text);
+
+    // The reader rejects rates outside (0, 100] whole-file. rate 0 dies
+    // on the lower bound; rate 150 on the upper bound with an extent
+    // that would survive the zombie guard at that rate (1500/150 = 10
+    // frames) so the RANGE check is what fires.
+    const char *trackPrefix =
+        "{\"format\":1,\"fps\":24,\"tracks\":[{\"name\":\"V\",\"audio\":false,"
+        "\"locked\":false,\"muted\":false,\"solo\":false}],\"clips\":[";
+    CHECK(!parseProject(std::string(trackPrefix) +
+                            "{\"id\":1,\"track\":0,\"source\":\"a\",\"label\":\"a\",\"in\":0,"
+                            "\"out\":1500,\"start\":0,\"rate\":0}]}",
+                        m, error));
+    CHECK(!parseProject(std::string(trackPrefix) +
+                            "{\"id\":1,\"track\":0,\"source\":\"a\",\"label\":\"a\",\"in\":0,"
+                            "\"out\":1500,\"start\":0,\"rate\":150}]}",
+                        m, error));
+}
+
 int main() {
     testRoundTrip();
     testParserStrictness();
@@ -707,6 +762,7 @@ int main() {
     testTextAnimationRejections();
     testAudioStateRoundTrip();
     testAudioStateRejections();
+    testRateRoundTrip();
 
     return testExitCode("project");
 }

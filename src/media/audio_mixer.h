@@ -43,6 +43,12 @@ struct AudioSpan {
     double fadeOutSec = 0.0;  // linear ramp at the tail
     double gain = 1.0;        // linear, the track's fader baked in
     double pan = 0.0;         // [-1..1], the track's pan baked in
+    // Playback speed: source seconds consumed per timeline second
+    // (1.0 = normal, 2.0 = double speed). The extent stays in TIMELINE
+    // seconds - at 2.0 the span reads twice the source length over the
+    // same window, so the audio plays at double pitch (and half pitch
+    // at 0.5). Non-finite or non-positive values are treated as 1.0.
+    double rate = 1.0;
 };
 
 class AudioWindowMixer {

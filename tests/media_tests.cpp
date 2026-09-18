@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 #include "test_harness.h"
@@ -720,6 +721,98 @@ void testAudioWindowMixer() {
     CHECK(tolerant.pull(bad, 0, 4800, in.data(), mixedError)); // still silent
 }
 
+void testAudioSpanRate() {
+    const std::string file = pathOf("mix_rate_src.mp4");
+    std::string error;
+    fc::TestMediaSpec spec;
+    spec.width = 320;
+    spec.height = 180;
+    spec.fps = 24;
+    spec.seconds = 4.0; // head-room for the 2x span's source consumption
+    spec.audioHz = 440;
+    spec.audioSampleRate = 44100;
+    CHECK(fc::generateTestVideo(file, spec, error));
+
+    // DOUBLE speed: a 1 s TIMELINE span consuming 2 s of source. The
+    // mixer reads the source twice as fast, so the 440 Hz tone plays at
+    // 880 Hz (linear interpolation resamples the waveform; the Goertzel
+    // bins below are exact over the 100 ms windows - 44/88 cycles).
+    std::vector<fc::AudioSpan> spans;
+    fc::AudioSpan fast;
+    fast.path = file;
+    fast.srcStartSec = 0.0;
+    fast.startSec = 0.0;
+    fast.endSec = 1.0;
+    fast.gain = 1.0;
+    fast.rate = 2.0;
+    spans.push_back(fast);
+
+    fc::AudioWindowMixer mixer(48000, 2);
+    std::vector<float> in(2 * 4800);                         // 100 ms
+    CHECK(mixer.pull(spans, 24000, 4800, in.data(), error)); // tl [0.5, 0.6) -> src [1.0, 1.2)
+    CHECK(rms(in) > 0.08);
+    CHECK(goertzel(in, 880.0, 48000) > 0.3);
+    CHECK(goertzel(in, 440.0, 48000) < 0.2);
+
+    // Sequential monotonic windows roll through the decode exactly like
+    // the rate-1 battery (each pull's source window is 2x its timeline
+    // window now - the chunk-coverage rules key on source seconds).
+    for (int w = 0; w < 4; ++w) {
+        CHECK(mixer.pull(spans, 28800 + w * 4800, 4800, in.data(), error));
+        CHECK(rms(in) > 0.08);
+    }
+
+    // Past the span's TIMELINE end the mix is silent even though the
+    // source has 3 more seconds of content: the extent stays in
+    // timeline seconds (a naive endSec*rate implementation leaks here).
+    CHECK(mixer.pull(spans, 52800, 2400, in.data(), error)); // tl [1.1, 1.15)
+    for (size_t i = 0; i < in.size(); ++i) {
+        CHECK(in[i] == 0.0f);
+    }
+
+    // A rate-2 span anchored at the source's tail runs the decode into
+    // a clean EOF mid-coverage - silence past it, never an error.
+    spans[0].srcStartSec = 3.0;
+    spans[0].startSec = 0.0;
+    spans[0].endSec = 0.5;                                   // consumes source [3.0, 4.0)
+    CHECK(mixer.pull(spans, 19200, 4800, in.data(), error)); // tl [0.4, 0.5) -> src [3.8, 4.0)
+    CHECK(error.empty());
+    CHECK(rms(in) > 0.08);
+
+    // HALF speed: a 2 s timeline span consuming 1 s of source - the
+    // tone drops an octave to 220 Hz (and the backward jump re-seeks).
+    fc::AudioSpan slow;
+    slow.path = file;
+    slow.srcStartSec = 0.0;
+    slow.startSec = 0.0;
+    slow.endSec = 2.0;
+    slow.gain = 1.0;
+    slow.rate = 0.5;
+    std::vector<fc::AudioSpan> slowSpans = {slow};
+    CHECK(mixer.pull(slowSpans, 48000, 4800, in.data(), error)); // tl [1.0, 1.1) -> src [0.5, 0.55)
+    CHECK(rms(in) > 0.08);
+    CHECK(goertzel(in, 220.0, 48000) > 0.3);
+    CHECK(goertzel(in, 440.0, 48000) < 0.2);
+
+    // An explicit rate of 1.0 must take the pinned integer-stride path:
+    // the plain 440 Hz tone comes back untouched.
+    spans[0].srcStartSec = 0.0;
+    spans[0].startSec = 0.0;
+    spans[0].endSec = 1.0;
+    spans[0].rate = 1.0;
+    CHECK(mixer.pull(spans, 0, 4800, in.data(), error));
+    CHECK(rms(in) > 0.1);
+    CHECK(goertzel(in, 440.0, 48000) > 0.4);
+
+    // Defensive: non-finite / non-positive rates are treated as 1.0.
+    spans[0].rate = 0.0;
+    CHECK(mixer.pull(spans, 24000, 4800, in.data(), error));
+    CHECK(rms(in) > 0.1);
+    spans[0].rate = std::numeric_limits<double>::quiet_NaN();
+    CHECK(mixer.pull(spans, 24000, 4800, in.data(), error));
+    CHECK(rms(in) > 0.1);
+}
+
 void testExportWithAudio() {
     const std::string dst = pathOf("export_audio.mp4");
     std::string error;
@@ -829,6 +922,7 @@ int main() {
     testAudioDecoder();
     testAudioDecoderUpsample();
     testAudioWindowMixer();
+    testAudioSpanRate();
     testExportWithAudio();
 
     return testExitCode("media");

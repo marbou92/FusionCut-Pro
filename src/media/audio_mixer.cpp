@@ -101,11 +101,16 @@ bool AudioWindowMixer::pull(const std::vector<AudioSpan> &spans, int64_t startSa
             continue;
         }
 
-        // The source-second range this window needs from the span.
+        // The source-second range this window needs from the span. At a
+        // playback rate != 1 the clip consumes source seconds `speed`
+        // times faster than timeline seconds, so the offset into the
+        // source scales by `speed` (at 1.0 the multiplication is by
+        // exactly 1.0 - bit-identical to the unscaled arithmetic).
+        const double speed = (std::isfinite(span.rate) && span.rate > 0.0) ? span.rate : 1.0;
         const double srcFrom =
-            span.srcStartSec + (std::max(windowStartSec, span.startSec) - span.startSec);
+            span.srcStartSec + (std::max(windowStartSec, span.startSec) - span.startSec) * speed;
         const double srcTo =
-            span.srcStartSec + (std::min(windowEndSec, span.endSec) - span.startSec);
+            span.srcStartSec + (std::min(windowEndSec, span.endSec) - span.startSec) * speed;
 
         // Open on demand.
         if (!channel.dec) {
@@ -217,11 +222,19 @@ bool AudioWindowMixer::pull(const std::vector<AudioSpan> &spans, int64_t startSa
         }
 
         // Chunk sample j sits at source-second c0 + j / rate, which maps
-        // to timeline-second spanStart + (c0 + j / rate - srcStart), i.e.
-        // dst sample kFloat + j with kFloat below. The mapping anchors on
-        // the chunk's own pts (sub-sample error bounded, never drifts).
-        const double kFloatBase = (span.startSec - span.srcStartSec) * static_cast<double>(rate) -
-                                  static_cast<double>(startSample);
+        // to timeline-second spanStart + (c0 + j / rate - srcStart) at
+        // speed 1 - i.e. dst sample kFloat + j with kFloat below. The
+        // mapping anchors on the chunk's own pts (sub-sample error
+        // bounded, never drifts). At a playback rate != 1 the span
+        // consumes source seconds `speed` times faster, so the source
+        // offset divides by `speed` on the way into timeline time:
+        // fi(j) = kFloat + j / speed, linearly interpolated between the
+        // two nearest output samples. Division by exactly 1.0 is exact,
+        // so the speed == 1.0 branch below keeps the pinned
+        // integer-stride scatter bit-identical.
+        const double kFloatBase =
+            (span.startSec - span.srcStartSec / speed) * static_cast<double>(rate) -
+            static_cast<double>(startSample);
         for (const Chunk &chunk : channel.chunks) {
             if (chunkEndSec(chunk, rate) <= srcFrom - 1.0e-9) {
                 continue;
@@ -248,33 +261,85 @@ bool AudioWindowMixer::pull(const std::vector<AudioSpan> &spans, int64_t startSa
                     continue;
                 }
             }
-            const double kFloat = kFloatBase + chunk.ptsSec * static_cast<double>(rate);
-            const int64_t k0 = static_cast<int64_t>(std::llround(kFloat));
-            for (int j = j0; j < chunk.frames; ++j) {
-                const int64_t k = k0 + j;
-                if (k < 0) {
-                    continue;
+            const double kFloat = kFloatBase + chunk.ptsSec * static_cast<double>(rate) / speed;
+            if (speed == 1.0) {
+                const int64_t k0 = static_cast<int64_t>(std::llround(kFloat));
+                for (int j = j0; j < chunk.frames; ++j) {
+                    const int64_t k = k0 + j;
+                    if (k < 0) {
+                        continue;
+                    }
+                    if (k >= sampleCount) {
+                        break;
+                    }
+                    // Fades evaluate at the sample's own timeline position.
+                    const double tSec = static_cast<double>(startSample + k) / rate;
+                    const double local = tSec - span.startSec;
+                    double fade = 1.0;
+                    if (fadeIn > 0.0 || fadeOut > 0.0) {
+                        fade = std::min(audioFadeMultiplier(local, fadeIn),
+                                        audioFadeMultiplier(span.endSec - tSec, fadeOut));
+                    }
+                    const double gl = gainL * fade;
+                    const double gr = gainR * fade;
+                    const float *src = chunk.samples.data() + size_t(j) * ch;
+                    float *d = dst + size_t(k) * ch;
+                    if (ch == 2) {
+                        d[0] += static_cast<float>(static_cast<double>(src[0]) * gl);
+                        d[1] += static_cast<float>(static_cast<double>(src[1]) * gr);
+                    } else {
+                        d[0] += static_cast<float>(static_cast<double>(src[0]) * gl);
+                    }
                 }
-                if (k >= sampleCount) {
-                    break;
-                }
-                // Fades evaluate at the sample's own timeline position.
-                const double tSec = static_cast<double>(startSample + k) / rate;
-                const double local = tSec - span.startSec;
-                double fade = 1.0;
-                if (fadeIn > 0.0 || fadeOut > 0.0) {
-                    fade = std::min(audioFadeMultiplier(local, fadeIn),
-                                    audioFadeMultiplier(span.endSec - tSec, fadeOut));
-                }
-                const double gl = gainL * fade;
-                const double gr = gainR * fade;
-                const float *src = chunk.samples.data() + size_t(j) * ch;
-                float *d = dst + size_t(k) * ch;
-                if (ch == 2) {
-                    d[0] += static_cast<float>(static_cast<double>(src[0]) * gl);
-                    d[1] += static_cast<float>(static_cast<double>(src[1]) * gr);
-                } else {
-                    d[0] += static_cast<float>(static_cast<double>(src[0]) * gl);
+            } else {
+                // Speed-shifted blend: per-sample float index, no
+                // accumulation (fi is recomputed from j so error stays
+                // sub-sample and never drifts), fraction of a sample
+                // linearly shared with the next output slot. fi is
+                // strictly increasing in j, so the window-exit break is
+                // safe.
+                const double invSpeed = 1.0 / speed;
+                for (int j = j0; j < chunk.frames; ++j) {
+                    const double fi = kFloat + static_cast<double>(j) * invSpeed;
+                    const double kf = std::floor(fi);
+                    const int64_t k = static_cast<int64_t>(kf);
+                    if (k >= sampleCount) {
+                        break;
+                    }
+                    const double frac = fi - kf;
+                    // Fades evaluate at the sample's own (fractional)
+                    // timeline position.
+                    const double tSec = (static_cast<double>(startSample) + fi) / rate;
+                    const double local = tSec - span.startSec;
+                    double fade = 1.0;
+                    if (fadeIn > 0.0 || fadeOut > 0.0) {
+                        fade = std::min(audioFadeMultiplier(local, fadeIn),
+                                        audioFadeMultiplier(span.endSec - tSec, fadeOut));
+                    }
+                    const double gl = gainL * fade;
+                    const double gr = gainR * fade;
+                    const float *src = chunk.samples.data() + size_t(j) * ch;
+                    if (k >= 0) {
+                        float *d = dst + size_t(k) * ch;
+                        if (ch == 2) {
+                            d[0] +=
+                                static_cast<float>(static_cast<double>(src[0]) * gl * (1.0 - frac));
+                            d[1] +=
+                                static_cast<float>(static_cast<double>(src[1]) * gr * (1.0 - frac));
+                        } else {
+                            d[0] +=
+                                static_cast<float>(static_cast<double>(src[0]) * gl * (1.0 - frac));
+                        }
+                    }
+                    if (frac > 0.0 && k + 1 >= 0 && k + 1 < sampleCount) {
+                        float *d = dst + size_t(k + 1) * ch;
+                        if (ch == 2) {
+                            d[0] += static_cast<float>(static_cast<double>(src[0]) * gl * frac);
+                            d[1] += static_cast<float>(static_cast<double>(src[1]) * gr * frac);
+                        } else {
+                            d[0] += static_cast<float>(static_cast<double>(src[0]) * gl * frac);
+                        }
+                    }
                 }
             }
         }

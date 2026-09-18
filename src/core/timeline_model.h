@@ -262,6 +262,19 @@ public:
     // right clip's source in-point negative.
     bool rollEdit(int64_t leftId, int64_t rightId, int64_t deltaFrames);
 
+    // Sets a clip's playback rate (1.0 = normal). The clip's timeline
+    // start stays anchored; its duration becomes durationFromRange() of
+    // the UNCHANGED source extent at the new rate - faster rates shrink
+    // the clip and leave a gap after it, slower rates grow it. Returns
+    // false on an unknown clip, a text clip (generated content has no
+    // speed), a non-finite or non-positive rate, a resulting
+    // durationFrames() < 1 (extreme rates collapse the extent), or when
+    // the grown clip would overlap a neighbor on its track. Transitions
+    // on a boundary this change breaks are pruned (same policy as
+    // trims). Changing linked audio-clip siblings in step is the
+    // CALLER's job (the model is per-clip).
+    bool setClipRate(int64_t clipId, double rate);
+
     const Clip *clipAt(int64_t frame, int trackIndex) const;
     Clip *clipById(int64_t id);
     // Const lookup for const views (findDropPosition resolves the moving
