@@ -21,6 +21,7 @@
 #include <QToolTip>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <cmath>
@@ -1452,7 +1453,13 @@ void TimelinePanel::wheelEvent(QWheelEvent *event) {
         // horizontal wheel delta (y == 0) must not zoom - the ternary
         // below would read it as "zoom out".
         if (event->angleDelta().y() != 0) {
+            // QWheelEvent::pos() is deprecated from Qt 5.15 (replaced by
+            // position(), which does not exist on the 5.12 build floor).
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+            const int anchorX = static_cast<int>(event->position().x());
+#else
             const int anchorX = event->pos().x();
+#endif
             applyZoom(pps_ + (event->angleDelta().y() > 0 ? 20.0 : -20.0), anchorX,
                       xToFrame(anchorX));
         }

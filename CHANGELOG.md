@@ -313,6 +313,17 @@ version stays at 0.1.0 until the first public build.
   map, status-bar resolution/fps + dirty-dot readouts, and mode
   persistence; imports funnel through a shared dedupe path.
 
+- **CI fix (Qt app build, Ubuntu Qt 5.15):** the Scopes dock's forward
+  declaration in mainwindow.h moved inside namespace fc to match
+  scopes_panel.h. The old global-scope forward declaration declared a
+  different, unrelated type, so scopesPanel_ could not accept the
+  fc::ScopesPanel the workspace builds - three hard errors at the
+  buildProWorkspace dock creation and the applyProgramFrame feed. The
+  timeline's Ctrl+wheel zoom anchor now reads QWheelEvent::position()
+  on Qt >= 5.15 (pos() is deprecated there and warned on every CI
+  run) with a version-guarded fallback to pos() on the 5.12-5.14
+  build floor.
+
 - **Clip Speed / Duration (Clip menu, Ctrl+R):** a dialog edits the
   selected clip's playback rate - the timeline length rescales from
   the unchanged source extent (live preview in frames and seconds;

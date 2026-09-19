@@ -34,7 +34,13 @@ class MixerPanel;
 class PreviewCanvas;
 class ProjectPanel;
 class QuickModeView;
+// ScopesPanel lives INSIDE namespace fc (scopes_panel.h), unlike the
+// panel classes above. Forward-declaring it here at global scope would
+// create a different, unrelated type: scopesPanel_ would not accept the
+// fc::ScopesPanel the workspace builds (CI mainwindow.cpp:511/512/1673).
+namespace fc {
 class ScopesPanel;
+}
 class TextPanel;
 class TimelinePanel;
 class TransitionsPanel;
