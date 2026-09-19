@@ -44,6 +44,10 @@ add_executable(FusionCutPro WIN32
     audio_preview.h
     export_dialog.cpp
     export_dialog.h
+    export_progress.cpp
+    export_progress.h
+    scopes_panel.cpp
+    scopes_panel.h
     speed_dialog.cpp
     speed_dialog.h
     quick_mode_view.cpp

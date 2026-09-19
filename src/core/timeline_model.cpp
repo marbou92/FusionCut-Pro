@@ -59,6 +59,19 @@ bool TimelineModel::setTrackAudio(int index, double gainDb, double pan) {
     return true;
 }
 
+bool TimelineModel::renameTrack(int index, const std::string &name) {
+    Track *track = trackAt(index);
+    if (!track || name.empty()) {
+        return false; // unknown lane or empty name
+    }
+    if (track->name == name) {
+        return true; // no change, no bump
+    }
+    track->name = name;
+    ++revision_;
+    return true;
+}
+
 bool TimelineModel::setClipAudioFades(int64_t clipId, int64_t fadeInFrames, int64_t fadeOutFrames) {
     Clip *clip = clipById(clipId);
     if (!clip) {

@@ -264,6 +264,55 @@ version stays at 0.1.0 until the first public build.
 
 ### Application
 
+- **Workspace & panels UI round (63-item wishlist):** the timeline panel
+  scrolls VERTICALLY when the track stack overflows the lanes viewport
+  (frozen ruler row + frozen header column, drag auto-paging at the
+  viewport edges, Shift+wheel horizontal routing, plain wheel falling
+  back to horizontal when nothing overflows) and enforces a
+  minimumSizeHint (tool row + ruler + two track rows + scrollbars) so
+  the bottom dock can no longer shrink the timeline into unusability.
+  Ctrl+wheel zooms around the cursor, = / - / \ step or fit the zoom,
+  playback auto-follows the playhead (any manual scroll disarms it
+  until the next playback start), a magnet indicator line shows
+  engaged snapping (Alt suspends it), Alt+hover shows a clip tooltip
+  (name, in/out, duration, rate), rate-adjusted clips carry a warning
+  "2x" chip whose double-click opens the Speed dialog, clips with an
+  effect stack carry an "fx N" chip, inter-clip gaps render as a grey
+  hatch (an overlap would scream in red), the ruler scrubs and draws
+  minor ticks, and the track header gains L/M/S tooltips, a right-click
+  Lock/Mute/Solo menu, and double-click inline renaming through the new
+  revision-bumping, snapshot-round-tripped TimelineModel::renameTrack.
+  Monitors gain action/title-safe guides (') and a self-contained
+  1/1 - 1/2 - 1/4 preview-quality dropdown (paint-only, never export);
+  the transport's timecode is click-to-edit (parse errors shake) and
+  formats 29.97/59.94 as drop-frame "HH:MM:SS;FF" (display-side only -
+  the model keeps counting frames); a volume slider + mute mirror the
+  mixer's master gain. The Program frame feeds a new Scopes dock (RGB
+  parade + luma waveform, throttled analysis). The Project panel grows
+  a List/Grid view toggle with lazy first-frame thumbnail requests, a
+  name/type filter ("/"), a per-source usage-count badge delegate, and
+  import feedback that counts skipped duplicates instead of silently
+  re-adding them. Effects get persisted favorites (a pinned section)
+  and a drag source (application/x-fc-effect-id) the timeline accepts
+  onto clips; Transitions gain a schematic preview card with a hover
+  flipbook. Effect Controls grows per-parameter keyframe mini-lanes
+  (drag to retime, right-click to delete, read-only until the clip
+  duration is passed) and per-row reset-to-catalog-default chips; Color
+  adds Neutral/Warm/Cool/Film preset chips and an empty-state overlay;
+  Text adds a live throttled layer preview, animation preset chips, an
+  RTL/complex-script detection hint, and a px readout; the Mixer adds
+  peak-hold level meters (master + strips), a rightmost accent-framed
+  master strip, and double-click fader reset. The export dialog gains
+  presets (YouTube 1080p / Social 9:16 / Proxy), an output-path row
+  with recent locations, and a bitrate-heuristic size estimate; a new
+  ExportProgress dialog carries percent/fps/ETA/cancel. Quick Mode adds
+  the Import->Arrange->Export step rail, a whole-page file-drop zone,
+  and a template strip. The shell learns View > Workspace presets,
+  Reset Workspace, Distraction-Free Playback (Ctrl+Alt+D), Fullscreen
+  Preview (F11), safe-margin toggle, an RTL layout preview, a keyboard
+  map, status-bar resolution/fps + dirty-dot readouts, and mode
+  persistence; imports funnel through a shared dedupe path.
+
 - **Clip Speed / Duration (Clip menu, Ctrl+R):** a dialog edits the
   selected clip's playback rate - the timeline length rescales from
   the unchanged source extent (live preview in frames and seconds;
@@ -475,7 +524,7 @@ version stays at 0.1.0 until the first public build.
 
 ### Tests
 
-Ten ctest suites, ~46,500 checks total: core (102), timeline (273),
+Ten ctest suites, ~46,600 checks total: core (102), timeline (285),
 audio (1714), effects (3833), transitions (4531), project (190),
 text (453), emoji (374), srt (83), media (34,994, including the
 upsample and span-rate batteries). Synthetic media is generated at runtime; the emoji suite

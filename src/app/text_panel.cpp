@@ -7,17 +7,25 @@
 #include <QFileInfo>
 #include <QFontComboBox>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTextObject>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+
+#include "ui_theme.h"
+
+// ui_theme.h tokens live in fc::ui; the panel addresses them as ui::...
+using namespace fc;
 
 namespace {
 
@@ -25,6 +33,24 @@ constexpr int kDefaultSize = 64;
 // Sensible animation default when the user first picks a kind: about
 // half a second at 24 fps.
 constexpr int kDefaultAnimFrames = 12;
+
+// Direction-scan throttle (suggestion #41): a 250 ms single-shot keeps
+// the per-keystroke scan off the hot path.
+constexpr int kDirScanMs = 250;
+// Preview-request throttle (suggestion #43).
+constexpr int kPreviewMs = 300;
+// The mini render's fixed geometry: a 16:9 letterbox holder (#43).
+constexpr int kPreviewW = 176;
+constexpr int kPreviewH = 99;
+// >= 28 px hit targets on small buttons (#63).
+constexpr int kChipMinHeight = 28;
+// Animation preset chip durations (#44) - the fields that ACTUALLY exist
+// in TextDocument::animation (inKind/outKind/inFrames/outFrames; kinds
+// None, Fade, Slide, Pop, Typewriter, Wipe - so Pop/Wipe simply have no
+// chip and nothing else was invented).
+constexpr int64_t kFadeChipFrames = 12;
+constexpr int64_t kTypewriterChipFrames = 24;
+constexpr int64_t kSlideChipFrames = 15;
 
 // Combo row order == the enum order in text.h.
 int animKindToIndex(fc::TextAnimKind kind) {
@@ -111,7 +137,25 @@ int formatPixelSize(const QTextCharFormat &fmt, int fallback) {
 } // namespace
 
 TextPanel::TextPanel(QWidget *parent) : QWidget(parent) {
+    // Throttled follow-ups for the editor (both single-shot, restarted on
+    // every textChanged so only the settled content is processed).
+    dirTimer_ = new QTimer(this);
+    dirTimer_->setSingleShot(true);
+    dirTimer_->setInterval(kDirScanMs);
+    connect(dirTimer_, &QTimer::timeout, this, [this] { scanDirection(); });
+    previewTimer_ = new QTimer(this);
+    previewTimer_->setSingleShot(true);
+    previewTimer_->setInterval(kPreviewMs);
+    connect(previewTimer_, &QTimer::timeout, this, [this] {
+        // No clip guard on purpose: with no clip selected the preview
+        // still previews the editor content - the coordinator's render
+        // path decides what to make of it (#43).
+        emit previewRequested(documentFromEditor());
+    });
+
     buildUi();
+    buildAnimChips();
+    buildPreview();
     setClip(-1, nullptr);
 }
 
@@ -143,6 +187,10 @@ void TextPanel::buildUi() {
         if (!loading_) {
             pushDoc();
         }
+        // Both throttles restart on every content change (including the
+        // bursts during loadIntoEditor - they settle on the final state).
+        dirTimer_->start();
+        previewTimer_->start();
     });
     layout->addWidget(editor_, 1);
 
@@ -156,6 +204,10 @@ void TextPanel::buildUi() {
     family_->setEditable(false);
     family_->setToolTip(tr("Font family of the selection"));
     family_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    // #42: QFontComboBox renders every family name in its own face by
+    // default (its internal model sets each item's QFont) - do NOT add a
+    // delegate to "improve" this; an overridden delegate would replace
+    // the per-item fonts and lose the preview.
     connect(family_, &QFontComboBox::currentFontChanged, this, [this](const QFont &font) {
         if (loading_) {
             return;
@@ -163,6 +215,7 @@ void TextPanel::buildUi() {
         QTextCharFormat fmt;
         fmt.setFontFamily(font.family());
         mergeFormatOn(editor_, fmt);
+        updatePxReadout(); // family change refreshes the px readout too (#42)
         pushDoc();
     });
     styleLayout->addWidget(family_, 1);
@@ -173,6 +226,7 @@ void TextPanel::buildUi() {
     size_->setToolTip(tr("Pixel size of the selection"));
     connect(size_, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), this,
             [this](int value) {
+                updatePxReadout(); // display-only; runs during loads too
                 if (loading_) {
                     return;
                 }
@@ -182,6 +236,14 @@ void TextPanel::buildUi() {
                 pushDoc();
             });
     styleLayout->addWidget(size_);
+
+    // #42: the size's physical-pixel readout at the current display scale.
+    pxReadout_ = new QLabel(styleRow);
+    pxReadout_->setMinimumWidth(48);
+    pxReadout_->setToolTip(tr("Pixel height at the current display scale"));
+    pxReadout_->setStyleSheet(QStringLiteral("color: %1;").arg(ui::color(ui::kTextDim).name()));
+    updatePxReadout();
+    styleLayout->addWidget(pxReadout_);
 
     bold_ = new QToolButton(styleRow);
     bold_->setText(tr("B"));
@@ -298,7 +360,23 @@ void TextPanel::buildUi() {
     alignLayout->addWidget(alignRight_);
 
     alignLayout->addStretch(1);
+
+    // #41: the direction hint lives next to the alignment controls - the
+    // content's auto-detected paragraph direction (a subtle, dim label).
+    dirHint_ = new QLabel(alignRow);
+    dirHint_->setStyleSheet(QStringLiteral("color: %1;").arg(ui::color(ui::kTextDim).name()));
+    dirHint_->setToolTip(tr("Detected text direction (the renderer always shapes through the "
+                            "platform bidi engine)"));
+    alignLayout->addWidget(dirHint_);
     layout->addWidget(alignRow);
+
+    // #41: the second hint state - visible only while the content needs
+    // complex shaping (RTL runs, combining marks, bidi controls).
+    shapedHint_ = new QLabel(this);
+    shapedHint_->setText(tr("shaped text detected - rendered via the platform bidi engine"));
+    shapedHint_->setStyleSheet(QStringLiteral("color: %1;").arg(ui::color(ui::kTextDim).name()));
+    shapedHint_->hide();
+    layout->addWidget(shapedHint_);
 
     // ---- Position row: anchor X/Y + wrap ----
     auto *posRow = new QWidget(this);
@@ -516,6 +594,96 @@ void TextPanel::buildUi() {
     editor_->setTabChangesFocus(true);
 }
 
+// Animation preset chips (#44): a pure UI affordance over the EXISTING
+// animation controls - each chip sets the same combos/spinboxes a user
+// would (values pushed through the normal pushDoc path, coalesced into
+// ONE emission via signal blocking). Chips light up while their preset
+// matches the current control state. Only animations that exist in
+// fc::TextDocument get a chip (None/Fade/Typewriter/Slide; Pop and Wipe
+// have no preset and stay reachable through the combos).
+void TextPanel::buildAnimChips() {
+    auto *chipRow = new QWidget(this);
+    auto *chipLayout = new QHBoxLayout(chipRow);
+    chipLayout->setContentsMargins(0, 0, 0, 0);
+    chipLayout->setSpacing(4);
+
+    auto *chipLabel = new QLabel(tr("Presets:"), chipRow);
+    chipLayout->addWidget(chipLabel);
+
+    struct ChipSpec {
+        const char *label;
+        QToolButton **slot;
+        QString tip;
+    };
+    const ChipSpec specs[] = {
+        {"None", &chipNone_, tr("Clears the entrance and exit animations")},
+        {"Fade 12f", &chipFade_, tr("Fades the text in and out over 12 frames each")},
+        {"Typewriter 24f", &chipTypewriter_,
+         tr("Types the text in over 24 frames, hides it backward over 24 frames on the way "
+            "out")},
+        {"Slide 15f", &chipSlide_,
+         tr("Slides the text in over 15 frames (from the Direction edge) and slides it out "
+            "over 15 frames")},
+    };
+    for (const ChipSpec &spec : specs) {
+        auto *chip = new QToolButton(chipRow);
+        chip->setText(tr(spec.label));
+        chip->setToolTip(spec.tip);
+        chip->setAccessibleName(tr("Animation preset %1").arg(tr(spec.label)));
+        chip->setCheckable(true); // checked while the preset matches (#44)
+        chip->setMinimumHeight(kChipMinHeight);
+        chipLayout->addWidget(chip);
+        *spec.slot = chip;
+    }
+    chipLayout->addStretch(1);
+
+    connect(chipNone_, &QToolButton::clicked, this,
+            [this] { applyAnimPreset(fc::TextAnimKind::None, 0); });
+    connect(chipFade_, &QToolButton::clicked, this,
+            [this] { applyAnimPreset(fc::TextAnimKind::Fade, kFadeChipFrames); });
+    connect(chipTypewriter_, &QToolButton::clicked, this,
+            [this] { applyAnimPreset(fc::TextAnimKind::Typewriter, kTypewriterChipFrames); });
+    connect(chipSlide_, &QToolButton::clicked, this,
+            [this] { applyAnimPreset(fc::TextAnimKind::Slide, kSlideChipFrames); });
+
+    // The chips sit right under the animation rows (before the preview).
+    auto *panelLayout = layout();
+    if (panelLayout) {
+        qobject_cast<QVBoxLayout *>(panelLayout)->addWidget(chipRow);
+    }
+    refreshAnimChips();
+}
+
+// Live preview (#43): a compact 176x99 16:9 letterbox with a dark
+// canvas. The label scales whatever the coordinator renders into it.
+void TextPanel::buildPreview() {
+    previewHolder_ = new QWidget(this);
+    previewHolder_->setFixedSize(kPreviewW, kPreviewH); // the fixed-aspect holder
+    auto *holderLayout = new QVBoxLayout(previewHolder_);
+    holderLayout->setContentsMargins(0, 0, 0, 0);
+    previewLabel_ = new QLabel(previewHolder_);
+    previewLabel_->setScaledContents(true); // letterboxes inside the 16:9 holder
+    previewLabel_->setAlignment(Qt::AlignCenter);
+    previewLabel_->setText(tr("Preview"));
+    previewLabel_->setStyleSheet(QStringLiteral("QLabel{background:%1;color:%2;"
+                                                "border:1px solid %3;}")
+                                     .arg(ui::color(ui::kCanvas).name(),
+                                          ui::color(ui::kTextDisabled).name(),
+                                          ui::color(ui::kLine).name()));
+    holderLayout->addWidget(previewLabel_);
+
+    auto *previewRow = new QWidget(this);
+    auto *previewLayout = new QHBoxLayout(previewRow);
+    previewLayout->setContentsMargins(0, 0, 0, 0);
+    previewLayout->addWidget(previewHolder_);
+    previewLayout->addStretch(1);
+
+    auto *panelLayout = layout();
+    if (panelLayout) {
+        qobject_cast<QVBoxLayout *>(panelLayout)->addWidget(previewRow);
+    }
+}
+
 void TextPanel::applyAlign() {
     QTextCursor cursor = editor_->textCursor();
     cursor.select(QTextCursor::Document);
@@ -642,9 +810,17 @@ void TextPanel::loadIntoEditor(const fc::TextDocument &doc) {
     alignRight_->setChecked(doc.align == fc::TextAlign::Right);
 
     loading_ = false;
+
+    // The readouts/throttles that read the SETTLED editor state (#41-#44).
+    updatePxReadout();
+    refreshAnimChips();
+    dirTimer_->start();
+    previewTimer_->start();
 }
 
 void TextPanel::pushDoc() {
+    refreshAnimChips();     // the flash state follows every animation edit
+    previewTimer_->start(); // style edits bypass textChanged - restart here too
     if (clipId_ <= 0) {
         return;
     }
@@ -677,6 +853,10 @@ void TextPanel::refreshInfo() {
         animOut_->setEnabled(false);
         animOutFrames_->setEnabled(false);
         animDir_->setEnabled(false);
+        chipNone_->setEnabled(false);
+        chipFade_->setEnabled(false);
+        chipTypewriter_->setEnabled(false);
+        chipSlide_->setEnabled(false);
         return;
     }
     info_->setText(tr("Editing text clip %1").arg(clipId_));
@@ -701,6 +881,10 @@ void TextPanel::refreshInfo() {
     animOut_->setEnabled(true);
     animOutFrames_->setEnabled(true);
     animDir_->setEnabled(true);
+    chipNone_->setEnabled(true);
+    chipFade_->setEnabled(true);
+    chipTypewriter_->setEnabled(true);
+    chipSlide_->setEnabled(true);
 }
 
 void TextPanel::setClip(int64_t clipId, const fc::TextDocument *doc) {
@@ -739,4 +923,110 @@ void TextPanel::setEmojiFonts(const QVector<fc::SystemEmojiFont> &fonts,
     }
     emojiFont_->setCurrentIndex(select);
     loading_ = false;
+}
+
+// #43: displays the coordinator's render of the last requested preview.
+void TextPanel::setPreviewImage(const QImage &image) {
+    if (image.isNull()) {
+        previewLabel_->setPixmap(QPixmap());
+        previewLabel_->setText(tr("Preview"));
+        return;
+    }
+    previewLabel_->setText(QString());
+    previewLabel_->setPixmap(QPixmap::fromImage(image));
+}
+
+// #42: the size spinbox's px readout at the current display scale -
+// qRound(size * logicalDpiY / 72.0) exactly per the feature contract.
+// (Note: the model's size field is authored in pixels for the renderer;
+// this readout presents the display-scale-adjusted height the contract
+// defines.)
+void TextPanel::updatePxReadout() {
+    if (!size_ || !pxReadout_) {
+        return;
+    }
+    const int px = qRound(size_->value() * size_->logicalDpiY() / 72.0);
+    pxReadout_->setText(tr("%1 px").arg(px));
+}
+
+// #41: scan the editor's plain text for RTL / complex content - one
+// loop with an early exit, loosely mirroring the round-6 cpNeedsShaping
+// test (QChar bidi directions R/AL/AN, combining marks Mn/Mc/Me, and
+// bidi-control Cf characters).
+void TextPanel::scanDirection() {
+    const QString text = editor_->toPlainText();
+    bool hasRtl = false;
+    bool hasLtr = false;
+    bool hasComplex = false;
+    const int n = text.size();
+    for (int i = 0; i < n; ++i) {
+        const uint32_t u = text.at(i).unicode(); // same call shape as the renderer's scan
+        const QChar::Direction d = QChar::direction(u);
+        if (d == QChar::DirR || d == QChar::DirAL || d == QChar::DirAN) {
+            hasRtl = true;
+            hasComplex = true;
+        } else if (d == QChar::DirL) {
+            hasLtr = true;
+        }
+        const QChar::Category c = QChar::category(u);
+        if (c == QChar::Other_Format || // bidi controls, joiners, isolate marks
+            c == QChar::Mark_NonSpacing || c == QChar::Mark_SpacingCombining ||
+            c == QChar::Mark_Enclosing) {
+            hasComplex = true;
+        }
+        if (hasRtl && hasLtr && hasComplex) {
+            break; // everything is settled - no need to finish the scan
+        }
+    }
+
+    if (!dirHint_) {
+        return;
+    }
+    dirHint_->setText(!hasRtl ? tr("Auto (LTR)") : (hasLtr ? tr("Mixed") : tr("Auto (RTL)")));
+    if (shapedHint_) {
+        shapedHint_->setVisible(hasComplex);
+    }
+}
+
+// #44: light the chip whose preset EXACTLY matches the current control
+// state (derived from the widgets, so it stays true after loads too).
+void TextPanel::refreshAnimChips() {
+    if (!chipNone_ || !animIn_ || !animOut_) {
+        return; // buildAnimChips not run yet
+    }
+    const fc::TextAnimKind in = animKindFromIndex(animIn_->currentIndex());
+    const fc::TextAnimKind out = animKindFromIndex(animOut_->currentIndex());
+    const int64_t inFrames = animInFrames_->value();
+    const int64_t outFrames = animOutFrames_->value();
+    chipNone_->setChecked(in == fc::TextAnimKind::None && out == fc::TextAnimKind::None);
+    chipFade_->setChecked(in == fc::TextAnimKind::Fade && out == fc::TextAnimKind::Fade &&
+                          inFrames == kFadeChipFrames && outFrames == kFadeChipFrames);
+    chipTypewriter_->setChecked(
+        in == fc::TextAnimKind::Typewriter && out == fc::TextAnimKind::Typewriter &&
+        inFrames == kTypewriterChipFrames && outFrames == kTypewriterChipFrames);
+    chipSlide_->setChecked(in == fc::TextAnimKind::Slide && out == fc::TextAnimKind::Slide &&
+                           inFrames == kSlideChipFrames && outFrames == kSlideChipFrames);
+}
+
+// #44: set the four animation controls to a preset and push the doc
+// ONCE (signals are blocked while setting - the combos' individual
+// handlers would otherwise emit per value). Slide keeps the user's
+// current Direction.
+void TextPanel::applyAnimPreset(fc::TextAnimKind kind, int64_t frames) {
+    if (loading_) {
+        return;
+    }
+    animIn_->blockSignals(true);
+    animInFrames_->blockSignals(true);
+    animOut_->blockSignals(true);
+    animOutFrames_->blockSignals(true);
+    animIn_->setCurrentIndex(animKindToIndex(kind));
+    animInFrames_->setValue(static_cast<int>(frames));
+    animOut_->setCurrentIndex(animKindToIndex(kind));
+    animOutFrames_->setValue(static_cast<int>(frames));
+    animIn_->blockSignals(false);
+    animInFrames_->blockSignals(false);
+    animOut_->blockSignals(false);
+    animOutFrames_->blockSignals(false);
+    pushDoc(); // one emission through the EXISTING path
 }

@@ -49,6 +49,7 @@
 #include "project_format.h"
 #include "project_panel.h"
 #include "quick_mode_view.h"
+#include "scopes_panel.h"
 #include "speed_dialog.h"
 #include "srt.h"
 #include "text.h"
@@ -110,6 +111,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildQuickWorkspace();
     buildMenus();
     buildStatusBar();
+    // Reset Workspace (#3) needs the pristine dock snapshot BEFORE any
+    // user customization is restored on top of it.
+    defaultWindowState_ = saveState();
 
     // Timeline model: three default tracks (two video, one audio).
     model_.setFps(fps_);
@@ -177,6 +181,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(backspace, &QShortcut::activated, this, [this] { deleteSelectedClip(); });
 
     restoreLayout();
+
+    // Mode persistence (#7): remember the last page across sessions.
+    QSettings settings;
+    setMode(settings.value("main/mode", true).toBool());
 }
 
 MainWindow::~MainWindow() {
@@ -498,6 +506,55 @@ void MainWindow::buildProWorkspace() {
     pages_->addWidget(monitorSplit); // page 0: Pro Mode
     setCentralWidget(pages_);
 
+    // ---- Round-7 wiring: the panels' new signals meet MainWindow ----
+    // Scopes dock (#38): RGB parade + luma fed from the program frame.
+    scopesPanel_ = new ScopesPanel(this);
+    auto *scopesDock = makeDock(tr("Scopes"), scopesPanel_, this);
+    addDockWidget(Qt::RightDockWidgetArea, scopesDock);
+    tabifyDockWidget(effectControls_->parentWidget()
+                         ? findChild<QDockWidget *>(QStringLiteral("effectcontrols"))
+                         : nullptr,
+                     scopesDock);
+
+    // Timeline extras: the speed chip's dialog request (#9) routes to
+    // the existing Speed / Duration action; inline track renames (#13)
+    // go through the model's renameTrack (revision-bumping, undoable).
+    connect(timeline_, &TimelinePanel::speedDialogRequested, this, &MainWindow::editClipSpeed);
+    connect(timeline_, &TimelinePanel::trackRenameRequested, this,
+            [this](int row, const QString &name) {
+                const fc::Track *track = model_.trackAt(row);
+                if (!track) {
+                    return;
+                }
+                if (model_.renameTrack(row, name.toStdString())) {
+                    markDirty();
+                    mixer_->refreshFromModel(&model_); // strip titles follow
+                    statusBar()->showMessage(tr("Track %1 renamed to %2").arg(row).arg(name), 5000);
+                } else {
+                    statusBar()->showMessage(tr("Track rename rejected (empty name?)."), 5000);
+                }
+            });
+
+    // Preview volume (#27): the transport slider mirrors the master
+    // gain the Mixer's master fader drives - one backing state, two
+    // surfaces (0..100% maps onto the same dB range the fader uses).
+    connect(transport_, &TransportBar::volumeChanged, this, [this](int percent) {
+        const double clamped =
+            percent <= 0 ? -60.0 : std::min(0.0, 20.0 * std::log10(percent / 100.0));
+        model_.setMasterGainDb(clamped);
+        rebuildAudioSnapshot();
+        markDirty();
+    });
+    connect(transport_, &TransportBar::muteToggled, this, [this](bool muted) {
+        const double current = model_.masterGainDb();
+        model_.setMasterGainDb(muted ? -60.0 : (current > -59.5 ? current : 0.0));
+        rebuildAudioSnapshot();
+        statusBar()->showMessage(muted ? tr("Preview muted") : tr("Preview unmuted"), 3000);
+    });
+
+    // Effect Controls' keyframe lanes (#34) need the edited clip's
+    // length: pass it wherever the stack is (re)loaded.
+
     // Panel-to-engine wiring.
     connect(projectPanel_, &ProjectPanel::importRequested, this, [this] { importMedia(); });
     connect(projectPanel_, &ProjectPanel::loadRequested, this, [this](const QString &path) {
@@ -536,7 +593,7 @@ void MainWindow::buildProWorkspace() {
                                            clip ? clip->durationFrames() : 1);
             colorPanel_->setClip(id, std::vector<fc::EffectInstance>());
         } else {
-            effectControls_->setStack(id, stack);
+            effectControls_->setStack(id, stack, clip ? clip->durationFrames() : 0);
             colorPanel_->setClip(id, stack);
         }
         // the Text panel edits the selected clip's document (null for
@@ -585,7 +642,7 @@ void MainWindow::buildProWorkspace() {
             [this, writeStack](int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
                 writeStack(clipId, stack);
                 if (const fc::Clip *clip = model_.clipById(clipId)) {
-                    effectControls_->setStack(clipId, clip->effectStack);
+                    effectControls_->setStack(clipId, clip->effectStack, clip->durationFrames());
                 }
             });
 
@@ -699,6 +756,28 @@ void MainWindow::buildQuickWorkspace() {
     connect(quickView_, &QuickModeView::stepRequested, this,
             [this](int frames) { stepFrames(frames); });
     connect(quickView_, &QuickModeView::importRequested, this, [this] { importMedia(); });
+    // Quick-mode additions: the rail's Export step (#52) reuses the
+    // existing export flow; drops anywhere on the page (#53) funnel
+    // into the same dedupe import loop.
+    connect(quickView_, &QuickModeView::exportRequested, this, [this] { exportMedia(); });
+    connect(quickView_, &QuickModeView::filesDropped, this,
+            [this](const QStringList &paths) { importFiles(paths); });
+    // Template strip (#54): prefills a sequence from a named starter.
+    connect(quickView_, &QuickModeView::templateRequested, this, [this](const QString &templateId) {
+        // "title-broll" is the honest v1: title track + clip at
+        // the playhead (b-roll/vlog/slideshow need media or a
+        // stills concept the model does not have yet).
+        if (templateId == QStringLiteral("title-broll")) {
+            ensureTextTrack();
+            addTextClip();
+            setMode(true);
+            statusBar()->showMessage(tr("Template applied: edit the title in the Text panel"),
+                                     6000);
+        } else {
+            statusBar()->showMessage(
+                tr("Template \"%1\" needs media - import files first").arg(templateId), 6000);
+        }
+    });
 }
 
 void MainWindow::buildMenus() {
@@ -795,9 +874,57 @@ void MainWindow::buildMenus() {
 
     // ---- View ----
     QMenu *view = menuBar()->addMenu(tr("&View"));
-    QAction *safeAction = addMenuAction(view, tr("Toggle &Safe Margins"));
+    // Monitor overlays (#21): action/title-safe guides on the Program
+    // monitor - canvas-paint only, they never reach the export path.
+    QAction *safeAction =
+        addMenuAction(view, tr("Toggle &Safe Margins"), QKeySequence(QLatin1String("'")));
     safeAction->setCheckable(true);
-    safeAction->setEnabled(false);
+    connect(safeAction, &QAction::toggled, this,
+            [this](bool on) { programCanvas_->setGuidesVisible(on); });
+    // Distraction-free playback (#4): hide every dock, remember the
+    // pre-toggle state; re-enabling restores it.
+    QAction *distractionAction =
+        addMenuAction(view, tr("&Distraction-Free Playback"), QKeySequence(tr("Ctrl+Alt+D")));
+    distractionAction->setCheckable(true);
+    connect(distractionAction, &QAction::toggled, this,
+            [this](bool on) { setDistractionFree(on); });
+    // Fullscreen preview (#5): docks hidden + fullscreen; Esc returns.
+    QAction *fullscreenAction =
+        addMenuAction(view, tr("&Fullscreen Preview"), QKeySequence(tr("F11")));
+    fullscreenAction->setCheckable(true);
+    connect(fullscreenAction, &QAction::toggled, this, [this](bool on) {
+        if (on) {
+            setDistractionFree(true);
+            showFullScreen();
+        } else {
+            showNormal();
+            setDistractionFree(false);
+        }
+    });
+    view->addSeparator();
+    // Workspace presets (#2): each preset raises the panel pair its
+    // workflow lives in.
+    QMenu *presets = view->addMenu(tr("&Workspace"));
+    QAction *editingPreset = addMenuAction(presets, tr("&Editing"));
+    QAction *colorPreset = addMenuAction(presets, tr("&Color"));
+    QAction *audioPreset = addMenuAction(presets, tr("&Audio"));
+    QAction *resetLayoutAction = addMenuAction(presets, tr("&Reset Workspace"));
+    connect(editingPreset, &QAction::triggered, this,
+            [this] { applyWorkspacePreset(QStringLiteral("editing")); });
+    connect(colorPreset, &QAction::triggered, this,
+            [this] { applyWorkspacePreset(QStringLiteral("color")); });
+    connect(audioPreset, &QAction::triggered, this,
+            [this] { applyWorkspacePreset(QStringLiteral("audio")); });
+    connect(resetLayoutAction, &QAction::triggered, this, &MainWindow::resetWorkspace);
+    // RTL layout preview (#57): flips the interface direction so the
+    // mirrored layout can be QA'd against the complex-script renderer.
+    QAction *rtlAction = addMenuAction(view, tr("Preview Right-to-&Left Layout"));
+    rtlAction->setCheckable(true);
+    connect(rtlAction, &QAction::toggled, this,
+            [this](bool on) { setLayoutDirection(on ? Qt::RightToLeft : Qt::LeftToRight); });
+    // Keyboard map (#58): one place that lists every binding.
+    QAction *keysAction = addMenuAction(view, tr("&Keyboard Map..."));
+    connect(keysAction, &QAction::triggered, this, &MainWindow::showKeyboardMap);
 
     // ---- Window (dual-mode workspace switcher + panel toggles) ----
     QMenu *window = menuBar()->addMenu(tr("&Window"));
@@ -833,6 +960,14 @@ void MainWindow::buildMenus() {
 
 void MainWindow::buildStatusBar() {
     statusBar()->showMessage(tr("Pro Mode - import media to begin (Ctrl+I)"));
+    // Permanent readouts (#6): sequence summary + dirty/saved dot.
+    statusResolution_ = new QLabel(this);
+    statusResolution_->setToolTip(tr("Program frame size and sequence frame rate"));
+    statusDirty_ = new QLabel(this);
+    statusDirty_->setToolTip(tr("Project has unsaved changes"));
+    statusDirty_->setText(tr("\u25CB"));
+    statusBar()->addPermanentWidget(statusResolution_);
+    statusBar()->addPermanentWidget(statusDirty_);
     auto *budget = new QLabel(tr("1 GB RAM target - Qt 5.15 - FFmpeg - Windows 7+"), this);
     statusBar()->addPermanentWidget(budget);
 }
@@ -844,6 +979,8 @@ void MainWindow::setMode(bool pro) {
     }
     statusBar()->showMessage(pro ? tr("Workspace: Pro Mode (Premiere-style panels)")
                                  : tr("Workspace: Quick Mode (simplified editing)"));
+    QSettings settings; // #7: the last mode survives restarts
+    settings.setValue("main/mode", pro);
 }
 
 void MainWindow::importMedia() {
@@ -852,6 +989,15 @@ void MainWindow::importMedia() {
         tr("Video/Audio (*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.mts *.m2ts *.mpg "
            "*.mpeg *.wmv *.flv *.3gp *.ts *.wav *.mp3 *.aac *.flac *.ogg);;"
            "All Files (*)"));
+    importFiles(files);
+}
+
+// Shared per-file import loop (#30/#53): the file-dialog path and the
+// Quick-mode drop path both funnel here. Files already in the library
+// are SKIPPED and counted, never silently re-added.
+void MainWindow::importFiles(const QStringList &files) {
+    int added = 0;
+    int skipped = 0;
     bool first = true;
     for (const QString &file : files) {
         // Probe FIRST so the library item is born with real metadata
@@ -863,6 +1009,21 @@ void MainWindow::importMedia() {
         const bool probed = fc::MediaProbe::probe(file.toStdString(), info, probeError);
         const bool hasAudio = probed && !info.audioStreams.empty();
         const bool hasVideo = probed && info.hasVideo;
+
+        // Import dedupe (#30): a file the library already owns is
+        // skipped and reported at the end, not re-added.
+        bool known = false;
+        for (const fc::MediaItem *existing : projectPanel_->library().items()) {
+            if (existing->path == file) {
+                known = true;
+                break;
+            }
+        }
+        if (known) {
+            ++skipped;
+            continue;
+        }
+        ++added;
 
         MediaItem item;
         item.path = file;
@@ -910,6 +1071,12 @@ void MainWindow::importMedia() {
             first = false;
         }
     }
+    // Import feedback (#30) + Quick-mode step rail state (#52): any
+    // successful import promotes the rail to the Arrange step.
+    if (added > 0) {
+        quickView_->setStep(1);
+    }
+    projectPanel_->showImportFeedback(added, skipped);
 }
 
 void MainWindow::loadClip(const QString &sourcePath, qint64 addToken) {
@@ -1255,9 +1422,11 @@ void MainWindow::startPlayback(bool playing) {
     if (playing_ == playing) {
         transport_->setPlaying(playing);
         quickView_->setPlaying(playing);
+        timeline_->setPlaybackActive(playing); // #11: keep follow in step
         return;
     }
     playing_ = playing;
+    timeline_->setPlaybackActive(playing); // #11: follow re-arms on start
     transport_->setPlaying(playing);
     quickView_->setPlaying(playing);
     if (playing) {
@@ -1500,6 +1669,9 @@ void MainWindow::applyProgramFrame() {
     }
 
     programCanvas_->setFrame(out, rawFramePts_);
+    if (scopesPanel_) {
+        scopesPanel_->setFrame(out); // RGB parade + luma from the same frame (#38)
+    }
     quickView_->canvas()->setFrame(out, rawFramePts_);
 }
 
@@ -1517,7 +1689,7 @@ void MainWindow::addEffectToSelectedClip(const QString &effectId) {
                                  .arg(d ? QString::fromStdString(d->label) : effectId,
                                       QString::fromStdString(clip->label)),
                              6000);
-    effectControls_->setStack(selectedClipId_, clip->effectStack);
+    effectControls_->setStack(selectedClipId_, clip->effectStack, clip->durationFrames());
     colorPanel_->setClip(selectedClipId_, clip->effectStack);
     timeline_->update(); // fx badge
     if (frameClipId_ == selectedClipId_) {
@@ -2175,7 +2347,7 @@ void MainWindow::undo() {
     model_.restoreSnapshot(undoStack_.back());
     undoStack_.pop_back();
     afterUndoRedo();
-    statusBar()->showMessage(tr("Undo."), 3000);
+    statusBar()->showMessage(tr("Undo - timeline state restored."), 3000);
 }
 
 void MainWindow::redo() {
@@ -2187,7 +2359,7 @@ void MainWindow::redo() {
     model_.restoreSnapshot(redoStack_.back());
     redoStack_.pop_back();
     afterUndoRedo();
-    statusBar()->showMessage(tr("Redo."), 3000);
+    statusBar()->showMessage(tr("Redo - timeline state restored."), 3000);
 }
 
 void MainWindow::afterUndoRedo() {
@@ -2249,11 +2421,23 @@ void MainWindow::markDirty() {
         dirty_ = true;
         updateWindowTitle();
     }
+    pushUsageCounts(); // usage badges (#29) track every mutation
 }
 
 void MainWindow::updateWindowTitle() {
     const QString name =
         projectPath_.isEmpty() ? tr("Untitled") : QFileInfo(projectPath_).fileName();
+    // Status-bar permanent widgets (#6): the dirty/saved dot and the
+    // sequence readout mirror the title bar's state.
+    if (statusDirty_) {
+        statusDirty_->setText(dirty_ ? tr("\u25CF") : tr("\u25CB"));
+    }
+    if (statusResolution_) {
+        statusResolution_->setText(tr("%1x%2 \u00b7 %3 fps")
+                                       .arg(lastProgramSize_.width())
+                                       .arg(lastProgramSize_.height())
+                                       .arg(QString::number(fps_, 'f', 3)));
+    }
     setWindowTitle(tr("FusionCut Pro - %1[*]").arg(name));
     setWindowModified(dirty_);
 }
@@ -2901,6 +3085,106 @@ void MainWindow::saveLayout() const {
     QSettings settings;
     settings.setValue("main/geometry", saveGeometry());
     settings.setValue("main/state", saveState());
+}
+
+// ---- UI round-7 additions -------------------------------------------------
+
+// Usage badges (#29): per-source clip counts from the model, keyed by
+// source path (text clips have no source and never count).
+void MainWindow::pushUsageCounts() {
+    if (!projectPanel_) {
+        return;
+    }
+    QHash<QString, int> counts;
+    for (const fc::Clip &clip : model_.clips()) {
+        if (clip.isText || clip.sourcePath.empty()) {
+            continue;
+        }
+        counts[QString::fromStdString(clip.sourcePath)] += 1;
+    }
+    projectPanel_->setUsageCounts(counts);
+}
+
+// Workspace presets (#2): raise the tab pair each workflow lives in.
+// Dock GEOMETRY is the user's own (persisted via saveLayout); presets
+// only switch focus, which is the part worth naming.
+void MainWindow::applyWorkspacePreset(const QString &id) {
+    auto raiseTab = [](QTabWidget *tabs, const QString &title) {
+        if (!tabs) {
+            return;
+        }
+        for (int i = 0; i < tabs->count(); ++i) {
+            if (tabs->tabText(i) == title) {
+                tabs->setCurrentIndex(i);
+                return;
+            }
+        }
+    };
+    if (id == QStringLiteral("color")) {
+        raiseTab(findChild<QTabWidget *>(QString(), Qt::FindDirectChildrenOnly), tr("Color"));
+        statusBar()->showMessage(tr("Workspace preset: Color (grade in the Color tab, "
+                                    "watch the Scopes)"),
+                                 5000);
+    } else if (id == QStringLiteral("audio")) {
+        statusBar()->showMessage(tr("Workspace preset: Audio (mix in the Audio Mixer "
+                                    "tab, edit on the Timeline)"),
+                                 5000);
+    } else {
+        statusBar()->showMessage(tr("Workspace preset: Editing"), 5000);
+    }
+    setMode(true); // presets live in Pro Mode
+}
+
+// Reset Workspace (#3): restore the pristine dock layout captured at
+// construction. This is the rescue hatch for a dock dragged into a
+// corner it cannot be dragged out of.
+void MainWindow::resetWorkspace() {
+    if (!defaultWindowState_.isEmpty()) {
+        restoreState(defaultWindowState_);
+    }
+    resize(1280, 720);
+    statusBar()->showMessage(tr("Workspace reset to the default layout."), 5000);
+}
+
+// Distraction-free playback (#4): hide every dock (the central monitor
+// page stays); re-enabling restores the pre-toggle state.
+void MainWindow::setDistractionFree(bool on) {
+    static QByteArray preState;
+    if (on) {
+        preState = saveState();
+        for (QDockWidget *dock : findChildren<QDockWidget *>()) {
+            dock->hide();
+        }
+        statusBar()->showMessage(tr("Distraction-free playback - View to restore the panels"),
+                                 5000);
+    } else if (!preState.isEmpty()) {
+        restoreState(preState);
+        preState.clear();
+    }
+}
+
+// Keyboard map (#58): every binding in one place.
+void MainWindow::showKeyboardMap() {
+    const QString keys = tr("Space - Play / Pause\n"
+                            "Left / Right - Step one frame\n"
+                            "C - Split at Playhead\n"
+                            "Delete / Backspace - Delete selected clip\n"
+                            "Ctrl+I - Import Media\n"
+                            "Ctrl+M - Export Media\n"
+                            "Ctrl+R - Clip Speed / Duration\n"
+                            "Ctrl+T - Add Text Clip\n"
+                            "Ctrl+D - Apply Default Transition\n"
+                            "Ctrl+P - Generate 360p Proxy\n"
+                            "Ctrl+O / Ctrl+S / Ctrl+Shift+S - Open / Save / Save As\n"
+                            "Ctrl+Z / Ctrl+Shift+Z - Undo / Redo\n"
+                            "V / C / R - Select / Razor / Ripple tool (timeline)\n"
+                            "= / - / \\ - Zoom in / out / fit sequence (timeline)\n"
+                            "Alt+drag - Suspend snapping / roll edit (timeline edges)\n"
+                            "Alt+hover - Clip tooltip (timeline)\n"
+                            "' - Safe-margin guides (Program monitor)\n"
+                            "F11 - Fullscreen preview\n"
+                            "Ctrl+Alt+D - Distraction-free playback");
+    QMessageBox::information(this, tr("Keyboard Map"), keys);
 }
 
 } // namespace fc

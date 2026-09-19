@@ -4,13 +4,19 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <utility>
+
+#include "ui_theme.h"
+#include "ui_widgets.h"
 
 namespace {
 
 constexpr int kSliderSteps = 1000;
+constexpr int kChipMinHeight = 28; // >= 28 px hit targets on small buttons (#63)
 
 // The corrector is THE Color Panel effect (catalog entry).
 constexpr const char *kCorrectorId = "color.corrector";
@@ -37,10 +43,31 @@ QString formatValue(double v) {
     return QString::number(v, 'f', 2);
 }
 
+// Preset chip offsets (suggestion #40) - small, tasteful deltas on real
+// catalog keys. setParam() clamps into the descriptor range, so repeated
+// clicks saturate instead of running away.
+const std::vector<std::pair<const char *, double>> kWarmOffsets = {
+    {"temperature", 0.20}, // toward warm (the corrector scales this by 40 luma units)
+    {"tint", 0.05},        // a whisper of magenta warmth
+    {"exposure", 0.04},
+};
+const std::vector<std::pair<const char *, double>> kCoolOffsets = {
+    {"temperature", -0.20}, // the inverse of the warm look
+    {"tint", -0.05},        // a whisper of green coolness
+    {"exposure", -0.04},
+};
+const std::vector<std::pair<const char *, double>> kFilmOffsets = {
+    {"contrast", 0.15},    // heavier blacks
+    {"saturation", -0.12}, // muted, print-like color
+    {"exposure", -0.06},   // slight underexposure
+};
+
 } // namespace
 
 ColorPanel::ColorPanel(QWidget *parent) : QWidget(parent) {
     buildUi();
+    buildChips();
+    updateEmptyState();
 }
 
 void ColorPanel::buildUi() {
@@ -120,11 +147,12 @@ void ColorPanel::buildUi() {
     }
     form->addStretch(1);
 
-    auto *scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    scroll->setWidget(host);
+    scroll_ = new QScrollArea(this);
+    scroll_->setWidgetResizable(true);
+    scroll_->setWidget(host);
 
     resetButton_ = new QPushButton(tr("Reset Grade"), this);
+    resetButton_->setToolTip(tr("Removes the color correction from this clip"));
     connect(resetButton_, &QPushButton::clicked, this, [this] {
         if (clipId_ < 0) {
             return;
@@ -142,10 +170,88 @@ void ColorPanel::buildUi() {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6, 6, 6, 6);
     layout->addWidget(clipLabel_);
-    layout->addWidget(scroll, 1);
+    layout->addWidget(scroll_, 1);
     layout->addWidget(resetButton_);
 
     refresh();
+}
+
+// Preset chips (suggestion #40): flat one-click looks above the param
+// rows. They mutate ONLY the working corrector instance and emit through
+// the existing emitStack() path - the model/edit protocol is untouched.
+void ColorPanel::buildChips() {
+    chipsRow_ = new QWidget(this);
+    auto *rowLayout = new QHBoxLayout(chipsRow_);
+    rowLayout->setContentsMargins(0, 0, 0, 0);
+    rowLayout->setSpacing(4);
+
+    struct ChipSpec {
+        const char *label;
+        QToolButton **slot;
+        QString tip;
+    };
+    const ChipSpec specs[] = {
+        {"Neutral", &chipNeutral_,
+         tr("Resets every grade parameter to its catalog default "
+            "(keyframe tracks are cleared as well)")},
+        {"Warm", &chipWarm_, tr("Pushes temperature/tint warm with a touch of exposure")},
+        {"Cool", &chipCool_, tr("Pushes temperature/tint cool with a touch of underexposure")},
+        {"Film", &chipFilm_, tr("Filmic response: more contrast, muted color, slightly darker")},
+    };
+    for (const ChipSpec &spec : specs) {
+        auto *chip = new QToolButton(chipsRow_);
+        chip->setText(tr(spec.label));
+        chip->setToolTip(spec.tip);
+        chip->setAccessibleName(tr("%1 color preset").arg(tr(spec.label)));
+        chip->setFlat(true);
+        chip->setMinimumHeight(kChipMinHeight);
+        rowLayout->addWidget(chip);
+        *spec.slot = chip;
+    }
+    rowLayout->addStretch(1);
+
+    connect(chipNeutral_, &QToolButton::clicked, this, [this] { applyChip({}, true); });
+    connect(chipWarm_, &QToolButton::clicked, this, [this] { applyChip(kWarmOffsets, false); });
+    connect(chipCool_, &QToolButton::clicked, this, [this] { applyChip(kCoolOffsets, false); });
+    connect(chipFilm_, &QToolButton::clicked, this, [this] { applyChip(kFilmOffsets, false); });
+
+    // The chips sit directly above the parameter rows.
+    auto *panelLayout = layout();
+    if (panelLayout) {
+        qobject_cast<QVBoxLayout *>(panelLayout)->insertWidget(1, chipsRow_);
+    }
+}
+
+void ColorPanel::applyChip(const std::vector<std::pair<const char *, double>> &offsets,
+                           bool resetToDefaults) {
+    if (clipId_ < 0) {
+        return;
+    }
+    fc::EffectInstance *fx = corrector();
+    if (resetToDefaults) {
+        if (!fx) {
+            return; // nothing to neutralize (an absent grade IS neutral)
+        }
+        const fc::EffectDescriptor *d = fc::findEffect(kCorrectorId);
+        if (!d) {
+            return;
+        }
+        for (const fc::EffectParamDescriptor &p : d->params) {
+            fx->setParam(p.key, p.defaultValue);
+            fx->clearKeyframes(p.key); // a neutral grade has no animation
+        }
+    } else {
+        if (!fx) {
+            // First touch: create the grade, then offset it from defaults.
+            stack_.push_back(fc::makeEffectInstance(kCorrectorId));
+            fx = &stack_.back();
+        }
+        for (const auto &off : offsets) {
+            fx->setParam(off.first, fx->param(off.first) + off.second); // clamped by setParam
+        }
+    }
+    refresh();
+    emitStack();
 }
 
 fc::EffectInstance *ColorPanel::corrector() {
@@ -172,6 +278,7 @@ void ColorPanel::setClip(int64_t clipId, const std::vector<fc::EffectInstance> &
     clipLabel_->setText(clipId < 0 ? tr("No clip selected")
                                    : tr("Clip %1 - grade").arg(qlonglong(clipId)));
     refresh();
+    updateEmptyState();
 }
 
 void ColorPanel::setClipFrame(int64_t frame) {
@@ -209,6 +316,27 @@ void ColorPanel::refresh() {
         // A keyframed param reads live at the playhead; dim nothing but
         // hint through the value label.
     }
+}
+
+// Empty state (#61): when no clip is selected the editing affordances
+// step aside for the hint. Driven from the existing setClip path.
+void ColorPanel::updateEmptyState() {
+    const bool empty = clipId_ < 0;
+    if (!emptyState_) {
+        emptyState_ = new fc::EmptyState(this);
+        emptyState_->setGlyph(tr("\u25D0")); // half-filled circle: the grade split
+        emptyState_->setTitle(tr("Select a clip to grade"));
+        emptyState_->setHint(tr("Click a video clip in the timeline - its color correction "
+                                "appears here."));
+        auto *panelLayout = layout();
+        if (panelLayout) {
+            qobject_cast<QVBoxLayout *>(panelLayout)->insertWidget(1, emptyState_);
+        }
+    }
+    emptyState_->refresh(empty);
+    scroll_->setVisible(!empty);
+    chipsRow_->setVisible(!empty);
+    resetButton_->setVisible(!empty);
 }
 
 void ColorPanel::emitStack() {

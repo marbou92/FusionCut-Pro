@@ -550,7 +550,37 @@ static void testGuardsAndRevisions() {
     CHECK(m2.clipById(f)->sourceInFrames == 12);
 }
 
+// Track rename (#13's model half): success bumps the revision, empty
 // ---- undo/redo snapshots ----
+// names and unknown lanes reject untouched, a no-op rename succeeds
+// without a bump, and the name rides the whole-model snapshot.
+static void testRenameTrack() {
+    TimelineModel model;
+    model.addTrack("V1", false);
+    model.addTrack("A1", true);
+    const uint64_t base = model.revision();
+
+    CHECK(model.renameTrack(0, "B-Roll"));
+    CHECK(model.trackAt(0)->name == "B-Roll");
+    CHECK(model.revision() == base + 1);
+
+    const uint64_t after = model.revision();
+    CHECK(model.renameTrack(0, "B-Roll")); // no-op: ok, no bump
+    CHECK(model.revision() == after);
+
+    CHECK(!model.renameTrack(0, ""));   // empty name
+    CHECK(!model.renameTrack(-1, "X")); // unknown lane
+    CHECK(!model.renameTrack(99, "X"));
+    CHECK(model.revision() == after);
+
+    // Snapshot round trip: the restored model carries the renamed track.
+    const TimelineModel snapshot = model;
+    CHECK(model.renameTrack(0, "Main"));
+    CHECK(model.trackAt(0)->name == "Main");
+    model.restoreSnapshot(snapshot);
+    CHECK(model.trackAt(0)->name == "B-Roll");
+}
+
 static void testSnapshotRestore() {
     TimelineModel model;
     model.addTrack("V1", false);
@@ -624,6 +654,7 @@ int main() {
     testRippleTrim();
     testRollEdit();
     testSetClipRate();
+    testRenameTrack();
     testActiveVideoClipAt();
     testGuardsAndRevisions();
     testSnapshotRestore();

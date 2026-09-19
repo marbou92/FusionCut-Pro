@@ -14,6 +14,12 @@ class QScrollArea;
 class QSlider;
 class QSpinBox;
 class QStackedWidget;
+class QToolButton;
+class QWidget;
+
+namespace fc {
+class EmptyState;
+} // namespace fc
 
 // Pro Mode right panel: the effect stack editor for ONE clip, plus the
 // transition editor. MainWindow pushes the selected clip's
@@ -41,8 +47,12 @@ public:
     explicit EffectControlsPanel(QWidget *parent = nullptr);
 
     // Shows the stack of the clip with this id (clipId < 0 or an empty
-    // stack clears the panel).
-    void setStack(int64_t clipId, const std::vector<fc::EffectInstance> &stack);
+    // stack clears the panel). durationFrames is the edited clip's
+    // length in frames and drives the per-param keyframe mini-lanes
+    // (#34): 0 leaves the lanes read-only; the coordinator passes the
+    // real duration (the defaulted 0 keeps older call sites valid).
+    void setStack(int64_t clipId, const std::vector<fc::EffectInstance> &stack,
+                  int64_t durationFrames = 0);
 
     // the playhead's position within the edited clip (frames
     // since its start); -1 = outside the clip / unknown. Keyframed
@@ -74,6 +84,10 @@ private:
     void refreshParamValues(); // re-resolve keyframed values at clipFrame_
     void emitStack();
     void updateDurationLabel();
+    void updateEmptyState(); // #61 overlay while no clip AND no transition is targeted
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     // Stack editor state: owns the working copy of the stack; MainWindow
     // owns the truth in fc::Clip::effectStack and mirrors edits back
@@ -81,6 +95,7 @@ private:
     int64_t clipId_ = -1;
     std::vector<fc::EffectInstance> stack_;
     int64_t clipFrame_ = -1;
+    int64_t durationFrames_ = 0; // clip length for the keyframe lanes (#34)
 
     // Audio fade editor state (the third page; shares pages_).
     QWidget *fadesPage_ = nullptr;
@@ -94,11 +109,18 @@ private:
         std::string key;
         double minValue = 0.0;
         double maxValue = 1.0;
+        double defaultValue = 0.0; // catalog default, drives the reset chip (#35)
         QSlider *slider = nullptr;
         QLabel *value = nullptr;
         QPushButton *keyframe = nullptr;
+        QToolButton *reset = nullptr; // ↺ reset-to-default button (#35)
+        QWidget *lane = nullptr;      // KeyframeLane mini-lane (#34), when animated
     };
     std::vector<ParamRow> rows_;
+
+    // Empty-target overlay (#61) over the pages when neither a clip nor
+    // a transition is being edited.
+    fc::EmptyState *emptyState_ = nullptr;
 
     // Transition editor state.
     int64_t transitionId_ = -1;

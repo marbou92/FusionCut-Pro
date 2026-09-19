@@ -5,6 +5,9 @@
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QLineEdit;
+class QMenu;
+class QToolButton;
 
 namespace fc {
 
@@ -28,19 +31,37 @@ public:
     int crf() const;
     QString preset() const;
     bool includeAudio() const;
+    // Destination typed/browsed/picked from Recent (empty when unset).
+    QString outputPath() const;
 
 private:
     void updateSummary();
+    // Applies the chosen quick preset (index into presetBox_) to the
+    // resolution / quality / audio widgets.
+    void applyPreset(int index);
+    // Any manual widget edit flips the preset combo back to Custom.
+    void markCustomPreset();
+    void setQualityByCrf(int crf);
+    void rebuildRecentMenu();
+    void rememberOutputPath();
 
     double fps_ = 24.0;
     int64_t totalFrames_ = 0;
     int sourceWidth_ = 0;
     int sourceHeight_ = 0;
 
+    QComboBox *presetBox_ = nullptr;
     QComboBox *resolution_ = nullptr;
     QComboBox *quality_ = nullptr;
     QCheckBox *audio_ = nullptr;
+    QLineEdit *pathEdit_ = nullptr;
+    QToolButton *recentButton_ = nullptr;
+    QMenu *recentMenu_ = nullptr;
     QLabel *summary_ = nullptr;
+    // Guards against the preset application itself flipping the combo
+    // back to Custom (the widget signals fire while the preset fills
+    // the fields).
+    bool updatingPreset_ = false;
 };
 
 } // namespace fc

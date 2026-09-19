@@ -143,6 +143,13 @@ public:
     // non-audio track (video/text strips carry no fader).
     bool setTrackAudio(int index, double gainDb, double pan);
 
+    // Renames a track (the timeline header's inline editor). Rejects
+    // out-of-range indices and empty names; a no-op rename (same name)
+    // succeeds without bumping the revision. The name round-trips
+    // through project files (track.name) and snapshots (whole-model
+    // copy), so undo/redo restores it like any other edit.
+    bool renameTrack(int index, const std::string &name);
+
     // Sets a clip's audio fades (timeline frames, >= 0). Returns false
     // on an unknown clip. Fades beyond the clip's length clamp to the
     // length (a fade can never extend past its own clip).

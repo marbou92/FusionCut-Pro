@@ -10,6 +10,8 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 
+#include "ui_theme.h"
+
 namespace fc {
 
 SpeedDialog::SpeedDialog(const QString &clipLabel, double currentRate, int64_t sourceExtentFrames,
@@ -56,7 +58,24 @@ SpeedDialog::SpeedDialog(const QString &clipLabel, double currentRate, int64_t s
     form->addRow(QString(), sourceInfo);
     if (hasLinkedAudio) {
         form->addRow(QString(), linkedAudio_); // offered only when a sibling exists
+        // Clarifies what "apply to linked audio" actually does (#50).
+        auto *linkedNote = new QLabel(
+            tr("Linked audio clips from the same source are re-timed with the video."), this);
+        linkedNote->setWordWrap(true);
+        linkedNote->setStyleSheet(QStringLiteral("color: %1;").arg(ui::color(ui::kTextDim).name()));
+        linkedNote->setToolTip(tr("The re-timed siblings keep picture and sound in step "
+                                  "across the speed change."));
+        form->addRow(QString(), linkedNote);
     }
+
+    // Planned feature (#50): offered DISABLED + unchecked so the roadmap
+    // is visible without implying v1 can preserve pitch.
+    auto *preservePitch = new QCheckBox(tr("Preserve pitch (atempo)"), this);
+    preservePitch->setChecked(false);
+    preservePitch->setEnabled(false);
+    preservePitch->setToolTip(
+        tr("Planned: v1 resamples audio linearly - pitch shifts with speed."));
+    form->addRow(QString(), preservePitch);
 
     auto *layout = new QVBoxLayout(this);
     auto *intro = new QLabel(tr("Changes the playback speed of %1 - the clip's timeline length "

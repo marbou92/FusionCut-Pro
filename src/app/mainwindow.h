@@ -34,6 +34,7 @@ class MixerPanel;
 class PreviewCanvas;
 class ProjectPanel;
 class QuickModeView;
+class ScopesPanel;
 class TextPanel;
 class TimelinePanel;
 class TransitionsPanel;
@@ -215,6 +216,22 @@ private:
     void restoreLayout();
     void saveLayout() const;
 
+    // ---- UI round-7 additions (FUSIONCUT_UI_SUGGESTIONS.md) ----
+    // Pushes per-source clip counts to the Project panel's usage badges
+    // (#29); called from the mutation funnels.
+    void pushUsageCounts();
+    // Shared per-file import loop (#30/#53): the file-dialog path and
+    // the Quick-mode drop path both funnel here; dedupes against the
+    // library and reports the added/skipped tally.
+    void importFiles(const QStringList &files);
+    // Workspace presets (#2), Reset Workspace (#3, needs the captured
+    // defaultWindowState_), distraction-free playback (#4), the
+    // keyboard-map dialog (#58).
+    void applyWorkspacePreset(const QString &id);
+    void resetWorkspace();
+    void setDistractionFree(bool on);
+    void showKeyboardMap();
+
     DecodeWorker *worker_ = nullptr;
     QThread *decodeThread_ = nullptr;
     // second decode context dedicated to the HELD first frame
@@ -368,6 +385,15 @@ private:
     std::atomic<bool> exportCancel_{false};
     QDialog *exportDialog_ = nullptr;
     QProgressBar *exportBar_ = nullptr;
+
+    // Status-bar permanent widgets (#6): the sequence summary and the
+    // dirty/saved dot. scopesPanel_ is the RGB-parade/luma dock (#38).
+    // defaultWindowState_ snapshots the pristine dock layout for
+    // View > Reset Workspace (#3).
+    QLabel *statusResolution_ = nullptr;
+    QLabel *statusDirty_ = nullptr;
+    ScopesPanel *scopesPanel_ = nullptr;
+    QByteArray defaultWindowState_;
 };
 
 } // namespace fc
