@@ -131,9 +131,11 @@ bool cpNeedsShaping(uint32_t cp) {
         break;
     }
     switch (QChar::joiningType(cp)) {
-    case QChar::JoiningDual:
-    case QChar::JoiningRight:
-    case QChar::JoiningCausing:
+    // Qt 5 spells the JoiningType enumerators with underscores (Qt 6
+    // renamed them to JoiningDual/JoiningRight/JoiningCausing).
+    case QChar::Joining_Dual:
+    case QChar::Joining_Right:
+    case QChar::Joining_Causing:
         return true;
     default:
         break;

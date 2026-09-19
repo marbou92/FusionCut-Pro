@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include <QCloseEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QProgressBar>

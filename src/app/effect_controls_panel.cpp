@@ -3,6 +3,8 @@
 #include <QCheckBox>
 #include <QLabel>
 #include <QListWidget>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
@@ -631,7 +633,7 @@ void EffectControlsPanel::rebuildParams() {
             reset->setText(QString::fromUtf8("\u21BA"));
             reset->setToolTip(tr("Reset to the catalog default (clears keyframes)"));
             reset->setAccessibleName(reset->toolTip());
-            reset->setFlat(true);
+            reset->setAutoRaise(true);
             reset->setFixedSize(16, 16);
             const double defaultValue = p.defaultValue;
             reset->setVisible(std::fabs(value - defaultValue) > 1e-9);
@@ -761,7 +763,11 @@ void EffectControlsPanel::refreshParamValues() {
             r.reset->setVisible(std::fabs(v - r.defaultValue) > 1e-9);
         }
         if (r.lane) {
-            r.lane->setPlayhead(kfFrame);
+            // ParamRow stores the lane as QWidget* because KeyframeLane
+            // is a .cpp-local widget the header cannot name; the only
+            // assignment is the build path above, so this downcast is
+            // safe by construction.
+            static_cast<KeyframeLane *>(r.lane)->setPlayhead(kfFrame);
         }
     }
 }

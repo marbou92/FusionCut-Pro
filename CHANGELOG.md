@@ -324,6 +324,26 @@ version stays at 0.1.0 until the first public build.
   run) with a version-guarded fallback to pos() on the 5.12-5.14
   build floor.
 
+- **CI fix round 2 (app layer, first full-compile fallout):** with the
+  whole app layer now checked against the real Qt 5.15 headers, ten
+  files needed repair beyond the ScopesPanel fix. preview_canvas.h
+  moved an inline accessor that dereferenced its forward-declared
+  QFrame mini-transport into the .cpp (every includer without <QFrame>
+  included first failed); project_panel.cpp gained the missing
+  <QStyledItemDelegate> and corrects the grid toggle to
+  QListView::IconMode/ListMode (ViewMode belongs to QListView, not
+  QAbstractItemView); transitions_panel.cpp defines its preview card
+  at global scope so it matches the header's forward declaration (the
+  ScopesPanel bug class again); mixer_panel.cpp replaces the stub-only
+  QDateTimeWrapper with QDateTime::currentMSecsSinceEpoch();
+  text_renderer.cpp uses the Qt 5 Joining_Dual/Right/Causing spellings
+  of the QChar joining type (the Qt 6 names the stub exposed); the
+  color and effect-controls preset/reset chips use QToolButton's
+  setAutoRaise instead of the nonexistent setFlat; and
+  effect_controls/effects/export_progress gained the QPainter,
+  QMouseEvent, QMenu and QCloseEvent includes they were borrowing
+  transitively from round-17 stub checks.
+
 - **Clip Speed / Duration (Clip menu, Ctrl+R):** a dialog edits the
   selected clip's playback rate - the timeline length rescales from
   the unchanged source extent (live preview in frames and seconds;

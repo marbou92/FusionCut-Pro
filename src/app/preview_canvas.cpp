@@ -74,6 +74,10 @@ void PreviewCanvas::setMiniTransportVisible(bool on) {
     }
 }
 
+bool PreviewCanvas::miniTransportVisible() const {
+    return miniTransport_ != nullptr && miniTransport_->isVisible();
+}
+
 void PreviewCanvas::setFrame(const QImage &frame, double ptsSeconds) {
     current_ = frame;
     lastPts_ = ptsSeconds;

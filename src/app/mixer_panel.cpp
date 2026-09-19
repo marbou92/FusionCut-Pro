@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include <QDateTime>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QMouseEvent>
@@ -123,7 +124,7 @@ protected:
 private:
     static double clampDb(double db) { return std::min(0.0, std::max(kSilentDb, db)); }
     static double fraction(double db) { return (db - kSilentDb) / -kSilentDb; }
-    static qint64 nowMs() { return static_cast<qint64>(QDateTimeWrapper::currentMSecs()); }
+    static qint64 nowMs() { return QDateTime::currentMSecsSinceEpoch(); }
 
     // One colored vertical strip per pixel column: kSuccess below
     // -12 dBFS blending to kWarning there, kDanger from -3 dBFS up.

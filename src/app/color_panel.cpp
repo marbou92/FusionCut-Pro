@@ -203,7 +203,7 @@ void ColorPanel::buildChips() {
         chip->setText(tr(spec.label));
         chip->setToolTip(spec.tip);
         chip->setAccessibleName(tr("%1 color preset").arg(tr(spec.label)));
-        chip->setFlat(true);
+        chip->setAutoRaise(true); // QToolButton's flat look (no setFlat)
         chip->setMinimumHeight(kChipMinHeight);
         rowLayout->addWidget(chip);
         *spec.slot = chip;

@@ -4,6 +4,7 @@
 #include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMimeData>
 #include <QPushButton>
 #include <QSettings>

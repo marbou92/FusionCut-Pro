@@ -54,9 +54,11 @@ public:
     // buttons only EMIT - playback/stepping is wired by the coordinator
     // for the Source monitor.
     void setMiniTransportVisible(bool on);
-    bool miniTransportVisible() const {
-        return miniTransport_ != nullptr && miniTransport_->isVisible();
-    }
+    // Out-of-line on purpose: the body dereferences miniTransport_ (a
+    // QFrame only forward-declared above). An inline body would require
+    // every includer of this header to have pulled <QFrame> FIRST
+    // (quick_mode_view.cpp does not - CI preview_canvas.h:58).
+    bool miniTransportVisible() const;
 
     QSize minimumSizeHint() const override;
 

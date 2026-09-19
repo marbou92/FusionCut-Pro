@@ -25,10 +25,16 @@ namespace {
 // UserRole payload: the catalog transition id of a leaf item.
 constexpr int kTransitionIdRole = Qt::UserRole;
 
+} // namespace
+
 // Schematic preview card (suggestion #36): paints the currently hovered
 // / selected transition kind as a two-rect A|B composite at the live
 // flipbook progress. No Q_OBJECT needed - the panel drives it purely
 // through setProgress()/setKind(); styles come from ui_theme tokens.
+// Defined at GLOBAL scope ON PURPOSE: transitions_panel.h forward-
+// declares this class at global scope for the preview_ member, and an
+// anonymous-namespace definition here would be a DIFFERENT, unrelated
+// type (the same bug class as the ScopesPanel CI failure).
 class TransitionPreviewCard : public QWidget {
 public:
     explicit TransitionPreviewCard(QWidget *parent = nullptr) : QWidget(parent) {
@@ -90,8 +96,6 @@ private:
     QString kind_;
     double progress_ = 0.0;
 };
-
-} // namespace
 
 TransitionsPanel::TransitionsPanel(QWidget *parent) : QWidget(parent) {
     search_ = new QLineEdit(this);

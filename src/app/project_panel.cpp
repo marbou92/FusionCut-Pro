@@ -7,12 +7,14 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListView>
 #include <QMenu>
 #include <QPainter>
 #include <QPolygon>
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -285,7 +287,9 @@ bool ProjectPanel::eventFilter(QObject *watched, QEvent *event) {
 void ProjectPanel::applyViewMode(bool grid) {
     listModeButton_->setChecked(!grid);
     gridModeButton_->setChecked(grid);
-    list_->setViewMode(grid ? QAbstractItemView::IconMode : QAbstractItemView::ListMode);
+    // ViewMode (ListMode/IconMode) is a QListView enum, NOT a
+    // QAbstractItemView one (CI project_panel.cpp:288).
+    list_->setViewMode(grid ? QListView::IconMode : QListView::ListMode);
     list_->setIconSize(QSize(kThumbnailWidth, kThumbnailHeight));
     list_->setUniformItemSizes(true);
     list_->setWrapping(true);
