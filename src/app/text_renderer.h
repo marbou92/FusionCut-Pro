@@ -21,7 +21,16 @@ class EmojiPainter; // defined below; shapeTextQt/renderTextLayer take one
 //
 // shapeTextQt: one ShapedRun per document run - QFontMetrics integer
 // advances/ascent/descent/leading plus the UTF-8 byte offsets the core
-// slices by. Runs with empty text are skipped. EMOJI CLUSTERS are
+// slices by. Runs with empty text are skipped. Runs containing RTL
+// scripts, contextual joining, combining marks or bidi controls
+// (Arabic, Hebrew, Indic, Thai...) measure through per-word context
+// deltas - each word's own shaped advance, telescoped into
+// per-codepoint differences - so line widths, wrap points and
+// alignment agree with the shaped text one drawText produces; simple
+// LTR text keeps the isolated per-codepoint fast path. Mixed-direction
+// text WITHIN one run shapes through the platform bidi engine (each
+// painted slice is one drawText); slices of DIFFERENT runs keep
+// document order on the line (no cross-run bidi reordering). EMOJI CLUSTERS are
 // segmented by the pure Unicode policy in emoji_clusters.h and stay
 // atomic (the layout engine never splits one mid-sequence):
 //   * with a loaded EmojiPainter (a color-emoji font the user picked

@@ -89,6 +89,154 @@ void foldEmojiExtents(const EmojiFont::Bitmap &bm, int imgH, int size, int &asce
     descent = std::max(descent, emojiScaleStrike(bottom, size, bm.ppem));
 }
 
+// ---------------------------------------------------------------------------
+// Complex-script (bidi/shaping) measurement.
+//
+// The isolated per-codepoint advance (the simple path below) mis-measures
+// scripts that shape in context: Arabic/Hebrew letters advance as their
+// ISOLATED forms, so lines wrap and align on wrong sums. A run flagged by
+// cpNeedsShaping measures through per-WORD context deltas instead: every
+// word's own QString is prefix-measured and the per-codepoint advances
+// are the telescoping differences, so they sum EXACTLY to the word's
+// shaped advance (what one drawText of the word produces). Words are the
+// grouping layoutText wraps on, and shaping never joins across a space,
+// so the sums the core engine wraps and aligns on are exact.
+// ---------------------------------------------------------------------------
+
+// Does this codepoint need shaped layout rather than the isolated
+// per-codepoint fast path? RTL scripts (Arabic, Hebrew, Thaana...),
+// contextual joining (dual/right joining letters - Arabic, but also the
+// LTR Mongolian), combining marks (Indic matras, Arabic harakat, Thai
+// vowels - the isolated path would place them as standalone cells), and
+// Cf format characters (bidi controls, ZWJ/ZWNJ, soft hyphen).
+bool cpNeedsShaping(uint32_t cp) {
+    if (cp > 0x10FFFFu) {
+        return false;
+    }
+    switch (QChar::direction(cp)) {
+    case QChar::DirR:
+    case QChar::DirAL:
+    case QChar::DirAN:
+        return true;
+    default:
+        break;
+    }
+    switch (QChar::category(cp)) {
+    case QChar::Mark_NonSpacing:
+    case QChar::Mark_SpacingCombining:
+    case QChar::Mark_Enclosing:
+    case QChar::Other_Format:
+        return true;
+    default:
+        break;
+    }
+    switch (QChar::joiningType(cp)) {
+    case QChar::JoiningDual:
+    case QChar::JoiningRight:
+    case QChar::JoiningCausing:
+        return true;
+    default:
+        break;
+    }
+    return false;
+}
+
+// Any codepoint of the run needs shaping?
+bool runNeedsComplexShaping(const std::vector<uint32_t> &cps) {
+    for (const uint32_t cp : cps) {
+        if (cpNeedsShaping(cp)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The cell grouping the complex path measures on: the same codepoints
+// layoutText treats as space (or the hard newline). Shaping never joins
+// across these, so per-word standalone measurement is exact.
+bool complexCellBreak(uint32_t cp) {
+    return cp == 0x20u || cp == 0x09u || cp == 0x0Au;
+}
+
+// Fills `advances` for one word [b, e) with per-codepoint context deltas
+// and folds the word's shaped ink extents into the run metrics. Words of
+// at most kComplexChunk codepoints measure their whole prefix chain;
+// longer words measure exact boundary prefixes every kComplexChunk
+// codepoints and telescope each chunk locally, the chunk's head delta
+// reconciled so the chunk sums to its exact in-word span.
+void measureComplexWord(const std::vector<uint32_t> &cps, size_t b, size_t e,
+                        const QFontMetrics &metrics, std::vector<int> &advances, int &ascent,
+                        int &descent) {
+    constexpr size_t kComplexChunk = 64;
+    const QString word = cpsAsQString(cps.data() + b, e - b);
+    foldInkExtents(metrics, word, ascent, descent);
+    const size_t len = e - b;
+    if (len == 1) {
+        advances[b] = metrics.horizontalAdvance(word);
+        return;
+    }
+    // UTF-16 offset of every codepoint boundary inside the word
+    // (astral codepoints are surrogate pairs).
+    std::vector<int> qpos(len + 1);
+    qpos[0] = 0;
+    for (size_t k = 0; k < len; ++k) {
+        qpos[k + 1] = qpos[k] + (cps[b + k] < 0x10000u ? 1 : 2);
+    }
+    if (len <= kComplexChunk) {
+        int prev = 0;
+        for (size_t k = 0; k < len; ++k) {
+            const int w = metrics.horizontalAdvance(word.left(qpos[k + 1]));
+            advances[b + k] = w - prev;
+            prev = w;
+        }
+        return;
+    }
+    int prevBoundary = 0;
+    for (size_t start = 0; start < len; start += kComplexChunk) {
+        const size_t end = std::min(len, start + kComplexChunk);
+        const int endW = metrics.horizontalAdvance(word.left(qpos[end]));
+        int localPrev = 0;
+        for (size_t k = start; k < end; ++k) {
+            const int w =
+                metrics.horizontalAdvance(word.mid(qpos[start], qpos[k + 1] - qpos[start]));
+            advances[b + k] = w - localPrev;
+            localPrev = w;
+        }
+        // The chunk's deltas must sum to its exact in-word span; the
+        // head delta absorbs the standalone-vs-in-context difference.
+        advances[b + start] += (endW - prevBoundary) - localPrev;
+        prevBoundary = endW;
+    }
+}
+
+// Per-codepoint advances for a whole complex run: words measure through
+// measureComplexWord, spaces and tabs as isolated cells, newlines as 0.
+void fillComplexAdvances(const std::vector<uint32_t> &cps, const QFontMetrics &metrics,
+                         std::vector<int> &advances, int &ascent, int &descent) {
+    const size_t n = cps.size();
+    advances.assign(n, 0);
+    size_t i = 0;
+    while (i < n) {
+        const uint32_t cp = cps[i];
+        if (cp == 0x0Au) {
+            advances[i] = 0;
+            ++i;
+            continue;
+        }
+        if (complexCellBreak(cp)) {
+            advances[i] = metrics.horizontalAdvance(charAsQString(cp));
+            ++i;
+            continue;
+        }
+        size_t j = i;
+        while (j < n && !complexCellBreak(cps[j])) {
+            ++j;
+        }
+        measureComplexWord(cps, i, j, metrics, advances, ascent, descent);
+        i = j;
+    }
+}
+
 // The wipe rectangle: the visible span of the block at fraction `wipe`
 // along `dir` (the edge the reveal starts at - see text.h).
 QRect wipeRect(const TextLayout &layout, TextAnimDir dir, double wipe) {
@@ -239,6 +387,15 @@ std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji)
         const int size = textPixelSizeClamped(run.style);
         int ascent = metrics.ascent();
         int descent = metrics.descent();
+        // A run containing RTL scripts, contextual joining, combining
+        // marks or bidi controls measures through per-word context
+        // deltas (exact shaped word widths - see the complex-script
+        // block above); simple text keeps the isolated fast path.
+        std::vector<int> complexAdvances;
+        const bool complex = runNeedsComplexShaping(s.codepoints);
+        if (complex) {
+            fillComplexAdvances(s.codepoints, metrics, complexAdvances, ascent, descent);
+        }
         size_t c = 0;
         while (c < n) {
             const uint32_t cp = s.codepoints[c];
@@ -252,6 +409,16 @@ std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji)
                 const int len = cluster >= 2 ? cluster : 1;
                 if (ef != nullptr &&
                     markBitmapCluster(ef, emoji, s, c, len, size, ascent, descent)) {
+                    c += size_t(len);
+                    continue;
+                }
+                if (complex && len == 1 && !EmojiFont::isDefaultEmojiPresentation(cp)) {
+                    // A plain letter of a complex run under a picked
+                    // emoji font: keep the per-word context delta (the
+                    // word chain already folded the ink extents) - the
+                    // isolated emoji-family measurement below would
+                    // sum the wrong line width for joined scripts.
+                    s.advances[c] = complexAdvances[c];
                     c += size_t(len);
                     continue;
                 }
@@ -282,7 +449,14 @@ std::vector<ShapedRun> shapeTextQt(const TextDocument &doc, EmojiPainter *emoji)
                 continue;
             }
             // Plain text: per-codepoint advance from the resolved font
-            // stack (the pre-emoji behavior).
+            // stack (the pre-emoji behavior). A complex run reads its
+            // precomputed per-word context delta instead - the isolated
+            // measurement would wrap and align on isolated-form sums.
+            if (complex) {
+                s.advances[c] = complexAdvances[static_cast<size_t>(c)];
+                ++c;
+                continue;
+            }
             const QString str = charAsQString(cp);
             s.advances[c] = metrics.horizontalAdvance(str);
             if (cluster == 1) {

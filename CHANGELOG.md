@@ -122,6 +122,16 @@ version stays at 0.1.0 until the first public build.
   alignment, background boxes - all integer-math and deterministic.
   Text tracks and generated text clips behave as full timeline
   citizens (split/trim/roll/move/ripple, effect stacks, keyframes).
+  RTL and complex scripts render correctly: runs containing
+  right-to-left scripts, contextual joining, combining marks or bidi
+  controls (Arabic, Hebrew, Indic, Thai...) measure through per-word
+  context deltas - each word's own shaped advance, telescoped into
+  per-codepoint differences - so line widths, wrap points and
+  alignment agree with the shaped text the painter produces, and
+  Arabic/Hebrew paints joined and in visual order through the
+  platform's bidi engine (simple LTR text keeps the isolated
+  per-codepoint fast path; differently-styled runs on one line keep
+  document order).
 - **Text animations:** every text clip carries an entrance and an exit
   (fade, slide from any edge, pop with overshoot, typewriter with a
   cluster-aligned reveal, wipe along any edge; durations in frames,
