@@ -116,14 +116,17 @@ TransitionsPanel::TransitionsPanel(QWidget *parent) : QWidget(parent) {
     tree_->viewport()->setAttribute(Qt::WA_Hover, true);
     tree_->viewport()->installEventFilter(this);
     tree_->setAccessibleName(tr("Transitions catalog"));
-    rebuildTree(QString());
-
     // Suggestion #61: the "no matches" hint lives inside the viewport.
+    // Created BEFORE rebuildTree() below: rebuildTree unconditionally
+    // updates the hint (it must exist even to stay hidden) - constructing
+    // it after the call made the ctor dereference a null QLabel (the
+    // next startup crash behind the 20260919 QTimer one).
     treeHint_ = new QLabel(this);
     treeHint_->setAlignment(Qt::AlignCenter);
     treeHint_->setWordWrap(true);
     treeHint_->setStyleSheet(QStringLiteral("color:%1;").arg(ui::color(ui::kTextDim).name()));
     treeHint_->hide();
+    rebuildTree(QString());
 
     flipTimer_ = new QTimer(this);
     flipTimer_->setInterval(33);

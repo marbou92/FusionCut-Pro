@@ -180,6 +180,16 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     layout->addLayout(buttons);
     layout->addWidget(metaBox);
 
+    // Lazy thumbnails (#28): batch the not-yet-requested paths through a
+    // short debounce timer so a burst of imports emits one sweep. Created
+    // BEFORE applyViewMode() below on purpose: applyViewMode's tail calls
+    // requestMissingThumbnails(), which restarts this timer - constructing
+    // it later made the ctor dereference a null QTimer inside Qt5Core
+    // (QTimer::start on a null this, the 20260919 startup crash).
+    thumbnailTimer_ = new QTimer(this);
+    thumbnailTimer_->setSingleShot(true);
+    connect(thumbnailTimer_, &QTimer::timeout, this, [this] { pumpThumbnailRequests(); });
+
     // Restore the persisted view mode (#28) before any rows arrive.
     const QString storedView = QSettings().value(QStringLiteral("project/viewMode")).toString();
     applyViewMode(storedView == QStringLiteral("grid"));
@@ -191,12 +201,6 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
         filterEdit_->setFocus();
         filterEdit_->selectAll();
     });
-
-    // Lazy thumbnails (#28): batch the not-yet-requested paths through a
-    // short debounce timer so a burst of imports emits one sweep.
-    thumbnailTimer_ = new QTimer(this);
-    thumbnailTimer_->setSingleShot(true);
-    connect(thumbnailTimer_, &QTimer::timeout, this, [this] { pumpThumbnailRequests(); });
 
     // Empty library overlay (#61), pinned to the list viewport.
     emptyState_ = new fc::EmptyState(list_->viewport());

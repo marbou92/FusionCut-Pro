@@ -253,7 +253,9 @@ private:
     // so a private worker/thread is all they need.
     DecodeWorker *proxyWorker_ = nullptr;
     QThread *proxyThread_ = nullptr;
-    QTimer *playClock_;
+    // = nullptr like every sibling: it is assigned near the END of the
+    // ctor, so any ctor-path use before that must read null, not garbage.
+    QTimer *playClock_ = nullptr;
 
     // Pro Mode widgets.
     ProjectPanel *projectPanel_ = nullptr;

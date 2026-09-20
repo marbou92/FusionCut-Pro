@@ -82,10 +82,13 @@ EffectsPanel::EffectsPanel(QWidget *parent) : QWidget(parent) {
     tree_->setDragDropMode(QAbstractItemView::DragOnly);
     tree_->setDefaultDropAction(Qt::MoveAction);
     tree_->setContextMenuPolicy(Qt::CustomContextMenu); // favorite toggling
-    rebuildTree(QString());
 
     // Dim "no matches" hint inside the tree viewport (suggestion #61);
-    // rebuildTree shows it only when the filter empties the tree.
+    // rebuildTree shows it only when the filter empties the tree. Created
+    // BEFORE rebuildTree() below: whenever that filtered tree ends up
+    // empty it dereferences the hint - constructing it later left a null
+    // QLabel one catalog change away from the same crash class as the
+    // 20260919 startup QTimer null deref.
     treeHint_ = new QLabel(tree_->viewport());
     treeHint_->setStyleSheet(QStringLiteral("color:%1;font-size:11px;background:transparent;")
                                  .arg(fc::ui::color(fc::ui::kTextDim).name()));
@@ -93,6 +96,8 @@ EffectsPanel::EffectsPanel(QWidget *parent) : QWidget(parent) {
     treeHint_->setWordWrap(true);
     treeHint_->hide();
     tree_->viewport()->installEventFilter(this);
+
+    rebuildTree(QString());
 
     auto *apply = new QPushButton(tr("Apply to Selected Clip"), this);
     apply->setToolTip(tr("Adds the selected effect to the clip selected in "

@@ -344,6 +344,25 @@ version stays at 0.1.0 until the first public build.
   QMouseEvent, QMenu and QCloseEvent includes they were borrowing
   transitively from round-17 stub checks.
 
+- **Startup crash fix (Windows portable, Qt5Core access violation):**
+  ProjectPanel's constructor called applyViewMode() before it created
+  the 250 ms thumbnail debounce timer, and applyViewMode's tail calls
+  requestMissingThumbnails() - which restarted that still-null timer
+  (QTimer::start on a null this, crashing inside Qt5Core with the
+  null-deref signature of the 20260919 crash report). The timer is
+  now created before the first applyViewMode call. Two siblings of
+  the same create-after-first-use class are fixed in the same pass:
+  TransitionsPanel's constructor ran rebuildTree() before creating the
+  treeHint_ label rebuildTree unconditionally updates (a guaranteed
+  next startup crash), EffectsPanel's constructor had the same
+  ordering with a conditional dereference (latent), and MainWindow's
+  playClock_ pointer now carries a = nullptr initializer like every
+  sibling member. Verified by building the full application in a
+  sandbox against the real Qt 5.15.15 + FFmpeg headers and running it
+  headless: the pre-fix ordering segfaults inside the constructor,
+  the fixed build constructs the whole MainWindow, shows the window
+  and runs the event loop.
+
 - **Clip Speed / Duration (Clip menu, Ctrl+R):** a dialog edits the
   selected clip's playback rate - the timeline length rescales from
   the unchanged source extent (live preview in frames and seconds;
