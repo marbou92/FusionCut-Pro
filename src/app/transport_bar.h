@@ -42,7 +42,9 @@ signals:
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
 private slots:
     void onSliderMoved(int value);
@@ -56,6 +58,11 @@ private:
     void shakeTimecodeEditor();
     void repositionStepFlash();
     void flashStepFrame();
+    // #79 icon transport: the play/pause and volume/mute glyphs are
+    // regenerated from fc::icons whenever their state flips (and once
+    // more on the first show, where the DPR is really known).
+    void refreshPlayIcon();
+    void refreshMuteIcon();
 
     QPushButton *playButton_ = nullptr;
     QPushButton *stepBack_ = nullptr;

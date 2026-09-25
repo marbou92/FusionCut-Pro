@@ -363,6 +363,48 @@ version stays at 0.1.0 until the first public build.
   the fixed build constructs the whole MainWindow, shows the window
   and runs the event loop.
 
+- **Apple-style UI pass (round 2, suggestions #64-#97 + #98-#115):**
+  a full visual redesign of the chrome under the Apple language -
+  layered surfaces, one accent, sentence-case typography, hairlines,
+  8-10px radii - translated to Qt 5.15 on Windows 7 (no translucency,
+  no bundled fonts; Segoe UI is the app font). Foundations: ui_theme.h
+  gained the elevated card tone, hover/press chrome tones, radius and
+  typography-scale tokens; ui_widgets.h gained a devicePixelRatio-aware
+  stroke-icon factory (33 glyphs - the SF-Symbols proportions for every
+  toolbar/transport control), a pill SegmentedControl, an EmptyState v2
+  (icon + action buttons + 140 ms fade-in) and a bottom-center Toast
+  pill. One app-wide stylesheet restyles every native-light Win7
+  control dark: menus, menu bar, dock/tab bars (underline-selected),
+  thin 8px overlay-style scrollbars, combos with dark popups, inputs
+  with accent focus rings, checkboxes/radios with generated accent
+  check glyphs, tooltips, splitters, sliders (hairline groove, round
+  light handle) and list/tree selection. Quick Mode: the duplicated
+  Import button is gone (the numbered step-rail chip IS the import
+  action; completed steps show checkmarks), the empty state is a hero
+  ("Start your project" + Import/Template buttons, double-click or
+  drop anywhere imports), the tool rows merged into one floating
+  icon-first toolbar with the template strip as drawn thumbnail cards,
+  and the transport is QuickTime-style circular icon buttons. Pro
+  Mode: the media library is dark with a segmented List/Grid switch,
+  one search field, a metadata card and a proper empty state; Effect
+  Controls shows exactly ONE empty state (a latent bug fixed on the
+  way: selecting a transition from idle never refreshed the overlay,
+  which an opaque overlay would have made a stuck screen), parameter
+  cards and icon-only reset chips; Scopes speaks sentence case with a
+  no-signal waveform glyph; the timeline tool row is a segmented
+  control, track IDs are chips in the track color, clips get rounded
+  corners with accent selection, the ruler/playhead shrink to the FCP
+  look and the zoom slider lives in a right-aligned -/+ pill cluster;
+  the transport matches Quick Mode's circular buttons. Shell: a
+  floating Pro/Quick segmented control above the workspace (synced
+  with the Window menu), the Title and Effects menus folded into Clip
+  (9 top-level menus -> 7; every action kept), undo/redo feedback as
+  toasts, the build/budget line moved from the status bar into About.
+  Verified in-sandbox against the real Qt 5.15.15 + FFmpeg headers:
+  all 24 app translation units compile warning-free (-Wall -Wextra,
+  clang-format 22.1.8 clean) and the full binary links and runs the
+  event loop headless.
+
 - **Clip Speed / Duration (Clip menu, Ctrl+R):** a dialog edits the
   selected clip's playback rate - the timeline length rescales from
   the unchanged source extent (live preview in frames and seconds;

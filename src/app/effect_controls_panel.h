@@ -113,7 +113,7 @@ protected:
         QSlider *slider = nullptr;
         QLabel *value = nullptr;
         QPushButton *keyframe = nullptr;
-        QToolButton *reset = nullptr; // ↺ reset-to-default button (#35)
+        QToolButton *reset = nullptr; // reset-to-default icon button (#35/#84)
         QWidget *lane = nullptr;      // KeyframeLane mini-lane (#34), when animated
     };
     std::vector<ParamRow> rows_;

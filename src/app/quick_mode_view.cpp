@@ -5,14 +5,19 @@
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QSlider>
 #include <QStandardItem>
 #include <QStandardItemModel>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -20,6 +25,7 @@
 
 #include "timecode.h"
 #include "ui_theme.h"
+#include "ui_widgets.h"
 
 // ui_theme.h tokens live in fc::ui; the panel addresses them as ui::...
 using namespace fc;
@@ -28,28 +34,91 @@ namespace {
 constexpr int kMaxSlider = 100000;
 
 // Dynamic QObject property on the play button that mirrors the playing
-// state (see setPlaying) - state, not translated label text.
+// state (see setPlaying) - state, not a translated label.
 constexpr char kPlayingProperty[] = "fcPlaying";
 
-const char *kAccentStyle = "QPushButton { background: #00A8FF; color: #101010; font-weight: bold; "
-                           "border-radius: 4px; padding: 6px 18px; }"
-                           "QPushButton:hover { background: #33B9FF; }";
+// Floating tool bar (#75) + icon-first buttons (#76): 16px stroke
+// glyphs beside the labels.
+constexpr int kToolbarIconSize = 16;
+// Circular transport buttons (#79): 32px rounds, 18px glyphs.
+constexpr int kTransportSize = 32;
+constexpr int kTransportIconSize = 18;
+constexpr int kStepIconSize = 14;
+constexpr int kEmptyIconSize = 44;
+constexpr int kCardIconSize = 26;
 
-struct ToolGroup {
-    const char *const *labels;
-    int count;
-    const char *tooltip;
-};
+// Circular transport style (#79): elevated fill, hairline, hover
+// brighten, press inset - QuickTime's rounded transport buttons.
+QString circularTransportStyle() {
+    return QStringLiteral("QToolButton { background: %1; border: 1px solid %2; "
+                          "border-radius: 16px; padding: 0; }"
+                          "QToolButton:hover { background: %3; }"
+                          "QToolButton:pressed { background: %4; }")
+        .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+             ui::color(ui::kSurfaceHover).name(), ui::color(ui::kSurfacePress).name());
+}
 
-QPushButton *flatToolButton(const QString &text, const QString &tooltip, const char *color,
-                            QWidget *parent) {
-    auto *button = new QPushButton(text, parent);
-    button->setFlat(true);
+QToolButton *circularTransportButton(const QString &iconName, const QString &tooltip,
+                                     const QString &accessibleName, QWidget *parent) {
+    auto *button = new QToolButton(parent);
+    button->setIcon(icons::makeIcon(iconName, ui::color(ui::kText), kTransportIconSize,
+                                    parent->devicePixelRatioF()));
+    button->setIconSize(QSize(kTransportIconSize, kTransportIconSize));
+    button->setFixedSize(kTransportSize, kTransportSize);
+    button->setStyleSheet(circularTransportStyle());
     button->setToolTip(tooltip);
-    button->setStyleSheet(QString("QPushButton { color: %1; padding: 6px 10px; }"
-                                  "QPushButton:hover { color: #00A8FF; }")
-                              .arg(color));
+    button->setAccessibleName(accessibleName); // #96: icon-only needs a name
     return button;
+}
+
+// Icon-first tool button (#76): the app-wide sheet supplies the neutral
+// chrome (no per-button light styling here). `fcAccent` on Add Media is
+// set by the caller - it is the ONLY accent-filled control (#66).
+QPushButton *toolbarButton(const QString &text, const QString &tooltip, const QString &iconName,
+                           const QColor &iconColor, qreal dpr, QWidget *parent) {
+    auto *button = new QPushButton(text, parent);
+    button->setIcon(icons::makeIcon(iconName, iconColor, kToolbarIconSize, dpr));
+    button->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
+    button->setToolTip(tooltip);
+    return button;
+}
+
+// Thin vertical group separator inside the floating bar (#75).
+QFrame *toolbarSeparator(QWidget *parent) {
+    auto *separator = new QFrame(parent);
+    separator->setFixedSize(1, 22);
+    separator->setStyleSheet(QStringLiteral("background: %1;").arg(ui::color(ui::kLine).name()));
+    return separator;
+}
+
+// Template card thumbnail (#77): rounded 96x54 tile, two-tone gradient,
+// centered template glyph and a 1px hairline - drawn once, at dpr.
+QPixmap templateCardPixmap(const QString &glyphName, qreal dpr) {
+    const qreal w = 96.0;
+    const qreal h = 54.0;
+    const qreal ratio = dpr > 0 ? dpr : 1.0;
+    QPixmap pm(qRound(w * ratio), qRound(h * ratio));
+    pm.setDevicePixelRatio(ratio);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPainterPath card;
+    card.addRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), ui::kRadiusControl, ui::kRadiusControl);
+    QLinearGradient grad(0, 0, 0, h);
+    grad.setColorAt(0.0, ui::color(ui::kSurface3));
+    grad.setColorAt(1.0, ui::color(ui::kCard));
+    p.fillPath(card, grad);
+    p.setPen(QPen(ui::color(ui::kLine), 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(card);
+    // Request the stored pixmap at its native pixel size so it comes
+    // back with the devicePixelRatio tag intact (the DPR-aware
+    // QIcon::pixmap(QSize, qreal) overload is Qt 6 only).
+    const QPixmap glyph =
+        icons::makeIcon(glyphName, ui::color(ui::kTextDim), kCardIconSize, ratio)
+            .pixmap(QSize(qRound(kCardIconSize * ratio), qRound(kCardIconSize * ratio)));
+    p.drawPixmap(QPointF((w - kCardIconSize) / 2.0, (h - kCardIconSize) / 2.0), glyph);
+    return pm;
 }
 } // namespace
 
@@ -57,12 +126,38 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     setAcceptDrops(true); // full-page media drop zone (#53)
 
     canvas_ = new PreviewCanvas(this);
-    playButton_ = new QPushButton(tr("Play"), this);
-    playButton_->setMinimumWidth(90);
-    stepBack_ = new QPushButton(tr("|<"), this);
-    stepFwd_ = new QPushButton(tr(">|"), this);
-    stepBack_->setToolTip(tr("Previous frame (Left)"));
-    stepFwd_->setToolTip(tr("Next frame (Right)"));
+
+    // Hero empty state (#74): overlays the canvas and hides once a
+    // program duration is known (see setMedia). It is opaque in the
+    // canvas tone, so it also covers the dim "No media loaded" text the
+    // shared PreviewCanvas paints underneath. lower() keeps the
+    // canvas's quality dropdown above it and clickable.
+    emptyState_ = new fc::EmptyState(canvas_);
+    emptyState_->setObjectName(QStringLiteral("fcQuickEmpty"));
+    emptyState_->setAttribute(Qt::WA_StyledBackground, true);
+    emptyState_->setStyleSheet(QStringLiteral("QWidget#fcQuickEmpty { background: %1; }")
+                                   .arg(ui::color(ui::kCanvas).name()));
+    emptyState_->setIcon(
+        icons::makeIcon("film", ui::color(ui::kTextDisabled), kEmptyIconSize, devicePixelRatioF()));
+    emptyState_->setTitle(tr("Start your project"));
+    emptyState_->setHint(tr("Drop files anywhere, or bring in media to begin"));
+    emptyState_->addAction(tr("Import Media…"), true, [this] { emit importRequested(); });
+    emptyState_->addAction(tr("Use a Template"), false, [this] {
+        // Same handler the template cards use: the title-broll prefill
+        // is the only one MainWindow fully realizes today.
+        emit templateRequested(QStringLiteral("title-broll"));
+    });
+    auto *canvasLayout = new QVBoxLayout(canvas_);
+    canvasLayout->setContentsMargins(0, 0, 0, 0);
+    canvasLayout->addWidget(emptyState_);
+    emptyState_->lower();
+
+    playButton_ =
+        circularTransportButton(QStringLiteral("play"), tr("Play (Space)"), tr("Play"), this);
+    stepBack_ = circularTransportButton(QStringLiteral("step-back"), tr("Previous frame (Left)"),
+                                        tr("Previous frame"), this);
+    stepFwd_ = circularTransportButton(QStringLiteral("step-fwd"), tr("Next frame (Right)"),
+                                       tr("Next frame"), this);
     position_ = new QSlider(Qt::Horizontal, this);
     position_->setRange(0, kMaxSlider);
     position_->setEnabled(false); // a duration arrives with setMedia()
@@ -76,9 +171,11 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     root->addWidget(buildTopBar());
     root->addWidget(canvas_, 1);
 
+    // QuickTime order (#79): back - play - forward.
     auto *transport = new QHBoxLayout();
-    transport->addWidget(playButton_);
+    transport->setSpacing(6);
     transport->addWidget(stepBack_);
+    transport->addWidget(playButton_);
     transport->addWidget(stepFwd_);
     transport->addWidget(position_, 1);
     transport->addWidget(timecode_);
@@ -86,18 +183,16 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     root->addWidget(buildToolbar());
     root->addWidget(buildTemplateStrip());
 
-    connect(playButton_, &QPushButton::clicked, this, [this] {
+    connect(playButton_, &QToolButton::clicked, this, [this] {
         // The playing STATE lives on the button as a dynamic property
-        // kept in sync by setPlaying(); the old text() == tr("Play")
-        // comparison broke under translation (the label reads
-        // tr("Pause") while playing, and either string can change).
-        // An unset property reads false = not playing, matching the
-        // initial "Play" label.
+        // kept in sync by setPlaying(); the icon swap follows the same
+        // state. An unset property reads false = not playing, matching
+        // the initial play glyph.
         const bool playing = playButton_->property(kPlayingProperty).toBool();
         emit playToggled(!playing);
     });
-    connect(stepBack_, &QPushButton::clicked, this, [this] { emit stepRequested(-1); });
-    connect(stepFwd_, &QPushButton::clicked, this, [this] { emit stepRequested(1); });
+    connect(stepBack_, &QToolButton::clicked, this, [this] { emit stepRequested(-1); });
+    connect(stepFwd_, &QToolButton::clicked, this, [this] { emit stepRequested(1); });
     auto seekBySlider = [this](int value) {
         if (duration_ <= 0.0) {
             return;
@@ -118,10 +213,11 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     });
     refreshTimecode();
 
-    // Children (canvas, buttons, labels) would swallow drag events
-    // before the page sees them: forward every drag event that lands
-    // on ANY descendant widget back into this page's own handlers via
-    // an event filter (#53). Called after the UI is fully built.
+    // Children (canvas, buttons, labels, the empty state) would swallow
+    // drag events before the page sees them: forward every drag event
+    // that lands on ANY descendant widget back into this page's own
+    // handlers via an event filter (#53). Called after the UI is fully
+    // built.
     const QList<QWidget *> children = findChildren<QWidget *>();
     for (QWidget *child : children) {
         child->installEventFilter(this);
@@ -132,11 +228,6 @@ QWidget *QuickModeView::buildTopBar() {
     auto *bar = new QWidget(this);
     auto *layout = new QHBoxLayout(bar);
     layout->setContentsMargins(0, 0, 0, 0);
-
-    auto *import = new QPushButton(tr("Import"), bar);
-    import->setStyleSheet(kAccentStyle);
-    import->setToolTip(tr("Import media files into the project (Ctrl+I)"));
-    connect(import, &QPushButton::clicked, this, [this] { emit importRequested(); });
 
     aspectBox_ = new QComboBox(bar);
     aspectBox_->addItem(tr("16:9"));
@@ -164,7 +255,8 @@ QWidget *QuickModeView::buildTopBar() {
                 }
             });
 
-    layout->addWidget(import);
+    // No standalone Import button anymore (0-a): the step rail's
+    // current Import chip + the empty state's primary action own it.
     layout->addStretch(1);
     layout->addWidget(new QLabel(tr("Aspect:"), bar));
     layout->addWidget(aspectBox_);
@@ -177,6 +269,9 @@ QWidget *QuickModeView::buildStepRail() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
 
+    // Numbered progress rail (#73). applyStepStyles() picks the text
+    // per state: numbered while current/future, plain under the
+    // checkmark once completed.
     const QString labels[] = {tr("Import"), tr("Arrange"), tr("Export")};
     const QString tooltips[] = {tr("Step 1: import media files (opens the import dialog)."),
                                 tr("Arrange clips on the timeline"),
@@ -187,19 +282,23 @@ QWidget *QuickModeView::buildStepRail() {
         chip->setToolTip(tooltips[i]);
         chip->setMinimumHeight(28); // comfortable hit target
         chip->setCursor(Qt::PointingHandCursor);
+        chip->setIconSize(QSize(kStepIconSize, kStepIconSize));
         connect(chip, &QPushButton::clicked, this, [this, i] {
+            // Signal wiring unchanged from the round-1 rail: Import
+            // opens the import dialog, Export opens the export dialog,
+            // Arrange is the timeline itself. MainWindow keeps driving
+            // the rail state via setStep().
             if (i == 0) {
                 emit importRequested();
             } else if (i == 2) {
                 emit exportRequested();
             }
-            // Step 1 (arrange) is the timeline itself - no action.
         });
         stepChips_[i] = chip;
         layout->addWidget(chip);
         if (i < 2) {
             auto *link = new QWidget(rail);
-            link->setFixedSize(28, 2);
+            link->setFixedSize(28, 1); // 1px connector (#73)
             stepLinks_[i] = link;
             layout->addWidget(link);
         }
@@ -210,30 +309,49 @@ QWidget *QuickModeView::buildStepRail() {
 }
 
 void QuickModeView::applyStepStyles() {
-    const QString accent = fc::ui::color(ui::kAccent).name();
-    const QString accentBright = fc::ui::color(ui::kAccentBright).name();
-    const QString onAccent = fc::ui::color(ui::kOnAccent).name();
-    const QString surface3 = fc::ui::color(ui::kSurface3).name();
-    const QString hover =
-        fc::ui::mix(fc::ui::color(ui::kSurface3), fc::ui::color(ui::kLine), 0.5).name();
-    const QString text = fc::ui::color(ui::kText).name();
-    const QString line = fc::ui::color(ui::kLine).name();
+    const QString accent = ui::color(ui::kAccent).name();
+    const QString accentBright = ui::color(ui::kAccentBright).name();
+    const QString onAccent = ui::color(ui::kOnAccent).name();
+    const QString surface3 = ui::color(ui::kSurface3).name();
+    const QString hover = ui::mix(ui::color(ui::kSurface3), ui::color(ui::kLine), 0.5).name();
+    const QString text = ui::color(ui::kText).name();
+    const QString textDim = ui::color(ui::kTextDim).name();
+    const QString line = ui::color(ui::kLine).name();
+    const QString numbered[] = {tr("1 · Import"), tr("2 · Arrange"), tr("3 · Export")};
+    const QString plain[] = {tr("Import"), tr("Arrange"), tr("Export")};
+    const QIcon check =
+        icons::makeIcon("check", ui::color(ui::kAccent), kStepIconSize, devicePixelRatioF());
     for (int i = 0; i < 3; ++i) {
         if (stepChips_[i] == nullptr) {
             continue;
         }
         if (i == step_) {
+            // Current step: the one accent pill, and the action itself.
+            stepChips_[i]->setIcon(QIcon());
+            stepChips_[i]->setText(numbered[i]);
             stepChips_[i]->setStyleSheet(
                 QStringLiteral("QPushButton { background: %1; color: %2; font-weight: bold; "
                                "border-radius: 13px; padding: 4px 16px; }"
                                "QPushButton:hover { background: %3; }")
                     .arg(accent, onAccent, accentBright));
-        } else {
+        } else if (i < step_) {
+            // Completed step: neutral chip, accent checkmark (#73).
+            stepChips_[i]->setIcon(check);
+            stepChips_[i]->setText(plain[i]);
             stepChips_[i]->setStyleSheet(
                 QStringLiteral("QPushButton { background: %1; color: %2; border-radius: 13px; "
                                "padding: 4px 16px; }"
                                "QPushButton:hover { background: %3; }")
                     .arg(surface3, text, hover));
+        } else {
+            // Future step: neutral, dim.
+            stepChips_[i]->setIcon(QIcon());
+            stepChips_[i]->setText(numbered[i]);
+            stepChips_[i]->setStyleSheet(
+                QStringLiteral("QPushButton { background: %1; color: %2; border-radius: 13px; "
+                               "padding: 4px 16px; }"
+                               "QPushButton:hover { background: %3; color: %4; }")
+                    .arg(surface3, textDim, hover, text));
         }
     }
     for (int i = 0; i < 2; ++i) {
@@ -257,7 +375,7 @@ void QuickModeView::setStep(int step) {
 QWidget *QuickModeView::buildTemplateStrip() {
     auto *bar = new QWidget(this);
     bar->setStyleSheet(QStringLiteral("QWidget { background: %1; border-radius: 6px; }")
-                           .arg(fc::ui::color(ui::kSurface2).name()));
+                           .arg(ui::color(ui::kSurface2).name()));
     auto *layout = new QHBoxLayout(bar);
     layout->setContentsMargins(10, 8, 10, 8);
     layout->setSpacing(8);
@@ -267,35 +385,48 @@ QWidget *QuickModeView::buildTemplateStrip() {
                            "media onto the placeholders."));
     layout->addWidget(caption);
 
-    struct TemplateChip {
+    // Template cards (#77): 96x54 gradient tile with a glyph, label
+    // underneath, accent hover. The ids/signals are unchanged - the
+    // template strip is only a face lift.
+    struct TemplateCard {
         const char *label;
         const char *id;
+        const char *glyph;
         const char *tooltip;
     };
-    const TemplateChip chips[] = {
-        {"Title + B-roll", "title-broll",
+    const TemplateCard cards[] = {
+        {"Title + B-roll", "title-broll", "text",
          "Prefills a title card, one b-roll clip and a lower-third caption - swap in "
          "your own media."},
-        {"Vlog intro", "vlog",
+        {"Vlog intro", "vlog", "film",
          "Prefills a vlog opening: intro title, three alternating clip slots and an "
          "outro card."},
-        {"Slideshow", "slideshow",
+        {"Slideshow", "slideshow", "image",
          "Prefills evenly spaced photo slots with crossfade transitions between them."},
     };
-    for (const TemplateChip &chip : chips) {
-        auto *button = new QPushButton(tr(chip.label), bar);
-        button->setFlat(true);
-        button->setToolTip(tr(chip.tooltip));
-        button->setMinimumHeight(28); // comfortable hit target
+    const qreal dpr = devicePixelRatioF();
+    for (const TemplateCard &card : cards) {
+        auto *button = new QToolButton(bar);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        button->setAutoRaise(true);
+        button->setIcon(QIcon(templateCardPixmap(QString::fromUtf8(card.glyph), dpr)));
+        button->setIconSize(QSize(96, 54));
+        button->setText(tr(card.label));
+        button->setToolTip(tr(card.tooltip));
+        button->setFixedSize(112, 86); // tile + label under it (#77)
         button->setCursor(Qt::PointingHandCursor);
-        button->setStyleSheet(QStringLiteral("QPushButton { color: %1; border: 1px solid %2; "
-                                             "border-radius: 13px; padding: 4px 14px; }"
-                                             "QPushButton:hover { color: %3; }")
-                                  .arg(fc::ui::color(ui::kText).name(),
-                                       fc::ui::color(ui::kLine).name(),
-                                       fc::ui::color(ui::kAccent).name()));
-        connect(button, &QPushButton::clicked, this,
-                [this, id = QString::fromUtf8(chip.id)] { emit templateRequested(id); });
+        button->setStyleSheet(
+            QStringLiteral("QToolButton { border: 1px solid %1; border-radius: 8px; "
+                           "background: transparent; padding: 3px 6px; color: %2; "
+                           "font-size: %3px; }"
+                           "QToolButton:hover { border-color: %4; background: %5; }"
+                           "QToolButton:pressed { background: %6; }")
+                .arg(ui::color(ui::kLine).name(), ui::color(ui::kText).name())
+                .arg(QString::number(ui::kFontSmall))
+                .arg(ui::color(ui::kAccent).name(), ui::color(ui::kSurface3).name(),
+                     ui::color(ui::kSurfacePress).name()));
+        connect(button, &QToolButton::clicked, this,
+                [this, id = QString::fromUtf8(card.id)] { emit templateRequested(id); });
         layout->addWidget(button);
     }
     layout->addStretch(1);
@@ -303,26 +434,67 @@ QWidget *QuickModeView::buildTemplateStrip() {
 }
 
 QWidget *QuickModeView::buildToolbar() {
-    auto *bar = new QWidget(this);
-    bar->setStyleSheet("QWidget { background: #252525; border-radius: 6px; }");
+    // Floating bottom bar (#75): the two former rows become one
+    // centered elevated bar with hairline group separators; every tool
+    // is icon-first (#76). Buttons stay placeholders ("Coming later")
+    // with no connections, exactly as before.
+    auto *wrap = new QWidget(this);
+    auto *centered = new QHBoxLayout(wrap);
+    centered->setContentsMargins(0, 0, 0, 0);
+
+    auto *bar = new QFrame(wrap);
+    bar->setObjectName(QStringLiteral("fcQuickToolbar"));
+    bar->setStyleSheet(QStringLiteral("QFrame#fcQuickToolbar { background: %1; "
+                                      "border: 1px solid %2; border-radius: 12px; }")
+                           .arg(ui::color(ui::kSurface2).name(), ui::color(ui::kLine).name()));
     auto *layout = new QHBoxLayout(bar);
-    layout->setContentsMargins(10, 8, 10, 8);
-    layout->setSpacing(8);
+    layout->setContentsMargins(6, 8, 6, 8);
+    layout->setSpacing(4);
 
-    // Main toolbar (shown when no clip is selected).
-    static const char *kTools[] = {"Add Media", "Text",        "Stickers",
-                                   "Effects",   "Transitions", "Filters"};
-    for (const char *tool : kTools) {
-        layout->addWidget(flatToolButton(tr(tool), tr("Coming later"), "#E8E8E8", bar));
-    }
-    layout->addStretch(1);
+    const qreal dpr = devicePixelRatioF();
+    const QColor iconColor = ui::color(ui::kText);
+    const QString later = tr("Coming later");
 
-    // Quick Actions: AI one-click features.
-    static const char *kActions[] = {"Auto-Captions", "Auto-Enhance", "Smart Crop", "Templates"};
-    for (const char *action : kActions) {
-        layout->addWidget(flatToolButton(tr(action), tr("Coming later"), "#9BB8C9", bar));
-    }
-    return bar;
+    // Group 1: media in - the single accent-filled control (#66).
+    auto *addMedia = toolbarButton(tr("Add Media"), later, QStringLiteral("plus"),
+                                   ui::color(ui::kOnAccent), dpr, bar);
+    addMedia->setProperty("fcAccent", true);
+    layout->addWidget(addMedia);
+
+    // Group 2: overlays (text, stickers).
+    layout->addWidget(toolbarSeparator(bar));
+    layout->addWidget(
+        toolbarButton(tr("Text"), later, QStringLiteral("text"), iconColor, dpr, bar));
+    layout->addWidget(
+        toolbarButton(tr("Stickers"), later, QStringLiteral("sticker"), iconColor, dpr, bar));
+
+    // Group 3: clip effects.
+    layout->addWidget(toolbarSeparator(bar));
+    layout->addWidget(
+        toolbarButton(tr("Effects"), later, QStringLiteral("effects"), iconColor, dpr, bar));
+    layout->addWidget(toolbarButton(tr("Transitions"), later, QStringLiteral("transitions"),
+                                    iconColor, dpr, bar));
+    layout->addWidget(
+        toolbarButton(tr("Filters"), later, QStringLiteral("filters"), iconColor, dpr, bar));
+
+    // Group 4: AI assists.
+    layout->addWidget(toolbarSeparator(bar));
+    layout->addWidget(
+        toolbarButton(tr("Auto-Captions"), later, QStringLiteral("captions"), iconColor, dpr, bar));
+    layout->addWidget(
+        toolbarButton(tr("Auto-Enhance"), later, QStringLiteral("enhance"), iconColor, dpr, bar));
+    layout->addWidget(
+        toolbarButton(tr("Smart Crop"), later, QStringLiteral("crop"), iconColor, dpr, bar));
+
+    // Group 5: templates (the strip below holds the actual prefills).
+    layout->addWidget(toolbarSeparator(bar));
+    layout->addWidget(
+        toolbarButton(tr("Templates"), later, QStringLiteral("templates"), iconColor, dpr, bar));
+
+    centered->addStretch(1);
+    centered->addWidget(bar);
+    centered->addStretch(1);
+    return wrap;
 }
 
 void QuickModeView::setMedia(double durationSeconds, double fps) {
@@ -334,6 +506,10 @@ void QuickModeView::setMedia(double durationSeconds, double fps) {
     position_->setValue(0);
     position_->blockSignals(false);
     refreshTimecode();
+    // #74: the hero empty state lives exactly while there is no program.
+    if (emptyState_ != nullptr) {
+        emptyState_->refresh(duration_ <= 0.0);
+    }
 }
 
 void QuickModeView::setPosition(double seconds) {
@@ -352,7 +528,12 @@ void QuickModeView::setPosition(double seconds) {
 
 void QuickModeView::setPlaying(bool playing) {
     playButton_->setProperty(kPlayingProperty, playing);
-    playButton_->setText(playing ? tr("Pause") : tr("Play"));
+    // #79: icon-only transport - the glyph carries the state.
+    playButton_->setIcon(icons::makeIcon(playing ? QStringLiteral("pause") : QStringLiteral("play"),
+                                         ui::color(ui::kText), kTransportIconSize,
+                                         devicePixelRatioF()));
+    playButton_->setToolTip(playing ? tr("Pause (Space)") : tr("Play (Space)"));
+    playButton_->setAccessibleName(playing ? tr("Pause") : tr("Play"));
 }
 
 void QuickModeView::refreshTimecode() {
@@ -368,14 +549,26 @@ void QuickModeView::paintEvent(QPaintEvent *event) {
     if (!dragHover_) {
         return;
     }
-    // Full-panel 2 px accent border while a drag hovers over the page.
+    // #107: 2px rounded accent outline, inset 8px, while a drag hovers
+    // anywhere on the page.
     QPainter painter(this);
-    const QColor accent = fc::ui::color(ui::kAccent);
-    const QRect bounds = rect();
-    painter.fillRect(QRect(bounds.left(), bounds.top(), bounds.width(), 2), accent);
-    painter.fillRect(QRect(bounds.left(), bounds.bottom() - 1, bounds.width(), 2), accent);
-    painter.fillRect(QRect(bounds.left(), bounds.top(), 2, bounds.height()), accent);
-    painter.fillRect(QRect(bounds.right() - 1, bounds.top(), 2, bounds.height()), accent);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(ui::color(ui::kAccent), 2);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRoundedRect(QRectF(rect()).adjusted(8, 8, -8, -8), ui::kRadiusCard,
+                            ui::kRadiusCard);
+}
+
+void QuickModeView::mouseDoubleClickEvent(QMouseEvent *event) {
+    QWidget::mouseDoubleClickEvent(event);
+    // #106: with nothing loaded yet, double-clicking the page is the
+    // same as pressing Import.
+    if (duration_ <= 0.0 && event->button() == Qt::LeftButton) {
+        emit importRequested();
+    }
 }
 
 void QuickModeView::dragEnterEvent(QDragEnterEvent *event) {
@@ -440,7 +633,17 @@ bool QuickModeView::eventFilter(QObject *watched, QEvent *event) {
     case QEvent::Drop:
         dropEvent(static_cast<QDropEvent *>(event));
         return true;
+    case QEvent::MouseButtonDblClick:
+        // #106: a double-click on the canvas area of an empty page
+        // starts the import flow. Non-empty canvases keep their
+        // default behavior.
+        if (watched == canvas_ && duration_ <= 0.0) {
+            mouseDoubleClickEvent(static_cast<QMouseEvent *>(event));
+            return true;
+        }
+        break;
     default:
-        return QWidget::eventFilter(watched, event);
+        break;
     }
+    return QWidget::eventFilter(watched, event);
 }

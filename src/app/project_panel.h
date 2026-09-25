@@ -15,12 +15,12 @@ class QLabel;
 class QLineEdit;
 class QListWidgetItem;
 class QPushButton;
-class QToolButton;
 class QTimer;
 
 namespace fc {
 class EmptyState;
 class ErrorBanner;
+class SegmentedControl;
 } // namespace fc
 
 // Pro Mode left panel: imported media list with import/remove, and a
@@ -88,9 +88,9 @@ private:
     QLabel *metaDuration_ = nullptr;
     QLabel *metaProxy_ = nullptr;
 
-    // View mode toggle (#28) + filtering (#31) row above the list.
-    QToolButton *listModeButton_ = nullptr;
-    QToolButton *gridModeButton_ = nullptr;
+    // Header row (#81): a segmented List | Grid switch (same persisted
+    // "project/viewMode" logic) plus the filter field and type combo.
+    fc::SegmentedControl *viewSwitch_ = nullptr;
     QLineEdit *filterEdit_ = nullptr;
     QComboBox *typeCombo_ = nullptr;
 

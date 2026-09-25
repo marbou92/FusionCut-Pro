@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QEvent>
 #include <QFont>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeySequence>
@@ -30,6 +31,7 @@
 
 #include "timecode.h"
 #include "ui_theme.h"
+#include "ui_widgets.h"
 
 // ui_theme.h tokens live in fc::ui; the timeline addresses them as
 // ui::... throughout its paint code, so the file pulls in the fc
@@ -38,7 +40,7 @@ using namespace fc;
 
 namespace {
 constexpr int kHeaderWidth = 96;
-constexpr int kRulerHeight = 26;
+constexpr int kRulerHeight = 24; // #90: 24 px ruler band
 constexpr int kTrackHeight = 44;
 constexpr int kZoomBarHeight = 30;
 constexpr int kToolRowHeight = 30;
@@ -57,12 +59,55 @@ const QColor kPanelBg = ui::color(ui::kTimelineBg);
 const QColor kVideoTrack(0x2B, 0x30, 0x3A);
 const QColor kAudioTrack(0x1F, 0x36, 0x2E);
 const QColor kTextTrack(0x32, 0x28, 0x3A);
-const QColor kRulerBg(0x21, 0x21, 0x21);
 const QColor kClipFill(0x37, 0x4B, 0x5A);
 const QColor kTextClipFill(0x59, 0x3D, 0x70);
-const QColor kClipSelected = ui::color(ui::kAccent);
 const QColor kGhostFill(0x6E, 0x9B, 0xB8);
 const QColor kGhostBad(0xB0, 0x3A, 0x2E);
+
+// #88: painted glyphs for the header L/M/S toggles (they stay painted -
+// the press hit band in headerBoxAt() is untouched). ~10 px glyphs: dim
+// outline when off, near-white on the accent tint when on.
+constexpr double kPi = 3.14159265358979323846;
+
+void paintLockGlyph(QPainter &p, const QPointF &c, const QColor &color, bool on) {
+    QPen pen(color, 1.2);
+    pen.setCapStyle(Qt::RoundCap);
+    p.setPen(pen);
+    p.setBrush(on ? color : QBrush());
+    p.drawArc(QRectF(c.x() - 2.5, c.y() - 4.5, 5.0, 5.0), 0, 180 * 16);
+    p.drawRoundedRect(QRectF(c.x() - 3.5, c.y() - 0.5, 7.0, 5.0), 1, 1);
+}
+
+void paintMuteGlyph(QPainter &p, const QPointF &c, const QColor &color, bool on) {
+    QPen pen(color, 1.2);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(on ? color : QBrush());
+    QPolygonF speaker;
+    speaker << QPointF(c.x() - 5.5, c.y() - 2.0) << QPointF(c.x() - 2.5, c.y() - 2.0)
+            << QPointF(c.x() - 0.5, c.y() - 4.0) << QPointF(c.x() - 0.5, c.y() + 4.0)
+            << QPointF(c.x() - 2.5, c.y() + 2.0) << QPointF(c.x() - 5.5, c.y() + 2.0);
+    p.drawPolygon(speaker);
+    p.setBrush(QBrush());
+    p.drawLine(QPointF(c.x() + 1.5, c.y() - 2.5), QPointF(c.x() + 5.0, c.y() + 2.5));
+    p.drawLine(QPointF(c.x() + 5.0, c.y() - 2.5), QPointF(c.x() + 1.5, c.y() + 2.5));
+}
+
+void paintSoloGlyph(QPainter &p, const QPointF &c, const QColor &color, bool on) {
+    QPolygonF star;
+    for (int i = 0; i < 10; ++i) {
+        const qreal angle = -kPi / 2.0 + i * kPi / 5.0;
+        const qreal radius = (i % 2 == 0) ? 5.5 : 2.4;
+        star << QPointF(c.x() + radius * std::cos(angle), c.y() + radius * std::sin(angle));
+    }
+    QPen pen(color, 1.1);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(on ? color : QBrush());
+    p.drawPolygon(star);
+}
 } // namespace
 
 TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
@@ -70,27 +115,40 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    // ---- tool row: [Select] [Razor] | [Ripple] -----------------------
+    // ---- tool row: [Select | Blade]  [Ripple] -----------------------
     auto *toolRow = new QWidget(this);
     toolRow->setFixedHeight(kToolRowHeight);
     auto *tools = new QHBoxLayout(toolRow);
     tools->setContentsMargins(kHeaderWidth + 8, 2, 12, 2);
-    tools->setSpacing(4);
+    tools->setSpacing(8);
 
-    selectTool_ = new QToolButton(toolRow);
-    selectTool_->setText(tr("Select"));
-    selectTool_->setToolTip(tr("Select / move / trim tool (V)"));
-    selectTool_->setCheckable(true);
-    selectTool_->setChecked(true);
-    selectTool_->setShortcut(QKeySequence(Qt::Key_V));
-    selectTool_->setAccessibleName(tr("Select tool"));
-
-    razorTool_ = new QToolButton(toolRow);
-    razorTool_->setText(tr("Razor"));
-    razorTool_->setToolTip(tr("Razor tool: click a clip to split it at that frame (C)"));
-    razorTool_->setCheckable(true);
-    razorTool_->setShortcut(QKeySequence(Qt::Key_C));
-    razorTool_->setAccessibleName(tr("Razor tool"));
+    // Tool segmented control (#86): the blue Select pill + gray siblings
+    // become one NSSegmentedControl-style cluster (its buttons are
+    // globally styled via the fcSegment property). Ripple stays a
+    // separate toggle on purpose: it is an edit MODE, not a tool - it
+    // must coexist with Select and Blade, and segment exclusivity would
+    // silently un-check it.
+    toolSegment_ = new fc::SegmentedControl(toolRow);
+    const qreal toolIconDpr = devicePixelRatioF();
+    const int selectSeg = toolSegment_->addSegment(
+        tr("Select"),
+        icons::makeIcon(QStringLiteral("cursor"), ui::color(ui::kText), 16, toolIconDpr),
+        tr("Select / move / trim tool (V)"));
+    const int bladeSeg = toolSegment_->addSegment(
+        tr("Blade"),
+        icons::makeIcon(QStringLiteral("blade"), ui::color(ui::kText), 16, toolIconDpr),
+        tr("Blade tool: click a clip to split it at that frame (C)"));
+    toolSegment_->button(selectSeg)->setShortcut(QKeySequence(Qt::Key_V));
+    toolSegment_->button(selectSeg)->setAccessibleName(tr("Select tool"));
+    toolSegment_->button(bladeSeg)->setShortcut(QKeySequence(Qt::Key_C));
+    toolSegment_->button(bladeSeg)->setAccessibleName(tr("Blade tool"));
+    // Same logic the old Select/Razor toggled handlers ran (only the
+    // "checked" edge acts): setRazorMode feeds back through
+    // syncToolButtons(), whose setCurrent is a no-op on the current
+    // index, so the loop stays dead. addSegment pre-checks Select -
+    // razorMode_ starts false and the handler is not installed yet.
+    toolSegment_->onSelected([this](int index) { setRazorMode(index == 1); });
+    tools->addWidget(toolSegment_);
 
     rippleTool_ = new QToolButton(toolRow);
     rippleTool_->setText(tr("Ripple"));
@@ -98,32 +156,28 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
                                "instead of leaving a hole (R)"));
     rippleTool_->setCheckable(true);
     rippleTool_->setAccessibleName(tr("Ripple toggle"));
+    rippleTool_->setObjectName(QStringLiteral("fcToolToggle"));
+    // Token-consistent elevated toggle (one-accent rule #66: the accent
+    // border appears only while the mode is on).
+    rippleTool_->setStyleSheet(
+        QStringLiteral("QToolButton{background:%1;border:1px solid %2;border-radius:%6px;"
+                       "padding:3px 10px;color:%3;}"
+                       "QToolButton:hover{background:%4;}"
+                       "QToolButton:pressed{background:%5;}"
+                       "QToolButton:checked{border-color:%7;}")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kText).name(), ui::color(ui::kSurfaceHover).name(),
+                 ui::color(ui::kSurfacePress).name(), QString::number(ui::kRadiusControl),
+                 ui::color(ui::kAccent).name()));
     // Tool keyboard switching (#15): V/C are the existing select/razor
     // bindings; R toggles ripple (plain R is free - Ctrl+R stays the
     // Speed / Duration dialog at window level).
     rippleTool_->setShortcut(QKeySequence(Qt::Key_R));
+    connect(rippleTool_, &QToolButton::toggled, this, [this](bool on) { rippleEnabled_ = on; });
 
-    tools->addWidget(selectTool_);
-    tools->addWidget(razorTool_);
-    tools->addSpacing(12);
     tools->addWidget(rippleTool_);
     tools->addStretch(1);
     layout->addWidget(toolRow);
-
-    // Razor/select buttons drive the single shared razorMode_ flag; the
-    // toggled handlers below only act on the "checked" edge, so the
-    // syncToolButtons() feedback (unchecking the sibling) cannot loop.
-    connect(razorTool_, &QToolButton::toggled, this, [this](bool on) {
-        if (on) {
-            setRazorMode(true);
-        }
-    });
-    connect(selectTool_, &QToolButton::toggled, this, [this](bool on) {
-        if (on) {
-            setRazorMode(false);
-        }
-    });
-    connect(rippleTool_, &QToolButton::toggled, this, [this](bool on) { rippleEnabled_ = on; });
 
     layout->addStretch(1);
 
@@ -184,16 +238,55 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
     zoom_->setRange(5, 400);
     zoom_->setValue(static_cast<int>(pps_));
     zoom_->setFixedHeight(kZoomBarHeight - 6);
+    zoom_->setMinimumWidth(150);
     connect(zoom_, &QSlider::valueChanged, this,
             [this](int value) { applyZoom(static_cast<double>(value)); });
 
+    // Zoom cluster (#91): a right-aligned pill holding - / slider / +,
+    // retiring the bare full-width slider + label. The buttons step the
+    // same 1.25x ladder the = / - shortcuts use; the slider's value
+    // mapping (5..400 -> applyZoom) is untouched.
     auto *zoomRow = new QWidget(this);
     zoomRow->setFixedHeight(kZoomBarHeight);
     auto *zoomLayout = new QHBoxLayout(zoomRow);
     zoomLayout->setContentsMargins(kHeaderWidth + 8, 0, 12, 0);
-    auto *zoomLabel = new QLabel(tr("Zoom"), zoomRow);
-    zoomLayout->addWidget(zoomLabel);
-    zoomLayout->addWidget(zoom_, 1);
+    zoomLayout->addStretch(1);
+
+    auto *cluster = new QFrame(zoomRow);
+    cluster->setObjectName(QStringLiteral("fcZoomCluster"));
+    cluster->setStyleSheet(
+        QStringLiteral("QFrame#fcZoomCluster{background:%1;border:1px solid %2;"
+                       "border-radius:12px;}"
+                       "QFrame#fcZoomCluster QToolButton{background:transparent;border:none;"
+                       "border-radius:9px;color:%3;font-size:15px;font-weight:600;}"
+                       "QFrame#fcZoomCluster QToolButton:hover{background:%4;}"
+                       "QFrame#fcZoomCluster QToolButton:pressed{background:%5;}")
+            .arg(ui::color(ui::kSurface2).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kText).name(), ui::color(ui::kSurfaceHover).name(),
+                 ui::color(ui::kSurfacePress).name()));
+    auto *clusterLayout = new QHBoxLayout(cluster);
+    clusterLayout->setContentsMargins(4, 2, 4, 2);
+    clusterLayout->setSpacing(2);
+
+    auto *zoomOut = new QToolButton(cluster);
+    zoomOut->setText(QString(QChar(0x2212))); // minus sign
+    zoomOut->setToolTip(tr("Zoom out (-)"));
+    zoomOut->setFixedSize(20, 20);
+    zoomOut->setCursor(Qt::PointingHandCursor);
+    zoomOut->setAccessibleName(tr("Zoom out"));
+    connect(zoomOut, &QToolButton::clicked, this, [this] { applyZoom(pps_ / 1.25); });
+    auto *zoomIn = new QToolButton(cluster);
+    zoomIn->setText(tr("+"));
+    zoomIn->setToolTip(tr("Zoom in (=)"));
+    zoomIn->setFixedSize(20, 20);
+    zoomIn->setCursor(Qt::PointingHandCursor);
+    zoomIn->setAccessibleName(tr("Zoom in"));
+    connect(zoomIn, &QToolButton::clicked, this, [this] { applyZoom(pps_ * 1.25); });
+
+    clusterLayout->addWidget(zoomOut);
+    clusterLayout->addWidget(zoom_, 1);
+    clusterLayout->addWidget(zoomIn);
+    zoomLayout->addWidget(cluster);
     layout->addWidget(zoomRow);
 }
 
@@ -556,8 +649,9 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
         painter.drawLine(x, contentTop(), x, areaHeight() + contentTop());
         painter.setBrush(ui::color(ui::kText));
         painter.setPen(Qt::NoPen);
-        painter.drawPolygon(QPolygon() << QPoint(x - 5, contentTop()) << QPoint(x + 5, contentTop())
-                                       << QPoint(x, contentTop() + 8));
+        // #90: small near-white triangle head (8 px wide, 7 px deep).
+        painter.drawPolygon(QPolygon() << QPoint(x - 4, contentTop()) << QPoint(x + 4, contentTop())
+                                       << QPoint(x, contentTop() + 7));
     }
     painter.restore();
 
@@ -588,24 +682,58 @@ void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
         const QColor accent = trackColor(r);
         painter.fillRect(0, cell.top(), 3, kTrackHeight, accent);
 
+        // #88: smooth chip + glyph pass (save/restore keeps the flat
+        // chrome painting above untouched). The L/M/S box rects below
+        // are the EXACT rects headerBoxAt() hit-tests - do not move them.
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        // Track ID chip: a small rounded chip filled with the track's
+        // identity color at ~80% alpha, dark text, elided to the cell.
+        // The rename editor and the press hit band keep their geometry.
         QFont bold = painter.font();
         bold.setBold(true);
         painter.setFont(bold);
-        painter.setPen(accent);
-        painter.drawText(QRect(10, cell.top() + 4, 40, 18), Qt::AlignLeft,
-                         QString::fromStdString(track->name));
-        painter.setFont(QFont());
+        const QFontMetrics boldMetrics(bold);
+        const QString name = boldMetrics.elidedText(QString::fromStdString(track->name),
+                                                    Qt::ElideRight, kHeaderWidth - 30);
+        QColor chipFill = accent;
+        chipFill.setAlpha(204);
+        const QRect chip(8, cell.top() + 3,
+                         qBound(20, boldMetrics.horizontalAdvance(name) + 12, kHeaderWidth - 16),
+                         16);
+        painter.setPen(ui::color(ui::kOnAccent));
+        painter.setBrush(chipFill);
+        painter.drawRoundedRect(chip, 4, 4);
+        painter.drawText(chip, Qt::AlignCenter, name);
 
-        const char *labels[3] = {"L", "M", "S"};
+        // L/M/S toggles as painted glyphs (lock / speaker / star):
+        // off = hairline box + dim glyph, on = accent-tinted pill +
+        // near-white glyph.
         const bool states[3] = {track->locked, track->muted, track->solo};
         for (int c = 0; c < 3; ++c) {
             const QRect box(10 + c * 26, cell.top() + 22, 22, 16);
-            painter.setPen(QColor(0x55, 0x55, 0x55));
-            painter.setBrush(states[c] ? accent : QColor(0x24, 0x24, 0x24));
-            painter.drawRect(box);
-            painter.setPen(states[c] ? QColor(0x10, 0x10, 0x10) : QColor(0x99, 0x99, 0x99));
-            painter.drawText(box, Qt::AlignCenter, QString::fromLatin1(labels[c]));
+            if (states[c]) {
+                QColor onTint = accent;
+                onTint.setAlpha(60);
+                painter.setPen(QPen(accent, 1));
+                painter.setBrush(onTint);
+            } else {
+                painter.setPen(QPen(ui::color(ui::kLine), 1));
+                painter.setBrush(QBrush());
+            }
+            painter.drawRoundedRect(box, 4, 4);
+            const QPointF center(box.center() + QPointF(0.5, 0.5));
+            const QColor glyph = states[c] ? ui::color(ui::kText) : ui::color(ui::kTextDim);
+            if (c == 0) {
+                paintLockGlyph(painter, center, glyph, states[c]);
+            } else if (c == 1) {
+                paintMuteGlyph(painter, center, glyph, states[c]);
+            } else {
+                paintSoloGlyph(painter, center, glyph, states[c]);
+            }
         }
+        painter.restore();
     }
 }
 
@@ -613,8 +741,12 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     // Content coordinates: the ruler extends over the whole scrollable
     // extent (the viewport clip culls what is off-screen).
     const QRect rulerRect(kHeaderWidth, contentTop(), laneContentWidth(), kRulerHeight);
-    painter.fillRect(rulerRect, kRulerBg);
-    painter.setPen(QColor(0x9A, 0x9A, 0x9A));
+    painter.fillRect(rulerRect, ui::color(ui::kSurface2)); // #90: panel-tone band
+    // Major ticks "as today" (0x9A9A9A ~ kTextDim) + 11 px labels (#90).
+    painter.setPen(ui::color(ui::kTextDim));
+    QFont labelFont = painter.font();
+    labelFont.setPixelSize(ui::kFontSmall);
+    painter.setFont(labelFont);
 
     double step = 1.0;
     // One step is `step` seconds; its pixel distance is step * fps * pps
@@ -649,7 +781,7 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
         minor = 1.0;
     }
     if (minor > 0.0) {
-        painter.setPen(QColor(0x55, 0x55, 0x55));
+        painter.setPen(ui::withAlpha(ui::kText, 51)); // #90: 20% minor ticks
         for (double t = 0.0; t <= duration_; t += minor) {
             const int mx = frameToX(static_cast<int64_t>(std::llround(t * fps_)));
             if (mx < rulerRect.left() || mx > rulerRect.right()) {
@@ -681,7 +813,7 @@ void TimelinePanel::drawClips(QPainter &painter) const {
     if (!model_) {
         return;
     }
-    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setRenderHint(QPainter::Antialiasing, true); // #89: smooth 6 px clip corners
 
     // Per-row clip lists (sorted by timeline start) drive the gap hatch
     // (#18); the paint pass itself stays the flat model loop below.
@@ -729,26 +861,45 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         const QRect rect = clipBodyRect(clip, clip.trackIndex);
         const bool selected = clip.id == selectedClipId_;
 
-        QColor fill = selected ? kClipSelected : (clip.isText ? kTextClipFill : kClipFill);
-        QColor border = selected ? QColor(0xFF, 0xFF, 0xFF) : QColor(0x55, 0x66, 0x77);
-        QColor text = selected ? QColor(0x10, 0x10, 0x10) : QColor(0xE8, 0xE8, 0xE8);
+        // #89 visual language: the base lane fills stay; selection
+        // brightens the fill 8% and adds a 2 px accent outline (no more
+        // full-accent body, no dotted focus rect).
+        QColor fill = clip.isText ? kTextClipFill : kClipFill;
+        if (selected) {
+            fill = ui::mix(fill, QColor(0xFF, 0xFF, 0xFF), 0.08);
+        }
+        QColor text(0xE8, 0xE8, 0xE8);
         // Locked / muted / non-solo lanes render dimmed.
         const double dim = trackDimFactor(clip.trackIndex);
         if (dim < 1.0) {
             fill = QColor(fill.red(), fill.green(), fill.blue(), int(fill.alpha() * dim));
-            border = QColor(border.red(), border.green(), border.blue(), int(border.alpha() * dim));
             text = QColor(text.red(), text.green(), text.blue(), int(text.alpha() * dim));
         }
         // Edge affordance: thin lighter bars where a trim/roll drag can
-        // start, only on editable lanes.
+        // start, only on editable lanes (painted under the body, as
+        // before).
         if (!track->locked) {
             QColor edge(0x9F, 0xC7, 0xE0, int(200 * dim));
             painter.fillRect(rect.left(), rect.top(), 3, rect.height(), edge);
             painter.fillRect(rect.right() - 3, rect.top(), 3, rect.height(), edge);
         }
+        // 6 px rounded body + 1 px inner hairline (kLine at 60% alpha).
+        QPainterPath body;
+        body.addRoundedRect(rect, 6, 6);
+        painter.setPen(Qt::NoPen);
         painter.setBrush(fill);
-        painter.setPen(border);
-        painter.drawRoundedRect(rect, 4, 4);
+        painter.drawPath(body);
+        QPainterPath innerHairline;
+        innerHairline.addRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5);
+        painter.setPen(QPen(ui::withAlpha(ui::kLine, 153), 1));
+        painter.setBrush(QBrush());
+        painter.drawPath(innerHairline);
+        if (selected) {
+            // 2 px accent outline; its alpha follows the lane dim so a
+            // selected clip on a locked lane dims with the rest.
+            painter.setPen(QPen(ui::withAlpha(ui::kAccent, int(255 * dim)), 2));
+            painter.drawPath(body);
+        }
         painter.setPen(text);
         painter.drawText(rect.adjusted(6, 0, -6, 0), Qt::AlignLeft | Qt::AlignVCenter,
                          QString::fromStdString(clip.label));
@@ -758,7 +909,7 @@ void TimelinePanel::drawClips(QPainter &painter) const {
             const QRect chip = speedChipRect(clip, clip.trackIndex);
             painter.setBrush(ui::tint(ui::kWarning));
             painter.setPen(ui::color(ui::kWarning));
-            painter.drawRect(chip);
+            painter.drawRoundedRect(chip, 6, 6); // #89: 6 px mini-pill
             painter.setPen(ui::color(ui::kText));
             painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 7));
             QString rateText = QString::number(clip.rate, 'f', 2);
@@ -778,7 +929,7 @@ void TimelinePanel::drawClips(QPainter &painter) const {
             const QRect chip(rect.right() - 42, rect.bottom() - 15, 40, 13);
             painter.setBrush(ui::color(ui::kSurface3));
             painter.setPen(ui::color(ui::kLine));
-            painter.drawRect(chip);
+            painter.drawRoundedRect(chip, 6, 6); // #89: 6 px mini-pill
             painter.setPen(ui::color(ui::kTextDim));
             painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 7, QFont::Bold));
             painter.drawText(chip, Qt::AlignCenter,
@@ -816,11 +967,15 @@ void TimelinePanel::drawDragGhost(QPainter &painter) const {
         const int x1 = frameToX(ghostStart_ + std::max<int64_t>(1, dur));
         const QRect rect(x0, lane.top() + 4, std::max(8, x1 - x0), lane.height() - 8);
         // Ghost: translucent; blue-grey when the drop is legal, red when
-        // the current lane/spot cannot host the clip.
+        // the current lane/spot cannot host the clip. Rounded to the
+        // same 6 px corners the #89 clip body now uses.
         const QColor &c = ghostValid_ ? kGhostFill : kGhostBad;
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
         painter.setBrush(QColor(c.red(), c.green(), c.blue(), 140));
         painter.setPen(QColor(c.red(), c.green(), c.blue(), 220));
-        painter.drawRoundedRect(rect, 4, 4);
+        painter.drawRoundedRect(rect, 6, 6);
+        painter.restore();
         return;
     }
     if (dragMode_ == DragMode::TrimStart || dragMode_ == DragMode::TrimEnd) {
@@ -1523,11 +1678,11 @@ void TimelinePanel::layoutChrome() {
 }
 
 void TimelinePanel::syncToolButtons() {
-    if (razorTool_) {
-        razorTool_->setChecked(razorMode_);
-    }
-    if (selectTool_) {
-        selectTool_->setChecked(!razorMode_);
+    // #86: the segmented control mirrors razorMode_ (0 = Select,
+    // 1 = Blade). setCurrent on the already-current index is a no-op, so
+    // the setRazorMode feedback cannot loop.
+    if (toolSegment_) {
+        toolSegment_->setCurrent(razorMode_ ? 1 : 0);
     }
     if (rippleTool_) {
         rippleTool_->setChecked(rippleEnabled_);

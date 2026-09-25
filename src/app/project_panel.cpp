@@ -3,6 +3,7 @@
 #include <QComboBox>
 #include <QEvent>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -16,7 +17,6 @@
 #include <QShortcut>
 #include <QStyledItemDelegate>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
 
 #include "ui_theme.h"
@@ -47,6 +47,28 @@ bool isAudioOnly(const fc::MediaItem &item) {
 // grid cell adds breathing room for the label and the usage chip.
 constexpr int kGridCellWidth = kThumbnailWidth + 16;
 constexpr int kGridCellHeight = kThumbnailHeight + 22;
+
+// Dark list + quiet rows (0-b/#82): a plain QListWidget paints the
+// palette's light Base on Win7 inside this dark panel, so the viewport is
+// forced to kSurface2 with 28px rows and the accent-tinted selection (no
+// focus-rectangle clutter). Re-applied per view mode: grid cells round to
+// 8px and inset their thumbnails a touch more so the selection reads like
+// a card. The app-wide sheet styles the same states at 24px/6px; this
+// local sheet wins where it is set, which is the intent here.
+QString librarySheet(bool grid) {
+    const QString radius = grid ? QStringLiteral("8px") : QStringLiteral("6px");
+    const QString padding = grid ? QStringLiteral("2px 6px") : QStringLiteral("2px 4px");
+    return QStringLiteral("QListWidget { background: %1; border: none; }"
+                          "QListWidget::item { min-height: 28px; border-radius: %2; padding: %3; }"
+                          "QListWidget::item:selected { background: %4; color: %5; }"
+                          "QListWidget::item:hover:!selected { background: %6; }")
+        .arg(ui::color(ui::kSurface2).name())
+        .arg(radius)
+        .arg(padding)
+        .arg(ui::withAlpha(ui::kAccent, 46).name(QColor::HexArgb))
+        .arg(ui::color(ui::kText).name())
+        .arg(ui::color(ui::kSurface3).name());
+}
 
 // Usage chip painter (#29): draws a small right-edge rounded chip with
 // the per-path usage count over the standard item rendering. Works in
@@ -93,6 +115,9 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     list_->setItemDelegate(new UsageCountDelegate(list_));
 
     importButton_ = new QPushButton(tr("Import Media..."), this);
+    // #66: Import is this panel's one primary action - the app-wide sheet
+    // lights fcAccent buttons with the accent fill + dark text.
+    importButton_->setProperty("fcAccent", true);
     removeButton_ = new QPushButton(tr("Remove"), this);
     removeButton_->setEnabled(false);
 
@@ -103,20 +128,16 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     metaName_->setWordWrap(true);
     metaSummary_->setWordWrap(true);
 
-    // View mode toggle (#28): two compact checkable buttons; the checked
-    // one is the active mode, persisted in QSettings "project/viewMode".
-    listModeButton_ = new QToolButton(this);
-    listModeButton_->setText(tr("List"));
-    listModeButton_->setCheckable(true);
-    listModeButton_->setAutoRaise(true);
-    listModeButton_->setToolTip(tr("Compact list view"));
-    listModeButton_->setAccessibleName(tr("List view"));
-    gridModeButton_ = new QToolButton(this);
-    gridModeButton_->setText(tr("Grid"));
-    gridModeButton_->setCheckable(true);
-    gridModeButton_->setAutoRaise(true);
-    gridModeButton_->setToolTip(tr("Thumbnail grid view"));
-    gridModeButton_->setAccessibleName(tr("Grid view"));
+    // View mode switch (#28/#81): one segmented List | Grid control
+    // replaces the old checkable-button pair; applyViewMode() keeps it in
+    // sync and persists QSettings "project/viewMode" exactly as before.
+    viewSwitch_ = new fc::SegmentedControl(this);
+    viewSwitch_->addSegment(
+        tr("List"), icons::makeIcon("list", ui::color(ui::kTextDim), 16, devicePixelRatioF()),
+        tr("Compact list view"));
+    viewSwitch_->addSegment(
+        tr("Grid"), icons::makeIcon("grid", ui::color(ui::kTextDim), 16, devicePixelRatioF()),
+        tr("Thumbnail grid view"));
 
     // Filter row (#31): name filter + stream-type combo.
     filterEdit_ = new QLineEdit(this);
@@ -124,6 +145,7 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     filterEdit_->setClearButtonEnabled(true);
     filterEdit_->setToolTip(tr("Filters the library by display name (press / to focus)"));
     filterEdit_->setAccessibleName(tr("Media filter"));
+    filterEdit_->setFixedWidth(140); // #81: fixed-width search field, right-aligned
     typeCombo_ = new QComboBox(this);
     typeCombo_->addItem(tr("All types"));
     typeCombo_->addItem(tr("Video"));
@@ -145,26 +167,61 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
         feedbackLabel_->hide();
     });
 
+    // One 40px header row (#81): segmented switch - stretch - filter field
+    // and type combo (the global sheet styles both dark).
     auto *filterRow = new QWidget(this);
+    filterRow->setFixedHeight(40);
     auto *filterLayout = new QHBoxLayout(filterRow);
     filterLayout->setContentsMargins(0, 0, 0, 0);
     filterLayout->setSpacing(8);
-    filterLayout->addWidget(listModeButton_);
-    filterLayout->addWidget(gridModeButton_);
+    filterLayout->addWidget(viewSwitch_);
     filterLayout->addStretch(1);
-    filterLayout->addWidget(filterEdit_, 1);
+    filterLayout->addWidget(filterEdit_);
     filterLayout->addWidget(typeCombo_);
 
-    auto *metaBox = new QWidget(this);
-    auto *metaLayout = new QVBoxLayout(metaBox);
-    metaLayout->setContentsMargins(0, 0, 0, 0);
-    metaLayout->setSpacing(2);
-    metaLayout->addWidget(new QLabel(tr("<b>Metadata</b>"), this));
-    metaLayout->addWidget(metaName_);
-    metaLayout->addWidget(metaSummary_);
-    metaLayout->addWidget(metaDuration_);
-    metaLayout->addWidget(metaProxy_);
-    metaLayout->addStretch(1);
+    // 0-c/#83: metadata as an elevated card - the old bold "Metadata"
+    // label sat invisible on the light list background. Now a dim small
+    // caption with label:value rows on the card tone (kCard, hairline,
+    // 10px radius). The value labels keep their existing wiring.
+    auto *metaCard = new QFrame(this);
+    metaCard->setObjectName(QStringLiteral("fcMetadataCard"));
+    metaCard->setStyleSheet(
+        QStringLiteral("QFrame#fcMetadataCard { background: %1; border: 1px solid %2; "
+                       "border-radius: %3px; }")
+            .arg(ui::color(ui::kCard).name(), ui::color(ui::kLine).name(),
+                 QString::number(ui::kRadiusCard)));
+    auto *metaLayout = new QVBoxLayout(metaCard);
+    metaLayout->setContentsMargins(10, 8, 10, 10);
+    metaLayout->setSpacing(4);
+
+    auto makeMetaCaption = [](const QString &text, QWidget *parent) {
+        auto *cap = new QLabel(text, parent);
+        cap->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2px; }")
+                               .arg(ui::color(ui::kTextDim).name())
+                               .arg(QString::number(ui::kFontSmall)));
+        return cap;
+    };
+    auto styleMetaValue = [](QLabel *value) {
+        value->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }")
+                                 .arg(ui::color(ui::kText).name()));
+    };
+    auto makeMetaRow = [&](const QString &caption, QLabel *value) {
+        auto *row = new QWidget(metaCard);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(8);
+        auto *cap = makeMetaCaption(caption, row);
+        cap->setMinimumWidth(64);
+        rowLayout->addWidget(cap);
+        rowLayout->addWidget(value, 1);
+        styleMetaValue(value);
+        metaLayout->addWidget(row);
+    };
+    metaLayout->addWidget(makeMetaCaption(tr("Metadata"), metaCard));
+    makeMetaRow(tr("Name"), metaName_);
+    makeMetaRow(tr("Format"), metaSummary_);
+    makeMetaRow(tr("Duration"), metaDuration_);
+    makeMetaRow(tr("Proxy"), metaProxy_);
 
     auto *buttons = new QHBoxLayout();
     buttons->addWidget(importButton_);
@@ -178,7 +235,7 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(filterRow);
     layout->addWidget(list_, 1);
     layout->addLayout(buttons);
-    layout->addWidget(metaBox);
+    layout->addWidget(metaCard);
 
     // Lazy thumbnails (#28): batch the not-yet-requested paths through a
     // short debounce timer so a burst of imports emits one sweep. Created
@@ -202,11 +259,14 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
         filterEdit_->selectAll();
     });
 
-    // Empty library overlay (#61), pinned to the list viewport.
+    // Empty library overlay (#61), pinned to the list viewport. Upgraded
+    // to the EmptyState v2 language: image glyph + sentence-case copy.
     emptyState_ = new fc::EmptyState(list_->viewport());
-    emptyState_->setGlyph(QStringLiteral("+"));
-    emptyState_->setTitle(tr("Import media to begin"));
-    emptyState_->setHint(tr("Drop files here or click Import"));
+    emptyState_->setIcon(
+        icons::makeIcon("image", ui::color(ui::kTextDisabled), 36, devicePixelRatioF()), 36,
+        devicePixelRatioF());
+    emptyState_->setTitle(tr("No media yet"));
+    emptyState_->setHint(tr("Import files or drop them here"));
     emptyState_->setAttribute(Qt::WA_TransparentForMouseEvents);
     emptyState_->hide();
     list_->viewport()->installEventFilter(this);
@@ -235,8 +295,7 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     connect(list_, &QListWidget::itemSelectionChanged, this, &ProjectPanel::onSelectionChanged);
     connect(list_, &QListWidget::itemActivated, this, &ProjectPanel::onItemActivated);
     connect(list_, &QListWidget::customContextMenuRequested, this, &ProjectPanel::onContextMenu);
-    connect(listModeButton_, &QToolButton::clicked, this, [this] { applyViewMode(false); });
-    connect(gridModeButton_, &QToolButton::clicked, this, [this] { applyViewMode(true); });
+    viewSwitch_->onSelected([this](int index) { applyViewMode(index == 1); });
     connect(filterEdit_, &QLineEdit::textChanged, this, [this] { applyFilter(); });
     connect(typeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this] { applyFilter(); });
@@ -289,8 +348,16 @@ bool ProjectPanel::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void ProjectPanel::applyViewMode(bool grid) {
-    listModeButton_->setChecked(!grid);
-    gridModeButton_->setChecked(grid);
+    // Sync the segmented control WITHOUT re-entering applyViewMode:
+    // the target segment is signal-blocked while setCurrent() flips it,
+    // and the sibling's auto-uncheck only reports "off" (which the
+    // onSelected handler ignores).
+    if (auto *target = viewSwitch_->button(grid ? 1 : 0)) {
+        target->blockSignals(true);
+        viewSwitch_->setCurrent(grid ? 1 : 0);
+        target->blockSignals(false);
+    }
+    list_->setStyleSheet(librarySheet(grid));
     // ViewMode (ListMode/IconMode) is a QListView enum, NOT a
     // QAbstractItemView one (CI project_panel.cpp:288).
     list_->setViewMode(grid ? QListView::IconMode : QListView::ListMode);

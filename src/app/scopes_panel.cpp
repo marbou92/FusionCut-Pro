@@ -1,12 +1,15 @@
 #include "scopes_panel.h"
 
+#include <QFontMetrics>
 #include <QPainter>
+#include <QPixmap>
 #include <QTimer>
 
 #include <algorithm>
 #include <cmath>
 
 #include "ui_theme.h"
+#include "ui_widgets.h"
 
 // ui_theme.h tokens live in fc::ui; the panel addresses them as ui::...
 using namespace fc;
@@ -162,15 +165,34 @@ void ScopesPanel::paintEvent(QPaintEvent * /*event*/) {
         p.drawImage(paradeRect, paradeTrace_);
         p.drawImage(lumaRect, lumaTrace_);
     } else {
-        p.setPen(ui::color(ui::kTextDisabled));
-        p.drawText(rect(), Qt::AlignCenter, tr("No signal"));
+        // #85: a centered, quiet "no signal" - the waveform glyph over an
+        // 11px dim line, instead of one floating default-font string.
+        constexpr int kGlyph = 28;   // logical size of the waveform glyph
+        constexpr int kGlyphGap = 8; // glyph -> text spacing
+        const qreal dpr = devicePixelRatioF();
+        const QPixmap wave = icons::makeIcon("waveform", ui::color(ui::kTextDisabled), kGlyph, dpr)
+                                 .pixmap(qRound(kGlyph * dpr), qRound(kGlyph * dpr));
+        QFont quiet = p.font();
+        quiet.setPixelSize(ui::kFontSmall);
+        const QFontMetrics metrics(quiet);
+        const int totalH = kGlyph + kGlyphGap + metrics.height();
+        const int top = rect().center().y() - totalH / 2;
+        // The icon pixmap carries the devicePixelRatio, so it draws at
+        // its logical 28px size on scaled displays too.
+        p.drawPixmap((width() - kGlyph) / 2, top, wave);
+        p.setFont(quiet);
+        p.setPen(ui::color(ui::kTextDim));
+        p.drawText(QRect(0, top + kGlyph + kGlyphGap, width(), metrics.height()), Qt::AlignHCenter,
+                   tr("No signal"));
     }
 
     p.setPen(ui::color(ui::kTextDim));
+    // #65/#85: sentence-case captions (they are painted labels, not
+    // interactive tabs, so no segmented control is needed).
     p.drawText(QRect(kMargin, kMargin, paneW, kCaptionH), Qt::AlignLeft | Qt::AlignVCenter,
-               tr("RGB PARADE"));
+               tr("RGB Parade"));
     p.drawText(QRect(kMargin + paneW + kGap, kMargin, paneW, kCaptionH),
-               Qt::AlignLeft | Qt::AlignVCenter, tr("LUMA"));
+               Qt::AlignLeft | Qt::AlignVCenter, tr("Luma"));
 }
 
 } // namespace fc

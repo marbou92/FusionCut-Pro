@@ -19,7 +19,10 @@ namespace ui {
 inline constexpr unsigned int kSurface = 0x1E1E1E;      // window charcoal
 inline constexpr unsigned int kSurface2 = 0x252525;     // panel background
 inline constexpr unsigned int kSurface3 = 0x2E2E2E;     // button / input chrome
-inline constexpr unsigned int kCanvas = 0x141414;       // monitor canvas
+inline constexpr unsigned int kSurfaceHover = 0x383838; // #93: 8% hover brighten on chrome
+inline constexpr unsigned int kSurfacePress = 0x222222; // #93: pressed chrome (falls back down)
+inline constexpr unsigned int kCard = 0x2A2A2A;   // #64: elevated card tone (inspector sections)
+inline constexpr unsigned int kCanvas = 0x141414; // monitor canvas
 inline constexpr unsigned int kTimelineBg = 0x1B1B1B;   // timeline lane backdrop
 inline constexpr unsigned int kLine = 0x3A3A3A;         // hairlines / borders
 inline constexpr unsigned int kText = 0xE8E8E8;         // primary text
@@ -31,6 +34,17 @@ inline constexpr unsigned int kAccentBright = 0x33B9FF; // hover/active accent
 inline constexpr unsigned int kDanger = 0xE74C3C;       // errors / destructive
 inline constexpr unsigned int kWarning = 0xFFB020;      // attention (rate chip)
 inline constexpr unsigned int kSuccess = 0x2ECC71;      // confirm / solo
+
+// Geometry tokens (#67: one radius + inset system so QSS stays
+// consistent). 10px cards, 8px inputs/buttons, pills are 999.
+inline constexpr int kRadiusCard = 10;
+inline constexpr int kRadiusControl = 8;
+inline constexpr int kRadiusPill = 999;
+// Typography scale (#65): the app font is Segoe UI (main.cpp); these are
+// the pixel sizes panels reference in stylesheets.
+inline constexpr int kFontTitle = 20; // hero / panel titles (semibold)
+inline constexpr int kFontBody = 13;  // default body
+inline constexpr int kFontSmall = 11; // secondary text (kTextDim)
 
 // QColor is not a literal type, so tokens convert through this helper.
 inline QColor color(unsigned int token) {

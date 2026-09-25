@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QFont>
 #include <QStringList>
 
 #include <fc/version.h>
@@ -57,6 +58,13 @@ int main(int argc, char *argv[]) {
     QApplication::setApplicationName(FC_APP_NAME);
     QApplication::setOrganizationName("FusionCut");
     QApplication::setApplicationVersion(FC_VERSION_STRING);
+    // Suggestion #65 (Apple-style typography scale): Segoe UI is the
+    // Win7-native face closest to SF Pro; missing families fall back to
+    // the platform default, so Linux CI/macOS stay unaffected. The 9pt
+    // base keeps 13px body / 11px secondary sizes on 96-DPI Windows 7.
+    QFont appFont(QStringLiteral("Segoe UI"));
+    appFont.setPointSize(9);
+    app.setFont(appFont);
     fc::recordBootStage(5, "QApplication constructed");
 
     fc::MainWindow window;

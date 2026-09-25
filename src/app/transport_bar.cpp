@@ -4,6 +4,8 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -16,6 +18,7 @@
 
 #include "timecode_display.h"
 #include "ui_theme.h"
+#include "ui_widgets.h"
 
 // ui_theme.h tokens live in fc::ui; the panel addresses them as ui::...
 using namespace fc;
@@ -29,21 +32,59 @@ constexpr int kMaxSlider = 100000;
 // Frame-step feedback (#25) and the timecode shake share the rhythm.
 constexpr int kStepFlashMs = 700;
 constexpr int kShakeMs = 180;
+// #79 circular transport buttons: 30 px circles (clears the 28 px #63
+// touch target) carrying 16 px stroke icons from fc::icons.
+constexpr int kTransportButton = 30;
+constexpr int kTransportIcon = 16;
+
+QIcon transportIcon(const QString &name, qreal dpr) {
+    return icons::makeIcon(name, ui::color(ui::kText), kTransportIcon, dpr > 0.0 ? dpr : 1.0);
+}
 } // namespace
 
 TransportBar::TransportBar(QWidget *parent) : QWidget(parent) {
-    stepBack_ = new QPushButton(tr("|<"), this);
-    playButton_ = new QPushButton(tr("Play"), this);
-    stepFwd_ = new QPushButton(tr(">|"), this);
+    // #79 (0-e): circular icon transport. The anonymous gray "|<" / ">|" /
+    // "Play" text buttons become QuickTime-style 30 px circles with
+    // DPR-rendered stroke icons; the play and mute icons swap with state.
+    // Every signal, shortcut and persisted setting below is untouched.
+    const QString circleButtonStyle =
+        QStringLiteral("QPushButton{background:%1;border:1px solid %2;border-radius:15px;}"
+                       "QPushButton:hover{background:%3;}"
+                       "QPushButton:pressed{background:%4;}")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kSurfaceHover).name(), ui::color(ui::kSurfacePress).name());
+    const QString circleToolStyle =
+        QStringLiteral("QToolButton{background:%1;border:1px solid %2;border-radius:15px;}"
+                       "QToolButton:hover{background:%3;}"
+                       "QToolButton:pressed{background:%4;}"
+                       "QToolButton:checked{border-color:%5;}")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kSurfaceHover).name(), ui::color(ui::kSurfacePress).name(),
+                 ui::color(ui::kText).name());
+
+    stepBack_ = new QPushButton(this);
+    playButton_ = new QPushButton(this);
+    stepFwd_ = new QPushButton(this);
     position_ = new QSlider(Qt::Horizontal, this);
     timecode_ = new QLabel("00:00:00:00", this);
     muteButton_ = new QToolButton(this);
     volume_ = new QSlider(Qt::Horizontal, this);
     stepFlash_ = new QLabel(this);
 
+    for (QPushButton *button : {stepBack_, playButton_, stepFwd_}) {
+        button->setStyleSheet(circleButtonStyle);
+        button->setFixedSize(kTransportButton, kTransportButton); // #63 touch target
+        button->setIconSize(QSize(kTransportIcon, kTransportIcon));
+    }
+    stepBack_->setIcon(transportIcon(QStringLiteral("step-back"), devicePixelRatioF()));
+    stepFwd_->setIcon(transportIcon(QStringLiteral("step-fwd"), devicePixelRatioF()));
+    refreshPlayIcon(); // play / pause glyph + accessible name by state
+
     stepBack_->setToolTip(tr("Previous frame (Left)"));
     stepFwd_->setToolTip(tr("Next frame (Right)"));
     playButton_->setToolTip(tr("Play / Pause (Space)"));
+    stepBack_->setAccessibleName(tr("Previous frame"));
+    stepFwd_->setAccessibleName(tr("Next frame"));
     timecode_->setMinimumWidth(110);
     // #62/#59: the timecode is a control (click to edit) - say so, and
     // give the assistive stack a stable name.
@@ -53,22 +94,20 @@ TransportBar::TransportBar(QWidget *parent) : QWidget(parent) {
     timecode_->installEventFilter(this);
 
     // Mute + volume (#27): persisted panel-side, audio hookup is wave 2.
-    muteButton_->setText(tr("M"));
+    // #79: icon-only mute toggle (volume / mute glyph per state).
+    muteButton_->setStyleSheet(circleToolStyle);
+    muteButton_->setFixedSize(kTransportButton, kTransportButton); // #63 touch target
+    muteButton_->setIconSize(QSize(kTransportIcon, kTransportIcon));
     muteButton_->setCheckable(true);
     muteButton_->setToolTip(tr("Mute preview"));
     muteButton_->setAccessibleName(tr("Mute preview"));
-    muteButton_->setMinimumSize(28, 28); // #63 touch target
+    refreshMuteIcon();
     volume_->setRange(0, 100);
     volume_->setFixedWidth(90);
     volume_->setToolTip(tr("Preview volume"));
     volume_->setAccessibleName(tr("Preview volume"));
 
     position_->setRange(0, kMaxSlider);
-
-    // #63: transport buttons keep a minimum touch target in both axes.
-    stepBack_->setMinimumSize(28, 28);
-    playButton_->setMinimumSize(28, 28);
-    stepFwd_->setMinimumSize(28, 28);
 
     stepFlash_->hide();
     stepFlash_->setStyleSheet(QStringLiteral("QLabel{background:%1;color:%2;border:1px solid %3;"
@@ -133,6 +172,7 @@ TransportBar::TransportBar(QWidget *parent) : QWidget(parent) {
     connect(muteButton_, &QToolButton::clicked, this, [this](bool muted) {
         QSettings settings;
         settings.setValue(QStringLiteral("transport/muted"), muted);
+        refreshMuteIcon(); // icon-only button: the glyph is the state
         emit muteToggled(muted);
     });
 
@@ -144,6 +184,7 @@ TransportBar::TransportBar(QWidget *parent) : QWidget(parent) {
         qBound(0, settings.value(QStringLiteral("transport/volumePercent"), 80).toInt(), 100));
     volume_->blockSignals(false);
     muteButton_->setChecked(settings.value(QStringLiteral("transport/muted"), false).toBool());
+    refreshMuteIcon(); // glyph follows the persisted state
 
     refreshTimecode();
 }
@@ -185,13 +226,13 @@ void TransportBar::setPlaying(bool playing) {
         return;
     }
     playing_ = playing;
-    playButton_->setText(playing_ ? tr("Pause") : tr("Play"));
+    refreshPlayIcon(); // icon-only button: the glyph is the state
     // No playToggled() emission: the state was set by the caller.
 }
 
 void TransportBar::onPlayClicked() {
     playing_ = !playing_;
-    playButton_->setText(playing_ ? tr("Pause") : tr("Play"));
+    refreshPlayIcon();
     emit playToggled(playing_);
 }
 
@@ -318,4 +359,47 @@ void TransportBar::resizeEvent(QResizeEvent *event) {
         // Keep the editor glued to the label across layout resizes.
         timecodeEditor_->setGeometry(timecode_->geometry());
     }
+}
+
+// #79: the play/pause glyph tracks the playing state (QuickTime pattern:
+// one neutral circle whose icon swaps). The accessible name follows so
+// assistive tech announces the action, not the glyph.
+void TransportBar::refreshPlayIcon() {
+    if (playButton_ == nullptr) {
+        return;
+    }
+    playButton_->setIcon(transportIcon(playing_ ? QStringLiteral("pause") : QStringLiteral("play"),
+                                       devicePixelRatioF()));
+    playButton_->setAccessibleName(playing_ ? tr("Pause") : tr("Play"));
+}
+
+// #79: mute toggle glyph (speaker = audible, speaker + cross = muted).
+void TransportBar::refreshMuteIcon() {
+    if (muteButton_ == nullptr) {
+        return;
+    }
+    muteButton_->setIcon(
+        transportIcon(muteButton_->isChecked() ? QStringLiteral("mute") : QStringLiteral("volume"),
+                      devicePixelRatioF()));
+}
+
+// #64: the bar paints itself as a kSurface2 elevation plane with rounded
+// top corners (it meets the monitor canvas above); the bottom edge stays
+// square against the window chrome. The children draw on top as usual.
+void TransportBar::paintEvent(QPaintEvent *) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPainterPath strip;
+    strip.addRoundedRect(QRectF(0, 0, width(), height() + ui::kRadiusControl), ui::kRadiusControl,
+                         ui::kRadiusControl);
+    painter.fillPath(strip, ui::color(ui::kSurface2));
+}
+
+// The DPR-aware icons are first grabbed in the ctor, before the bar has a
+// screen; re-grab them on the first show where devicePixelRatioF() is the
+// real ratio (keeps 125 / 150% Windows scaling crisp).
+void TransportBar::showEvent(QShowEvent *event) {
+    QWidget::showEvent(event);
+    refreshPlayIcon();
+    refreshMuteIcon();
 }

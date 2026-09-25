@@ -9,11 +9,17 @@ class QDragEnterEvent;
 class QDragLeaveEvent;
 class QDragMoveEvent;
 class QDropEvent;
-class QLabel;
+class QMouseEvent;
 class QPaintEvent;
+class QLabel;
 class QPushButton;
 class QSlider;
 class QStringList;
+class QToolButton;
+
+namespace fc {
+class EmptyState;
+}
 
 // Quick Mode page: CapCut-style simplified layout - large
 // preview, prominent toolbar, aspect selector. Shares the decode worker
@@ -23,10 +29,15 @@ class QStringList;
 // step buttons walk one frame, and the slider + timecode FOLLOW the
 // playhead without re-emitting seek.
 //
-// Onboarding surfaces (suggestions #52-54): a three-step rail at the
-// top (Import -> Arrange -> Export), full-page drag-and-drop of media
-// files (local files only, forwarded from every child via an event
-// filter), and a template strip at the bottom that emits prefills.
+// Onboarding surfaces (suggestions #52-54 + round-2 #73-#79): a numbered
+// progress rail at the top (1 Import -> 2 Arrange -> 3 Export; the
+// current step is the accent pill and doubles as the step action, done
+// steps show a checkmark), a hero empty state overlaid on the canvas
+// (#74; hides once a program duration is known) with full-page
+// drag-and-drop of media files (local files only, forwarded from every
+// child via an event filter, #53), double-click-to-import while empty
+// (#106), a floating icon-first tool bar (#75/#76), template cards
+// (#77) and a circular QuickTime-style transport (#79).
 class QuickModeView : public QWidget {
     Q_OBJECT
 
@@ -51,18 +62,20 @@ signals:
     void playToggled(bool playing);
     void seekRequested(double seconds);
     void stepRequested(int frames); // +1 / -1
-    // The top-bar Import button (routed to MainWindow::importMedia).
+    // The step rail's Import chip + the hero empty state's primary
+    // action (routed to MainWindow::importMedia).
     void importRequested();
     // The step-rail Export chip (routed to MainWindow::exportMedia).
     void exportRequested();
     // Local media files dropped anywhere on the page (#53).
     void filesDropped(const QStringList &paths);
-    // A template chip was clicked; templateId is "title-broll",
+    // A template card was clicked; templateId is "title-broll",
     // "vlog" or "slideshow" (#54).
     void templateRequested(const QString &templateId);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dragLeaveEvent(QDragLeaveEvent *event) override;
@@ -72,17 +85,18 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-    QWidget *buildToolbar();
     QWidget *buildTopBar();
     QWidget *buildStepRail();
     QWidget *buildTemplateStrip();
+    QWidget *buildToolbar();
     void applyStepStyles();
     void refreshTimecode();
 
     PreviewCanvas *canvas_ = nullptr;
-    QPushButton *playButton_ = nullptr;
-    QPushButton *stepBack_ = nullptr;
-    QPushButton *stepFwd_ = nullptr;
+    fc::EmptyState *emptyState_ = nullptr;
+    QToolButton *playButton_ = nullptr;
+    QToolButton *stepBack_ = nullptr;
+    QToolButton *stepFwd_ = nullptr;
     QSlider *position_ = nullptr;
     QLabel *timecode_ = nullptr;
     QComboBox *aspectBox_ = nullptr;

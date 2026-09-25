@@ -11,6 +11,10 @@ class QSlider;
 class QTimer;
 class QToolButton;
 
+namespace fc {
+class SegmentedControl;
+}
+
 // Pro Mode bottom panel: multi-track timeline, custom-painted.
 //
 // renders clips from a TimelineModel, click-to-select, razor (C)
@@ -18,9 +22,9 @@ class QToolButton;
 //
 // full mouse editing - drag-move clips with a magnetic-snap ghost
 // (model findDropPosition), edge-drag trim (start/end), Alt+edge-drag
-// rolling boundary edits, header L/M/S click toggling, a tool row
-// (Select / Razor / Ripple toggle), razor hover preview line, and
-// visual dimming for locked / muted / non-solo tracks.
+// rolling boundary edits, header L/M/S click toggling, a Select/Blade
+// segmented tool row + a separate Ripple toggle, razor hover preview
+// line, and visual dimming for locked / muted / non-solo tracks.
 //
 // horizontal scrolling: the lane content is drawn in CONTENT
 // coordinates and shifted by one scrollX_ offset under a clip rect
@@ -269,7 +273,6 @@ private:
     QLineEdit *renameEditor_ = nullptr;
     int renameRow_ = -1;
 
-    QToolButton *selectTool_ = nullptr;
-    QToolButton *razorTool_ = nullptr;
+    fc::SegmentedControl *toolSegment_ = nullptr; // #86: Select / Blade
     QToolButton *rippleTool_ = nullptr;
 };

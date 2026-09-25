@@ -1,6 +1,7 @@
 #include "effect_controls_panel.h"
 
 #include <QCheckBox>
+#include <QFrame>
 #include <QLabel>
 #include <QListWidget>
 #include <QMouseEvent>
@@ -162,11 +163,19 @@ private:
 EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
     // ---- Stack editor page ----
     stackPage_ = new QWidget(this);
-    clipLabel_ = new QLabel(tr("No clip selected"), stackPage_);
+    // 0-d: the panel's single empty state (the fc::EmptyState overlay)
+    // owns the "no clip" message; this label only titles the EDITING
+    // state ("Clip N - effect stack"), so it starts blank.
+    clipLabel_ = new QLabel(QString(), stackPage_);
     clipLabel_->setWordWrap(true);
 
     list_ = new QListWidget(stackPage_);
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
+    // Same bug class 0-b names for the Project list: a plain QListWidget
+    // viewport paints the palette's light Base on Win7 - force the panel
+    // surface dark (item states come from the app-wide sheet).
+    list_->setStyleSheet(QStringLiteral("QListWidget { background: %1; border: none; }")
+                             .arg(ui::color(ui::kSurface2).name()));
 
     upButton_ = new QPushButton(tr("Up"), stackPage_);
     downButton_ = new QPushButton(tr("Down"), stackPage_);
@@ -194,7 +203,7 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
 
     // ---- Transition editor page ----
     transitionPage_ = new QWidget(this);
-    transitionLabel_ = new QLabel(tr("No transition selected"), transitionPage_);
+    transitionLabel_ = new QLabel(QString(), transitionPage_); // title only; 0-d empty state
     transitionLabel_->setWordWrap(true);
     transitionPair_ = new QLabel(QString(), transitionPage_);
     transitionPair_->setWordWrap(true);
@@ -223,17 +232,26 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
     pages_ = new QStackedWidget(this);
 
     // Empty-target overlay (#61): the pages hide behind it while no
-    // clip AND no transition is being edited.
+    // clip AND no transition is being edited. 0-d: the overlay is OPAQUE
+    // (styled background) so the page content behind it can never stack
+    // with it - exactly one empty state per panel. The idle labels of
+    // the three editors start blank (see the page ctors above).
     emptyState_ = new fc::EmptyState(pages_);
-    emptyState_->setGlyph(QString::fromUtf8("\u25AF"));
-    emptyState_->setTitle(tr("Select a clip to edit its effects"));
-    emptyState_->setHint(tr("Effect stacks, keyframes, transitions and audio fades "
-                            "appear here"));
+    emptyState_->setObjectName(QStringLiteral("fcEmptyOverlay"));
+    emptyState_->setAttribute(Qt::WA_StyledBackground, true);
+    emptyState_->setStyleSheet(QStringLiteral("QWidget#fcEmptyOverlay { background: %1; }")
+                                   .arg(ui::color(ui::kSurface2).name()));
+    emptyState_->setIcon(
+        icons::makeIcon("effects", ui::color(ui::kTextDisabled), 36, devicePixelRatioF()), 36,
+        devicePixelRatioF());
+    emptyState_->setTitle(tr("No clip selected"));
+    emptyState_->setHint(tr("Select a clip to edit its effects - stacks, keyframes and "
+                            "audio fades appear here"));
     emptyState_->hide();
     pages_->installEventFilter(this);
     // ---- Audio fade editor page ----
     fadesPage_ = new QWidget(this);
-    fadesLabel_ = new QLabel(tr("No audio clip selected"), fadesPage_);
+    fadesLabel_ = new QLabel(QString(), fadesPage_); // title only; 0-d empty state
     fadesLabel_->setWordWrap(true);
     fadeInSpin_ = new QSpinBox(fadesPage_);
     fadeInSpin_->setRange(0, 1);
@@ -256,7 +274,8 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
            "dissolves. Applied identically in the preview and the export mix."),
         fadesPage_);
     fadesNote->setWordWrap(true);
-    fadesNote->setStyleSheet("QLabel { color: #999; }");
+    fadesNote->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; }").arg(ui::color(ui::kTextDim).name()));
     auto *fadesLayout = new QVBoxLayout(fadesPage_);
     fadesLayout->setContentsMargins(8, 8, 8, 8);
     fadesLayout->addWidget(fadesLabel_);
@@ -347,6 +366,11 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
             emit transitionRemoveRequested(transitionId_);
         }
     });
+
+    // 0-d: boot into the single empty state. The ctor used to leave the
+    // stack page's own "No clip selected" label visible until the first
+    // setStack()/setTransition() arrived; now the overlay covers it.
+    updateEmptyState();
 }
 
 void EffectControlsPanel::setStack(int64_t clipId, const std::vector<fc::EffectInstance> &stack,
@@ -354,7 +378,9 @@ void EffectControlsPanel::setStack(int64_t clipId, const std::vector<fc::EffectI
     clipId_ = clipId;
     stack_ = stack;
     durationFrames_ = durationFrames < 0 ? 0 : durationFrames;
-    clipLabel_->setText(clipId < 0 ? tr("No clip selected")
+    // 0-d: the empty-state message lives in the overlay; this label only
+    // titles a real editing target.
+    clipLabel_->setText(clipId < 0 ? QString()
                                    : tr("Clip %1 - effect stack").arg(qlonglong(clipId)));
     rebuildList();
     if (!stack_.empty()) {
@@ -381,7 +407,7 @@ void EffectControlsPanel::setAudioFades(int64_t clipId, int64_t fadeIn, int64_t 
     fadeInSpin_->setRange(0, hi);
     fadeOutSpin_->setRange(0, hi);
     if (clipId < 0) {
-        fadesLabel_->setText(tr("No audio clip selected"));
+        fadesLabel_->setText(QString()); // 0-d: the overlay owns the empty message
         fadeInSpin_->blockSignals(true);
         fadeInSpin_->setValue(0);
         fadeInSpin_->blockSignals(false);
@@ -418,7 +444,7 @@ void EffectControlsPanel::setTransition(int64_t transitionId, const QString &kin
     transitionId_ = transitionId;
     transitionFps_ = fps > 1.0 ? fps : 24.0;
     if (transitionId < 0) {
-        transitionLabel_->setText(tr("No transition selected"));
+        transitionLabel_->setText(QString()); // 0-d: the overlay owns the empty message
         transitionPair_->clear();
         durationSlider_->setRange(1, 1);
         durationSlider_->setValue(1);
@@ -440,6 +466,11 @@ void EffectControlsPanel::setTransition(int64_t transitionId, const QString &kin
     durationSlider_->blockSignals(false);
     updateDurationLabel();
     pages_->setCurrentWidget(transitionPage_);
+    // The idle overlay must also clear when a transition is targeted:
+    // setStack/setAudioFades refresh on both branches, this one skipped
+    // it (the pre-0-d transparent overlay ghosted over the editor - an
+    // opaque one would have hidden it entirely).
+    updateEmptyState();
 }
 
 void EffectControlsPanel::updateDurationLabel() {
@@ -516,7 +547,22 @@ void EffectControlsPanel::rebuildParams() {
         }
         const double value = (kfFrame >= 0) ? fx.paramAt(p.key, kfFrame) : fx.param(p.key);
 
-        auto *rowWidget = new QWidget(paramsHost_);
+        // #84: each parameter lives on its own inspector card (kCard
+        // tone, hairline, 10px radius); the keyframe lane rides inside
+        // the card under the row so it keeps its own 18px strip. The
+        // cards are children of paramsHost_, which rebuildParams deletes
+        // whole on every rebuild - no per-row cleanup needed.
+        auto *card = new QFrame(paramsHost_);
+        card->setObjectName(QStringLiteral("fcParamCard"));
+        card->setStyleSheet(
+            QStringLiteral(
+                "QFrame#fcParamCard { background: %1; border: 1px solid %2; border-radius: %3px; }")
+                .arg(ui::color(ui::kCard).name(), ui::color(ui::kLine).name(),
+                     QString::number(ui::kRadiusCard)));
+        auto *cardLayout = new QVBoxLayout(card);
+        cardLayout->setContentsMargins(8, 6, 8, 6);
+        cardLayout->setSpacing(4);
+        auto *rowWidget = new QWidget(card);
         auto *rowLayout = new QHBoxLayout(rowWidget);
         rowLayout->setContentsMargins(0, 0, 0, 0);
 
@@ -626,15 +672,27 @@ void EffectControlsPanel::rebuildParams() {
             rowLayout->addWidget(valueLabel);
             rowLayout->addWidget(diamond);
 
-            // Reset chip (#35): visible only while the resolved value
-            // differs from the catalog default; the click reverts the
-            // static value AND drops the keyframe track (a full reset).
+            // Reset chip (#35/#84): an icon-only ghost QToolButton (the
+            // round-7 text chip drew a bare glyph); permanently visible
+            // while the value differs from the catalog default. The
+            // hover-reveal variant was deliberately skipped - a small
+            // dim icon needs no per-row eventFilter. The click reverts
+            // the static value AND drops the keyframe track (full reset).
             auto *reset = new QToolButton(rowWidget);
-            reset->setText(QString::fromUtf8("\u21BA"));
-            reset->setToolTip(tr("Reset to the catalog default (clears keyframes)"));
+            reset->setIcon(
+                icons::makeIcon("reset", ui::color(ui::kTextDim), 14, devicePixelRatioF()));
+            reset->setToolTip(tr("Reset to default"));
             reset->setAccessibleName(reset->toolTip());
             reset->setAutoRaise(true);
-            reset->setFixedSize(16, 16);
+            // The app-wide sheet has no QToolButton rules: keep the
+            // button a transparent ghost with a hover brighten instead
+            // of native Win7 chrome.
+            reset->setStyleSheet(
+                QStringLiteral(
+                    "QToolButton { background: transparent; border: none; border-radius: 4px; }"
+                    "QToolButton:hover { background: %1; }")
+                    .arg(ui::color(ui::kSurfaceHover).name()));
+            reset->setFixedSize(18, 18);
             const double defaultValue = p.defaultValue;
             reset->setVisible(std::fabs(value - defaultValue) > 1e-9);
             connect(reset, &QToolButton::clicked, this,
@@ -713,10 +771,11 @@ void EffectControlsPanel::rebuildParams() {
             laneForForm = lane;
             rows_.push_back(liveRow);
         }
-        form->addWidget(rowWidget);
+        cardLayout->addWidget(rowWidget);
         if (laneForForm) {
-            form->addWidget(laneForForm);
+            cardLayout->addWidget(laneForForm);
         }
+        form->addWidget(card);
     }
     form->addStretch(1);
 }

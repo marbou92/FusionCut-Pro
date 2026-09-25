@@ -29,18 +29,20 @@ class DecodeWorker;
 class ColorPanel;
 class EffectsPanel;
 class EffectControlsPanel;
-class ExportDialog;
 class MixerPanel;
 class PreviewCanvas;
 class ProjectPanel;
 class QuickModeView;
-// ScopesPanel lives INSIDE namespace fc (scopes_panel.h), unlike the
-// panel classes above. Forward-declaring it here at global scope would
-// create a different, unrelated type: scopesPanel_ would not accept the
-// fc::ScopesPanel the workspace builds (CI mainwindow.cpp:511/512/1673).
+// ScopesPanel and SegmentedControl live INSIDE namespace fc (scopes_panel.h
+// / ui_widgets.h), unlike the panel classes above. Forward-declaring them
+// here at global scope would create different, unrelated types: scopesPanel_
+// would not accept the fc::ScopesPanel the workspace builds (CI
+// mainwindow.cpp:511/512/1673), and modeSwitch_ would not accept the
+// fc::SegmentedControl. Every fc-namespaced helper type goes in this block.
 namespace fc {
 class ScopesPanel;
-}
+class SegmentedControl;
+} // namespace fc
 class TextPanel;
 class TimelinePanel;
 class TransitionsPanel;
@@ -270,6 +272,11 @@ private:
     PreviewCanvas *programCanvas_ = nullptr;
     TransportBar *transport_ = nullptr;
     QStackedWidget *pages_ = nullptr;
+    // #69: floating Pro/Quick segmented control above the workspace;
+    // synced with the Window menu's mode actions.
+    fc::SegmentedControl *modeSwitch_ = nullptr;
+    QAction *proModeAction_ = nullptr;
+    QAction *quickModeAction_ = nullptr;
 
     // Quick Mode widgets.
     QuickModeView *quickView_ = nullptr;

@@ -10,17 +10,22 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDir>
 #include <QDockWidget>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
+#include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
@@ -28,6 +33,7 @@
 #include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QThread>
@@ -62,6 +68,8 @@
 #include "transitions.h"
 #include "transitions_panel.h"
 #include "transport_bar.h"
+#include "ui_theme.h"
+#include "ui_widgets.h"
 #include "video_decoder.h"
 
 namespace fc {
@@ -97,6 +105,172 @@ QDockWidget *makeDock(const QString &title, QWidget *inner, QMainWindow *parent)
 
 QString proxyPathFor(const QString &sourcePath) {
     return sourcePath + QStringLiteral(".fcproxy.mp4");
+}
+
+// #98 (round-3): Qt QSS checkbox/radio indicators lose their check glyph
+// once ::indicator is styled, so the two checked-state glyphs are generated
+// once into the temp cache dir and referenced by file path from the sheet.
+QString ensureIndicatorIcons() {
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation) +
+                        QStringLiteral("/fusioncut-indicators");
+    QDir().mkpath(dir);
+    const QString check = dir + QStringLiteral("/check.png");
+    if (!QFile::exists(check)) {
+        QPixmap pm(22, 22);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        QPen pen(Qt::white, 2.6);
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
+        p.setPen(pen);
+        QPainterPath c;
+        c.moveTo(4.5, 11.5);
+        c.lineTo(9, 16);
+        c.lineTo(17.5, 6);
+        p.drawPath(c);
+        pm.save(check, "PNG");
+    }
+    const QString dot = dir + QStringLiteral("/dot.png");
+    if (!QFile::exists(dot)) {
+        QPixmap dm(22, 22);
+        dm.fill(Qt::transparent);
+        QPainter p(&dm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::white);
+        p.drawEllipse(QRectF(7.5, 7.5, 7, 7));
+        dm.save(dot, "PNG");
+    }
+    return dir;
+}
+
+// #98 (round-3, the round-2 "everything inherits" move): one app-wide
+// stylesheet restyles every native-light Win7 control dark - menus, dock
+// tabs, scrollbars, combos, inputs, checks, tooltips, splitters, sliders,
+// headers - with the Apple language (hairlines, 8px chrome, one accent,
+// hover/press brighten). Local panel stylesheets still win where set.
+QString buildAppStylesheet(const QString &indicatorDir) {
+    const QString check = indicatorDir + QStringLiteral("/check.png");
+    const QString dot = indicatorDir + QStringLiteral("/dot.png");
+    const QString sheet =
+        QStringLiteral(
+            // -- menus (light Win7 popups were the loudest offender) --
+            "QMenuBar { background: %1; border-bottom: 1px solid %5; padding: 1px 6px; }"
+            "QMenuBar::item { background: transparent; color: %6; padding: 4px 9px; "
+            "  border-radius: 4px; }"
+            "QMenuBar::item:selected { background: %3; }"
+            "QMenuBar::item:pressed { background: %4; }"
+            "QMenu { background: %2; border: 1px solid %5; padding: 4px 0; }"
+            "QMenu::item { padding: 5px 28px 5px 18px; background: transparent; color: %6; }"
+            "QMenu::item:selected { background: %8; color: %6; }"
+            "QMenu::item:disabled { color: %7; }"
+            "QMenu::separator { height: 1px; background: %5; margin: 4px 10px; }"
+            // -- dock tabs: underline-selected, sentence-case chrome --
+            "QTabWidget::pane { border: 0; }"
+            "QTabBar::tab { background: transparent; color: %7; padding: 6px 14px; "
+            "  border: none; border-bottom: 2px solid transparent; margin-right: 2px; }"
+            "QTabBar::tab:selected { color: %6; border-bottom: 2px solid %9; }"
+            "QTabBar::tab:hover:!selected { color: %6; }"
+            // -- thin overlay-style scrollbars (#87/#105) --
+            "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: %5; border-radius: 4px; min-height: 28px; }"
+            "QScrollBar::handle:vertical:hover { background: %7; }"
+            "QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }"
+            "QScrollBar::handle:horizontal { background: %5; border-radius: 4px; min-width: 28px; }"
+            "QScrollBar::handle:horizontal:hover { background: %7; }"
+            "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
+            "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
+            // -- combos (0-f: no more light-gray native popdowns) --
+            "QComboBox { background: %3; border: 1px solid %5; border-radius: 8px; "
+            "  padding: 3px 10px 3px 8px; color: %6; min-height: 18px; }"
+            "QComboBox:hover { border-color: %7; }"
+            "QComboBox:focus { border-color: %9; }"
+            "QComboBox::drop-down { border: none; width: 18px; }"
+            "QComboBox QAbstractItemView { background: %2; border: 1px solid %5; "
+            "  selection-background-color: %8; selection-color: %6; outline: none; }"
+            // -- buttons: neutral by default, accent/ghost/segment by property --
+            "QPushButton { background: %3; border: 1px solid %5; border-radius: 8px; "
+            "  padding: 4px 12px; color: %6; }"
+            "QPushButton:hover { background: %4; }"
+            "QPushButton:pressed { background: %10; }"
+            "QPushButton:disabled { color: %7; background: %2; }"
+            "QPushButton:focus { border-color: %9; }"
+            "QPushButton[fcAccent=\"true\"] { background: %9; border-color: %9; "
+            "  color: %11; font-weight: 600; }"
+            "QPushButton[fcAccent=\"true\"]:hover { background: %12; border-color: %12; }"
+            "QPushButton[fcGhost=\"true\"] { background: transparent; }"
+            "QPushButton[fcGhost=\"true\"]:hover { background: %3; }"
+            "QPushButton[fcSegment=\"true\"] { background: transparent; border: none; "
+            "  border-radius: 6px; padding: 3px 14px; color: %7; font-weight: 600; }"
+            "QPushButton[fcSegment=\"true\"]:hover:!checked { background: %3; color: %6; }"
+            "QPushButton[fcSegment=\"true\"]:checked { background: %4; color: %6; }"
+            // -- inputs + focus rings (#95) --
+            "QLineEdit, QSpinBox, QDoubleSpinBox { background: %3; border: 1px solid %5; "
+            "  border-radius: 8px; padding: 3px 8px; color: %6; selection-background-color: %9; }"
+            "QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: %9; }"
+            "QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color: %7; }"
+            // -- checks/radios (dark indicators, accent when checked) --
+            "QCheckBox, QRadioButton { color: %6; spacing: 7px; }"
+            "QCheckBox::indicator, QRadioButton::indicator { width: 15px; height: 15px; "
+            "  border: 1px solid %5; background: %3; }"
+            "QCheckBox::indicator { border-radius: 4px; }"
+            "QRadioButton::indicator { border-radius: 8px; }"
+            "QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: %7; }"
+            "QCheckBox::indicator:checked { background: %9; border-color: %9; image: url(%13); }"
+            "QRadioButton::indicator:checked { background: %9; border-color: %9; image: url(%14); }"
+            "QCheckBox:disabled, QRadioButton:disabled { color: %7; }"
+            // -- tooltips, progress, splitters, headers, status --
+            "QToolTip { background: %3; color: %6; border: 1px solid %5; padding: 4px 8px; }"
+            "QProgressBar { background: %3; border: none; border-radius: 3px; }"
+            "QProgressBar::chunk { background: %9; border-radius: 3px; }"
+            "QSplitter::handle { background: %1; }"
+            "QSplitter::handle:horizontal { width: 1px; }"
+            "QSplitter::handle:vertical { height: 1px; }"
+            "QHeaderView::section { background: %2; color: %7; border: none; "
+            "  border-bottom: 1px solid %5; padding: 4px 8px; }"
+            "QStatusBar { background: %1; border-top: 1px solid %5; }"
+            "QStatusBar QLabel { color: %7; }"
+            // -- lists/trees: dark base, quiet selection (#82 global half) --
+            "QListView::item, QTreeView::item { min-height: 24px; border-radius: 6px; }"
+            "QListView::item:selected, QTreeView::item:selected { background: %8; color: %6; }"
+            "QListView::item:hover:!selected, QTreeView::item:hover:!selected { background: %3; }"
+            // -- sliders: hairline groove, round light handle (#110) --
+            "QSlider::groove:horizontal { height: 3px; background: %5; border-radius: 1px; }"
+            "QSlider::sub-page:horizontal { background: %9; border-radius: 1px; }"
+            "QSlider::handle:horizontal { width: 14px; height: 14px; margin: -6px 0; "
+            "  border-radius: 7px; background: %6; }"
+            "QSlider::handle:horizontal:hover { background: #FFFFFF; }"
+            "QSlider::groove:vertical { width: 3px; background: %5; border-radius: 1px; }"
+            "QSlider::sub-page:vertical { background: %9; border-radius: 1px; }"
+            "QSlider::handle:vertical { height: 14px; width: 14px; margin: 0 -6px; "
+            "  border-radius: 7px; background: %6; }"
+            // -- dock titles (#80) + group cards (#113) + toast (#94) --
+            "QDockWidget::title { background: %2; padding: 7px 12px; border-bottom: 1px solid %5; }"
+            "QGroupBox { background: %15; border: 1px solid %5; border-radius: 10px; "
+            "  margin-top: 12px; padding-top: 6px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; color: %6; }"
+            "QLabel#fcToast { background: %3; border: 1px solid %5; border-radius: 17px; "
+            "  padding: 7px 18px; color: %6; font-weight: 600; }")
+            // Chained single-arg form: QString::arg replaces the lowest
+            // remaining marker per call (multi-digit markers never mis-parse),
+            // and none of the values contain '%' so the order is stable.
+            .arg(ui::color(ui::kSurface).name())                       // %1
+            .arg(ui::color(ui::kSurface2).name())                      // %2
+            .arg(ui::color(ui::kSurface3).name())                      // %3
+            .arg(ui::color(ui::kSurfaceHover).name())                  // %4
+            .arg(ui::color(ui::kLine).name())                          // %5
+            .arg(ui::color(ui::kText).name())                          // %6
+            .arg(ui::color(ui::kTextDim).name())                       // %7
+            .arg(ui::withAlpha(ui::kAccent, 46).name(QColor::HexArgb)) // %8
+            .arg(ui::color(ui::kAccent).name())                        // %9
+            .arg(ui::color(ui::kSurfacePress).name())                  // %10
+            .arg(ui::color(ui::kOnAccent).name())                      // %11
+            .arg(ui::color(ui::kAccentBright).name())                  // %12
+            .arg(check)                                                // %13
+            .arg(dot)                                                  // %14
+            .arg(ui::color(ui::kCard).name());                         // %15
+    return sheet;
 }
 
 } // namespace
@@ -242,7 +416,14 @@ void MainWindow::applyDarkTheme() {
     pal.setColor(QPalette::Highlight, QColor(kAccent));
     pal.setColor(QPalette::HighlightedText, QColor(0x101010));
     pal.setColor(QPalette::Disabled, QPalette::Text, QColor(0x777777));
+    pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x777777));
+    pal.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x777777));
     setPalette(pal);
+    // #98 (round-3): the app-wide control stylesheet - every native-light
+    // Win7 control (menus, tabs, scrollbars, combos, inputs, checks,
+    // tooltips, splitters, sliders) goes dark with the Apple language.
+    // Local panel stylesheets still take precedence where they are set.
+    qApp->setStyleSheet(buildAppStylesheet(ensureIndicatorIcons()));
 }
 
 void MainWindow::buildDecodeThread() {
@@ -504,7 +685,32 @@ void MainWindow::buildProWorkspace() {
 
     pages_ = new QStackedWidget(this);
     pages_->addWidget(monitorSplit); // page 0: Pro Mode
-    setCentralWidget(pages_);
+
+    // #69: the floating Pro/Quick segmented control sits above the
+    // workspace pages (both modes), synced with setMode() and the
+    // Window-menu mode actions.
+    modeSwitch_ = new fc::SegmentedControl(this);
+    modeSwitch_->addSegment(tr("Pro"), QIcon(), tr("Premiere-style panel workspace"));
+    modeSwitch_->addSegment(tr("Quick"), QIcon(), tr("Simplified three-step editing"));
+    modeSwitch_->onSelected([this](int index) { setMode(index == 0); });
+    auto *strip = new QWidget(this);
+    strip->setObjectName(QStringLiteral("fcModeStrip"));
+    strip->setStyleSheet(QStringLiteral("QWidget#fcModeStrip { background: %1; "
+                                        "border-bottom: 1px solid %2; }")
+                             .arg(ui::color(ui::kSurface).name(), ui::color(ui::kLine).name()));
+    auto *stripLayout = new QHBoxLayout(strip);
+    stripLayout->setContentsMargins(0, 3, 0, 3);
+    stripLayout->addStretch(1);
+    stripLayout->addWidget(modeSwitch_);
+    stripLayout->addStretch(1);
+
+    auto *shell = new QWidget(this);
+    auto *shellLayout = new QVBoxLayout(shell);
+    shellLayout->setContentsMargins(0, 0, 0, 0);
+    shellLayout->setSpacing(0);
+    shellLayout->addWidget(strip);
+    shellLayout->addWidget(pages_, 1);
+    setCentralWidget(shell);
 
     // ---- Round-7 wiring: the panels' new signals meet MainWindow ----
     // Scopes dock (#38): RGB parade + luma fed from the program frame.
@@ -829,7 +1035,8 @@ void MainWindow::buildMenus() {
     edit->addSeparator();
     addMenuAction(edit, tr("&Keyboard Shortcuts..."))->setEnabled(false);
 
-    // ---- Clip ----
+    // ---- Clip (round-22 #71: Title + Effects folded in so the menu bar
+    // stays lean - every action stays reachable, just grouped by target) ----
     QMenu *clip = menuBar()->addMenu(tr("&Clip"));
     QAction *splitMenuAction = addMenuAction(clip, tr("Split at Playhead"), QKeySequence(tr("C")));
     splitMenuAction->setToolTip(
@@ -844,6 +1051,17 @@ void MainWindow::buildMenus() {
     connect(speedMenuAction, &QAction::triggered, this, [this] { editClipSpeed(); });
     addMenuAction(clip, tr("&Reverse Clip"))->setEnabled(false);
     clip->addSeparator();
+    QAction *addTextAction = addMenuAction(clip, tr("&Add Text Clip"), QKeySequence(tr("Ctrl+T")));
+    addTextAction->setToolTip(tr("Creates a text clip at the playhead on a text track and opens it "
+                                 "in the Text panel"));
+    connect(addTextAction, &QAction::triggered, this, [this] { addTextClip(); });
+    QAction *defaultTransition =
+        addMenuAction(clip, tr("Apply &Default Transition"), QKeySequence(tr("Ctrl+D")));
+    defaultTransition->setToolTip(
+        tr("Adds a 1 s Cross Dissolve on the cut after the selected clip"));
+    connect(defaultTransition, &QAction::triggered, this,
+            [this] { addTransitionToSelectedClip(QStringLiteral("dissolve.cross")); });
+    clip->addSeparator();
     QAction *proxyMenuAction =
         addMenuAction(clip, tr("&Generate 360p Proxy"), QKeySequence(tr("Ctrl+P")));
     connect(proxyMenuAction, &QAction::triggered, this, [this] {
@@ -852,25 +1070,9 @@ void MainWindow::buildMenus() {
         }
     });
 
-    // ---- Title ----
-    QMenu *title = menuBar()->addMenu(tr("&Title"));
-    QAction *addTextAction = addMenuAction(title, tr("&Add Text Clip"), QKeySequence(tr("Ctrl+T")));
-    addTextAction->setToolTip(tr("Creates a text clip at the playhead on a text track and opens it "
-                                 "in the Text panel"));
-    connect(addTextAction, &QAction::triggered, this, [this] { addTextClip(); });
-
     // ---- Sequence ----
     QMenu *sequence = menuBar()->addMenu(tr("Se&quence"));
     addMenuAction(sequence, tr("&Render In to Out"), QKeySequence(tr("Enter")))->setEnabled(false);
-
-    // ---- Effects ----
-    QMenu *effects = menuBar()->addMenu(tr("&Effects"));
-    QAction *defaultTransition =
-        addMenuAction(effects, tr("Apply &Default Transition"), QKeySequence(tr("Ctrl+D")));
-    defaultTransition->setToolTip(
-        tr("Adds a 1 s Cross Dissolve on the cut after the selected clip"));
-    connect(defaultTransition, &QAction::triggered, this,
-            [this] { addTransitionToSelectedClip(QStringLiteral("dissolve.cross")); });
 
     // ---- View ----
     QMenu *view = menuBar()->addMenu(tr("&View"));
@@ -929,15 +1131,15 @@ void MainWindow::buildMenus() {
     // ---- Window (dual-mode workspace switcher + panel toggles) ----
     QMenu *window = menuBar()->addMenu(tr("&Window"));
     QActionGroup *modes = new QActionGroup(this);
-    QAction *proMode = modes->addAction(tr("&Pro Mode"));
-    QAction *quickMode = modes->addAction(tr("&Quick Mode"));
-    proMode->setCheckable(true);
-    quickMode->setCheckable(true);
-    proMode->setChecked(true);
-    connect(proMode, &QAction::triggered, this, [this] { setMode(true); });
-    connect(quickMode, &QAction::triggered, this, [this] { setMode(false); });
-    window->addAction(proMode);
-    window->addAction(quickMode);
+    proModeAction_ = modes->addAction(tr("&Pro Mode"));
+    quickModeAction_ = modes->addAction(tr("&Quick Mode"));
+    proModeAction_->setCheckable(true);
+    quickModeAction_->setCheckable(true);
+    proModeAction_->setChecked(true);
+    connect(proModeAction_, &QAction::triggered, this, [this] { setMode(true); });
+    connect(quickModeAction_, &QAction::triggered, this, [this] { setMode(false); });
+    window->addAction(proModeAction_);
+    window->addAction(quickModeAction_);
     window->addSeparator();
     for (QDockWidget *dock : findChildren<QDockWidget *>()) {
         window->addAction(dock->toggleViewAction());
@@ -947,9 +1149,11 @@ void MainWindow::buildMenus() {
     QMenu *help = menuBar()->addMenu(tr("&Help"));
     QAction *aboutAction = help->addAction(tr("&About FusionCut Pro"));
     connect(aboutAction, &QAction::triggered, this, [this] {
+        // #72/#109: the build/budget line lives here, not in the status bar.
         QMessageBox::about(this, tr("About FusionCut Pro"),
                            tr("<b>FusionCut Pro %1</b><br/>Dual-mode editor shell."
                               "<br/><br/>Engine: %2"
+                              "<br/>1 GB RAM target \u00b7 Qt 5.15 \u00b7 FFmpeg \u00b7 Windows 7+"
                               "<br/>License: GPL-3.0-or-later"
                               "<br/><a href=\"https://github.com/marbou92/FusionCut-Pro\">"
                               "github.com/marbou92/FusionCut-Pro</a>")
@@ -960,7 +1164,8 @@ void MainWindow::buildMenus() {
 
 void MainWindow::buildStatusBar() {
     statusBar()->showMessage(tr("Pro Mode - import media to begin (Ctrl+I)"));
-    // Permanent readouts (#6): sequence summary + dirty/saved dot.
+    // Permanent readouts (#6): sequence summary + dirty/saved dot. The
+    // build/budget line moved to Help > About (round-22 #72).
     statusResolution_ = new QLabel(this);
     statusResolution_->setToolTip(tr("Program frame size and sequence frame rate"));
     statusDirty_ = new QLabel(this);
@@ -968,12 +1173,21 @@ void MainWindow::buildStatusBar() {
     statusDirty_->setText(tr("\u25CB"));
     statusBar()->addPermanentWidget(statusResolution_);
     statusBar()->addPermanentWidget(statusDirty_);
-    auto *budget = new QLabel(tr("1 GB RAM target - Qt 5.15 - FFmpeg - Windows 7+"), this);
-    statusBar()->addPermanentWidget(budget);
 }
 
 void MainWindow::setMode(bool pro) {
     pages_->setCurrentIndex(pro ? 0 : 1);
+    // #69 sync: keep the floating segmented control and the Window-menu
+    // actions mirrored with whatever changed the mode.
+    if (modeSwitch_ != nullptr) {
+        modeSwitch_->setCurrent(pro ? 0 : 1);
+    }
+    if (proModeAction_ != nullptr) {
+        proModeAction_->setChecked(pro);
+    }
+    if (quickModeAction_ != nullptr) {
+        quickModeAction_->setChecked(!pro);
+    }
     for (QDockWidget *dock : findChildren<QDockWidget *>()) {
         dock->setVisible(pro);
     }
@@ -2347,7 +2561,7 @@ void MainWindow::undo() {
     model_.restoreSnapshot(undoStack_.back());
     undoStack_.pop_back();
     afterUndoRedo();
-    statusBar()->showMessage(tr("Undo - timeline state restored."), 3000);
+    Toast::showOn(this, tr("Undo - timeline state restored"));
 }
 
 void MainWindow::redo() {
@@ -2359,7 +2573,7 @@ void MainWindow::redo() {
     model_.restoreSnapshot(redoStack_.back());
     redoStack_.pop_back();
     afterUndoRedo();
-    statusBar()->showMessage(tr("Redo - timeline state restored."), 3000);
+    Toast::showOn(this, tr("Redo - timeline state restored"));
 }
 
 void MainWindow::afterUndoRedo() {
