@@ -108,6 +108,29 @@ void paintSoloGlyph(QPainter &p, const QPointF &c, const QColor &color, bool on)
     p.setBrush(on ? color : QBrush());
     p.drawPolygon(star);
 }
+
+// #176: tabular figures for the ruler timecodes. Qt 5.12 has no
+// OpenType-feature QFont API (QFont::setFeature is Qt 6.7+), so the
+// ruler draws each glyph centered in a fixed-width cell (the widest
+// glyph of its own string) - the same app-default font the transport
+// timecode uses, with a stable per-glyph rhythm between ticks.
+void paintTabularText(QPainter &p, const QRect &rect, const QString &text) {
+    const QFontMetrics fm(p.font());
+    int cell = 0;
+    for (const QChar &c : text) {
+        cell = std::max(cell, fm.horizontalAdvance(c));
+    }
+    if (cell <= 0) {
+        p.drawText(rect, Qt::AlignLeft | Qt::AlignVCenter, text);
+        return;
+    }
+    int x = rect.left();
+    for (const QChar &c : text) {
+        p.drawText(QRect(x, rect.top(), cell, rect.height()), Qt::AlignVCenter | Qt::AlignHCenter,
+                   QString(c));
+        x += cell;
+    }
+}
 } // namespace
 
 TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
@@ -176,6 +199,32 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
     connect(rippleTool_, &QToolButton::toggled, this, [this](bool on) { rippleEnabled_ = on; });
 
     tools->addWidget(rippleTool_);
+
+    // Split-at-playhead button (#182): a ghost action button next to
+    // the tool cluster (Ripple is a mode, this is an action - same
+    // reason they are separate widgets). Hover arms the accent border;
+    // the click emits the no-lane-context splitRequested() overload for
+    // MainWindow::splitAtPlayhead. No key letter is advertised: the
+    // Clip menu binds Split at Playhead to C, which is ALSO the Blade
+    // tool shortcut inside this panel's context - a tooltip letter
+    // would mislead one way or the other.
+    splitTool_ = new QToolButton(toolRow);
+    splitTool_->setIcon(
+        icons::makeIcon(QStringLiteral("blade"), ui::color(ui::kText), 16, toolIconDpr));
+    splitTool_->setToolTip(tr("Split at playhead"));
+    splitTool_->setAccessibleName(tr("Split at playhead"));
+    splitTool_->setFixedSize(28, 28);
+    splitTool_->setCursor(Qt::PointingHandCursor);
+    splitTool_->setStyleSheet(
+        QStringLiteral("QToolButton{background:%1;border:1px solid %2;border-radius:%3px;}"
+                       "QToolButton:hover{background:%4;border-color:%5;}"
+                       "QToolButton:pressed{background:%6;}")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 QString::number(ui::kRadiusControl), ui::color(ui::kSurfaceHover).name(),
+                 ui::color(ui::kAccent).name(), ui::color(ui::kSurfacePress).name()));
+    connect(splitTool_, &QToolButton::clicked, this, [this] { emit splitRequested(); });
+
+    tools->addWidget(splitTool_);
     tools->addStretch(1);
     layout->addWidget(toolRow);
 
@@ -268,6 +317,20 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
     clusterLayout->setContentsMargins(4, 2, 4, 2);
     clusterLayout->setSpacing(2);
 
+    // Fit button (#183): fits the whole sequence into the lanes
+    // viewport through the SAME applyZoom path the "\\" shortcut uses
+    // (the inverse of the slider mapping, clamped to the 5..400 range).
+    // Text reads cleaner than any glyph here; the cluster sheet styles
+    // the button, only the font size drops to the 11 px small scale.
+    auto *zoomFit = new QToolButton(cluster);
+    zoomFit->setText(tr("Fit"));
+    zoomFit->setToolTip(tr("Zoom to fit the whole sequence (\\)"));
+    zoomFit->setFixedSize(34, 20);
+    zoomFit->setCursor(Qt::PointingHandCursor);
+    zoomFit->setAccessibleName(tr("Fit sequence"));
+    zoomFit->setStyleSheet(QStringLiteral("QToolButton{font-size:11px;}"));
+    connect(zoomFit, &QToolButton::clicked, this, &TimelinePanel::fitToSequence);
+
     auto *zoomOut = new QToolButton(cluster);
     zoomOut->setText(QString(QChar(0x2212))); // minus sign
     zoomOut->setToolTip(tr("Zoom out (-)"));
@@ -283,6 +346,7 @@ TimelinePanel::TimelinePanel(QWidget *parent) : QWidget(parent) {
     zoomIn->setAccessibleName(tr("Zoom in"));
     connect(zoomIn, &QToolButton::clicked, this, [this] { applyZoom(pps_ * 1.25); });
 
+    clusterLayout->addWidget(zoomFit);
     clusterLayout->addWidget(zoomOut);
     clusterLayout->addWidget(zoom_, 1);
     clusterLayout->addWidget(zoomIn);
@@ -521,6 +585,7 @@ void TimelinePanel::setModel(const fc::TimelineModel *model) {
     // different clips), so the highlight must not survive the swap.
     selectedClipId_ = -1;
     selectedTransitionId_ = -1;
+    hoveredClipId_ = -1; // #200: ids belong to the previous model content
     updateScrollRange();
     update();
 }
@@ -599,6 +664,37 @@ void TimelinePanel::selectClip(int64_t clipId) {
     update();
 }
 
+// #180: nudge the selected clip by `frames` timeline frames. The
+// destination must be FREE: findDropPosition() (the same resolver the
+// move ghost uses) must return the desired frame exactly - a snapped
+// result means the spot is occupied and the nudge is dropped. The edit
+// travels through the SAME clipMoveRequested signal a drag commits
+// with, so MainWindow's validation, undo push and audio rebuild stay
+// single-sourced there.
+void TimelinePanel::nudgeSelectedClip(int64_t frames) {
+    if (!model_ || frames == 0) {
+        return;
+    }
+    const fc::Clip *clip = model_->clipById(selectedClipId_);
+    if (!clip) {
+        return;
+    }
+    const fc::Track *track = model_->trackAt(clip->trackIndex);
+    if (!track || track->locked) {
+        return; // same lock policy as the drag commit path
+    }
+    const int64_t desired = std::max<int64_t>(0, clip->timelineStart + frames);
+    if (desired == clip->timelineStart) {
+        return; // clamped at the timeline head - nothing to do
+    }
+    const int64_t drop =
+        model_->findDropPosition(clip->trackIndex, clip->id, desired, clip->durationFrames());
+    if (drop != desired) {
+        return; // destination occupied (the resolver would snap) - no move
+    }
+    emit clipMoveRequested(clip->id, clip->trackIndex, desired);
+}
+
 void TimelinePanel::paintEvent(QPaintEvent *) {
     QPainter painter(this);
     painter.fillRect(rect(), kPanelBg);
@@ -626,16 +722,56 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
     drawClips(painter);
     drawTransitions(painter);
     drawDragGhost(painter);
-    // Snap indicator (#14): a magnet engaged during a Move drag draws a
-    // vertical accent line at the snapped position (Alt-suspended drags
-    // keep ghostStart_ == dragRawStart_, so the line vanishes).
-    if (dragMode_ == DragMode::Move && ghostStart_ != dragRawStart_) {
+    // Drop feedback (#173) + snap indicator (#174, the old #14 line):
+    // while a Move drag is live, a 2 px kAccent insertion line with a
+    // small triangle cap marks the current drop frame - resolved from
+    // the EXISTING ghost computation (ghostStart_), no new targeting.
+    // When the magnet engages (ghostStart_ != the raw pointer start;
+    // Alt-suspended drags never differ), the line switches to the 1 px
+    // dashed 3/3 snap style at the snapped frame.
+    if (dragMode_ == DragMode::Move && ghostRow_ >= 0) {
         const int sx = frameToX(ghostStart_);
-        painter.setPen(QPen(ui::color(ui::kAccentBright), 1));
+        const bool snapped = ghostStart_ != dragRawStart_;
+        if (snapped) {
+            QPen snapPen(ui::color(ui::kAccentBright), 1);
+            snapPen.setDashPattern(QVector<qreal>{3.0, 3.0});
+            painter.setPen(snapPen);
+        } else {
+            painter.setPen(QPen(ui::color(ui::kAccent), 2));
+        }
         painter.drawLine(sx, lanes.top(), sx, lanes.bottom());
-        painter.fillRect(sx - 1, lanes.top(), 3, 3, ui::color(ui::kAccentBright));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(snapped ? ui::color(ui::kAccentBright) : ui::color(ui::kAccent));
+        painter.drawPolygon(QPolygon() << QPoint(sx - 4, lanes.top()) << QPoint(sx + 4, lanes.top())
+                                       << QPoint(sx, lanes.top() + 6));
     }
     painter.restore();
+
+    // Empty-timeline hint (#177): exactly while the model holds no
+    // clips the lanes show the next action; it disappears the moment a
+    // clip exists (pure paintEvent state, nothing cached).
+    if (!model_ || model_->clips().empty()) {
+        const qreal dpr = devicePixelRatioF();
+        const QPixmap film =
+            icons::makeIcon(QStringLiteral("film"), ui::color(ui::kTextDisabled), 28, dpr)
+                .pixmap(qRound(28 * dpr), qRound(28 * dpr));
+        QFont hintFont = painter.font();
+        hintFont.setPixelSize(12);
+        const QFontMetrics metrics(hintFont);
+        const int gap = 8;
+        const int cy = lanes.center().y() - (28 + gap + metrics.height()) / 2;
+        painter.save();
+        painter.setClipRect(lanes);
+        // The pixmap carries the devicePixelRatio, so it draws at its
+        // logical 28 px on scaled displays too.
+        painter.drawPixmap(lanes.left() + (lanes.width() - 28) / 2, cy, film);
+        painter.setFont(hintFont);
+        painter.setPen(ui::color(ui::kTextDim));
+        painter.drawText(QRect(lanes.left(), cy + 28 + gap, lanes.width(), metrics.height()),
+                         Qt::AlignHCenter | Qt::AlignVCenter,
+                         tr("Drag media here, or double-click it in the library"));
+        painter.restore();
+    }
 
     // The PLAYHEAD spans ruler + lanes (never the header column).
     painter.save();
@@ -749,14 +885,25 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     painter.setFont(labelFont);
 
     double step = 1.0;
-    // One step is `step` seconds; its pixel distance is step * fps * pps
-    // (pps_ is pixels-per-frame). Without the fps factor the ticks land
-    // fps-times sparser than the 70 px target. The ladder exits at the
-    // label spacing floor (not 70 px) so adjacent timecode labels can
-    // never overlap: a 70-96 px step would leave the 96 px label rect
-    // of one tick running into the text of the next.
-    while (step * fps_ * pps_ < kRulerLabelMinPx) {
-        step *= 5.0;
+    // Two label tiers (#176). One step is `step` seconds; its pixel
+    // distance is step * fps * pps (pps_ is pixels-per-frame). Fine
+    // tier: one-second labels (the old behavior whenever they clear
+    // the 96 px label floor). Coarse tier: below that floor the labels
+    // climb a human 5/10/30/60-s ladder instead of the old x5 ladder's
+    // 25-s/125-s oddities, with the existing minor-tick rhythm in
+    // between. The ladder always resolves: pxPerSec >= fps_ * 5 > 5,
+    // and 3600 * 5 clears the floor with room to spare.
+    const double pxPerSec = fps_ * pps_;
+    if (pxPerSec < kRulerLabelMinPx) {
+        static const double kCoarseSteps[] = {5.0,   10.0,  30.0,   60.0,  120.0,
+                                              300.0, 600.0, 1800.0, 3600.0};
+        step = kCoarseSteps[8];
+        for (double coarse : kCoarseSteps) {
+            if (coarse * pxPerSec >= kRulerLabelMinPx) {
+                step = coarse;
+                break;
+            }
+        }
     }
     const fc::FrameRate rate{static_cast<uint32_t>(std::lround(fps_ * 1000.0)), 1000, false};
     for (double t = 0.0; t <= duration_; t += step) {
@@ -766,8 +913,8 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
         }
         painter.drawLine(x, rulerRect.bottom() - 8, x, rulerRect.bottom());
         const int64_t frames = static_cast<int64_t>(std::llround(t * fps_));
-        painter.drawText(QRect(x + 3, rulerRect.top(), 96, rulerRect.height()),
-                         Qt::AlignLeft | Qt::AlignVCenter,
+        // #176: tabular figures keep tick-adjacent timecodes in rhythm.
+        paintTabularText(painter, QRect(x + 3, rulerRect.top(), 96, rulerRect.height()),
                          QString::fromStdString(fc::Timecode::fromFrames(frames, rate).toString()));
     }
 
@@ -860,13 +1007,17 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         }
         const QRect rect = clipBodyRect(clip, clip.trackIndex);
         const bool selected = clip.id == selectedClipId_;
+        const bool hovered = !selected && clip.id == hoveredClipId_; // #200
 
         // #89 visual language: the base lane fills stay; selection
         // brightens the fill 8% and adds a 2 px accent outline (no more
-        // full-accent body, no dotted focus rect).
+        // full-accent body, no dotted focus rect). #200: a hovered
+        // clip brightens 4% instead (never stacked with selection).
         QColor fill = clip.isText ? kTextClipFill : kClipFill;
         if (selected) {
             fill = ui::mix(fill, QColor(0xFF, 0xFF, 0xFF), 0.08);
+        } else if (hovered) {
+            fill = ui::mix(fill, QColor(0xFF, 0xFF, 0xFF), 0.04);
         }
         QColor text(0xE8, 0xE8, 0xE8);
         // Locked / muted / non-solo lanes render dimmed.
@@ -894,10 +1045,27 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         painter.setPen(QPen(ui::withAlpha(ui::kLine, 153), 1));
         painter.setBrush(QBrush());
         painter.drawPath(innerHairline);
+        // #171 audio texture: three honest tone hairlines (a flat
+        // texture, NOT a fake waveform) evenly distributed inside the
+        // body, inset 8 px top/bottom. Painted FIRST so the label and
+        // chips stay readable where they collide.
+        if (track->isAudio) {
+            const QRectF band = QRectF(rect).adjusted(3, 8, -3, -8);
+            painter.setPen(QPen(ui::withAlpha(ui::kText, int(30 * dim)), 1));
+            for (int i = 0; i < 3; ++i) {
+                const qreal y = band.top() + band.height() * (2 * i + 1) / 6.0;
+                painter.drawLine(QPointF(band.left(), y), QPointF(band.right(), y));
+            }
+        }
         if (selected) {
             // 2 px accent outline; its alpha follows the lane dim so a
             // selected clip on a locked lane dims with the rest.
             painter.setPen(QPen(ui::withAlpha(ui::kAccent, int(255 * dim)), 2));
+            painter.drawPath(body);
+        } else if (hovered) {
+            // #200: 1 px accent outline at 120 alpha (dim-scaled like
+            // every other lane element).
+            painter.setPen(QPen(ui::withAlpha(ui::kAccent, int(120 * dim)), 1));
             painter.drawPath(body);
         }
         painter.setPen(text);
@@ -968,27 +1136,33 @@ void TimelinePanel::drawDragGhost(QPainter &painter) const {
         const QRect rect(x0, lane.top() + 4, std::max(8, x1 - x0), lane.height() - 8);
         // Ghost: translucent; blue-grey when the drop is legal, red when
         // the current lane/spot cannot host the clip. Rounded to the
-        // same 6 px corners the #89 clip body now uses.
+        // same 6 px corners the #89 clip body uses. #201: painted at
+        // painter opacity 0.7 over the full-strength ghost color.
         const QColor &c = ghostValid_ ? kGhostFill : kGhostBad;
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setBrush(QColor(c.red(), c.green(), c.blue(), 140));
-        painter.setPen(QColor(c.red(), c.green(), c.blue(), 220));
+        painter.setOpacity(0.7);
+        painter.setBrush(c);
+        painter.setPen(c);
         painter.drawRoundedRect(rect, 6, 6);
         painter.restore();
         return;
     }
     if (dragMode_ == DragMode::TrimStart || dragMode_ == DragMode::TrimEnd) {
-        // Preview of the new in/out edge position.
+        // Preview of the new in/out edge position. #172: the same 6 px
+        // corner language as every other clip-shaped ghost.
         const QRect lane = laneRect(clip->trackIndex);
         const int64_t start = dragMode_ == DragMode::TrimStart ? ghostStart_ : clip->timelineStart;
         const int64_t end = dragMode_ == DragMode::TrimEnd ? ghostEnd_ : clip->timelineEnd();
         const int x0 = frameToX(start);
         const int x1 = frameToX(end);
         const QRect rect(x0, lane.top() + 2, std::max(8, x1 - x0), lane.height() - 4);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
         painter.setBrush(QColor(0x9F, 0xC7, 0xE0, 60));
         painter.setPen(QColor(0x9F, 0xC7, 0xE0, 200));
-        painter.drawRect(rect);
+        painter.drawRoundedRect(rect, 6, 6);
+        painter.restore();
         return;
     }
     if (dragMode_ == DragMode::RollBoundary) {
@@ -1211,6 +1385,9 @@ void TimelinePanel::resetDrag() {
     ghostValid_ = false;
     dragRawStart_ = 0;
     stopAutoPage();
+    // #202: the ClosedHand cursor belongs to an active drag only; the
+    // resting cursor follows the razor mode.
+    setCursor(razorMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
     update();
 }
 
@@ -1270,6 +1447,8 @@ void TimelinePanel::mousePressEvent(QMouseEvent *event) {
         beginClipDrag(event->pos());
         if (dragClipId_ > 0) {
             selectedClipId_ = dragClipId_;
+            hoveredClipId_ = -1;             // #200: no hover paint mid-drag
+            setCursor(Qt::ClosedHandCursor); // #202: grabbing
             emit clipSelected(selectedClipId_);
             update();
             return;
@@ -1341,6 +1520,7 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
     // Razor hover preview line.
     if (razorMode_ && !(event->buttons() & Qt::LeftButton)) {
         razorHoverX_ = x;
+        hoveredClipId_ = -1; // #200: razor mode shows the cut line, not hover
         update();
         return;
     }
@@ -1378,6 +1558,12 @@ void TimelinePanel::mouseMoveEvent(QMouseEvent *event) {
     // (#16, Alt+hover).
     if (!(event->buttons() & Qt::LeftButton) && !razorMode_ && model_) {
         const fc::Clip *clip = clipAtPos(event->pos());
+        // #200: remember the clip under the mouse for the hover paint.
+        const int64_t hoverId = clip ? clip->id : -1;
+        if (hoverId != hoveredClipId_) {
+            hoveredClipId_ = hoverId;
+            update();
+        }
         if (clip) {
             const int contentX = x + scrollX_; // frameToX is content-space
             const int x0 = frameToX(clip->timelineStart);
@@ -1595,6 +1781,12 @@ void TimelinePanel::mouseReleaseEvent(QMouseEvent *event) {
 
 void TimelinePanel::leaveEvent(QEvent *event) {
     razorHoverX_ = -1;
+    hoveredClipId_ = -1; // #200: nothing is hovered off-widget
+    if (dragMode_ == DragMode::None) {
+        // #202: leaving the clip area resets the cursor (unless a drag
+        // owns it - the implicit grab keeps ClosedHand until release).
+        setCursor(razorMode_ ? Qt::CrossCursor : Qt::ArrowCursor);
+    }
     QToolTip::hideText();
     stopAutoPage();
     update();
@@ -1622,11 +1814,12 @@ void TimelinePanel::wheelEvent(QWheelEvent *event) {
         return;
     }
 
-    // Wheel routing (#12): Shift+wheel scrolls horizontally; plain
-    // wheel scrolls VERTICALLY while the track stack overflows the
-    // lanes viewport and falls back to the legacy horizontal scroll
-    // when it does not. pixelDelta wins over angleDelta when present
-    // (hiDPI precision scrolling).
+    // Wheel routing (#12 + #184): pixelDelta wins over angleDelta when
+    // present (hiDPI precision scrolling). Over the LANES, plain Y
+    // scrolls the timeline horizontally and Shift+Y scrolls the track
+    // stack vertically; over the RULER band, Y is horizontal too. A
+    // real horizontal wheel delta always scrolls horizontally. (The
+    // Ctrl+wheel zoom above keeps precedence over all of this.)
     QPoint pix = event->pixelDelta();
     int dx = 0;
     int dy = 0;
@@ -1639,16 +1832,22 @@ void TimelinePanel::wheelEvent(QWheelEvent *event) {
         dx = static_cast<int>(std::llround(angle.x() / 120.0 * kPxPerNotch));
         dy = static_cast<int>(std::llround(angle.y() / 120.0 * kPxPerNotch));
     }
-    if (event->modifiers() & Qt::ShiftModifier) {
-        dy = 0; // Shift forces horizontal routing
-    }
+    // QWheelEvent::pos() is deprecated from Qt 5.15 (replaced by
+    // position(), which does not exist on the 5.12 build floor).
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    const int wheelY = static_cast<int>(event->position().y());
+#else
+    const int wheelY = event->pos().y();
+#endif
+    const bool overRuler = wheelY >= contentTop() && wheelY < contentTop() + kRulerHeight;
+    const bool wantVertical = !overRuler && (event->modifiers() & Qt::ShiftModifier);
 
-    if (dy != 0 && vscroll_ && vscroll_->maximum() > 0) {
+    if (wantVertical && dy != 0 && vscroll_ && vscroll_->maximum() > 0) {
         vscroll_->setValue(std::min(std::max(vscroll_->value() - dy, 0), vscroll_->maximum()));
         event->accept();
         return;
     }
-    const int horizontal = dx != 0 ? dx : dy;
+    const int horizontal = dx != 0 ? dx : (wantVertical ? 0 : dy);
     if (horizontal != 0 && hscroll_ && hscroll_->maximum() > 0) {
         hscroll_->setValue(
             std::min(std::max(hscroll_->value() - horizontal, 0), hscroll_->maximum()));
@@ -1716,8 +1915,16 @@ void TimelinePanel::showTrackContextMenu(const QPoint &globalPos, int row) {
     QMenu menu(this);
     const char *labels[3] = {"&Lock", "&Mute", "&Solo"};
     const bool states[3] = {track->locked, track->muted, track->solo};
+    // #179: the menu items carry the same glyphs the header L/M/S
+    // boxes paint (no clip context menu exists in this panel - Delete
+    // is a key and split is a razor click - so the existing items are
+    // the ones that get icons).
+    const char *glyphs[3] = {"lock", "mute", "star"};
     for (int c = 0; c < 3; ++c) {
-        QAction *action = menu.addAction(tr(labels[c]));
+        QAction *action =
+            menu.addAction(icons::makeIcon(QString::fromLatin1(glyphs[c]), ui::color(ui::kText), 16,
+                                           devicePixelRatioF()),
+                           tr(labels[c]));
         action->setCheckable(true);
         action->setChecked(states[c]);
         connect(action, &QAction::triggered, this,

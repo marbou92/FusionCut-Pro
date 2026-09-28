@@ -5,6 +5,67 @@
 The full feature set developed so far. Nothing is released yet: the
 version stays at 0.1.0 until the first public build.
 
+### Playback triage (owner-reported: silent audio, empty timeline, frozen slider)
+
+- **Import now places clips.** `File > Import` and Quick-mode drops used to
+  only LOAD a video into the monitor - the add-clip intent was dropped by
+  the token gate inside `loadClip`, so `mediaInfo` never placed anything:
+  the timeline stayed empty, which also silenced preview audio (no clips,
+  no audio spans) and, with `TransportBar::duration_` never set, pinned the
+  position slider at 0 while the timecode ran. Video imports now place the
+  clip directly from the probe's extent (full length, appended at the
+  sequence end, audio rider included, one undo entry); files with unknown
+  extent still take the decoder-sized token path; silent placements report
+  instead of disappearing.
+- **Windows 7 WASAPI contract.** Shared-mode event-driven streams must pass
+  `hnsBufferDuration = 0` to `IAudioClient::Initialize` - the old nonzero
+  `period*2` hint can fail outright on Win7 or leave the event unsignaled
+  (chopped or dead-silent playback). The mix-format parser now accepts
+  int16/int32 devices explicitly and converts instead of pasting raw float
+  bits (the old "32 bits = float" guess produced full-scale noise on int32
+  mix formats). A failed device probe now says so once instead of failing
+  silently.
+- **The transport follows the clock.** Position UI (slider, timecode,
+  timeline playhead) updates on EVERY play tick instead of riding decoded-
+  frame arrivals - playback past the decodable extent (EOF tail, slow
+  source switch) no longer freezes the slider while the timecode runs.
+  `setMedia` is unconditional in `updateSequenceDuration`, so the slider
+  range always matches the extent playback follows.
+
+### Apple-style UI, rounds 2 + 3 (#64-#210)
+
+- Foundation: layered-surface tokens (hover/press/card), focus ring token,
+  spacing + radius + typography scale, one-accent discipline, sentence
+  case, DPR-aware icon factory (33 stroke glyphs, now LRU-cached), global
+  QSS for menus/combos/inputs/lists/sliders/scrollbars/tooltips/dialog
+  children.
+- Quick Mode rebuilt CapCut-style: three-zone layout (step rail / preview
+  / tool bar + media strip), library-mirroring media strip with real
+  thumbnails, tool bar wired to REAL engine entry points (Text adds a
+  title, Audio imports, Captions opens the SRT flow, Effects/Transitions/
+  Filters honestly hand off to the Pro workspace), accent Export pill,
+  painted accent-fill scrub slider with timecode chip, circular transport.
+- Pro workspace: 40px panel headers with counts, card-row catalogs with
+  favorite stars, hairline accent faders + 24px mute/solo circles, color
+  chip tiles, effect-controls section captions + inspector cards, metadata
+  card with fps row, item-count captions, grid duration chips, unified
+  proxy pills, per-panel empty states.
+- Timeline: accent insertion line + dashed snap indicator during drags,
+  empty-timeline hint, audio-clip tone texture, zoom Fit button, hover/
+  cursor language, 70% drag ghosts, split button in the tool cluster.
+- Shell: QuickTime-mirrored transport (timecode left, volume right),
+  Source/Program monitor label chips, status bar with version + busy
+  spinner, branded Windows tray icon + menu, minimum window size,
+  keyboard: Alt+arrows nudge selected clip, `,`/`.` step, Ctrl+1/2 mode
+  switch, loop playback, expanded keyboard map, About shows the REAL
+  runtime Qt version, toasts for export/proxy/delete.
+
+### Brand
+
+- The Fc mark (After-Effects-style: charcoal rounded tile, accent letters)
+  as multi-resolution .ico + PNGs, embedded via `brand.qrc` (window icon,
+  tray, About) and `app.rc` (Windows EXE VERSIONINFO + Explorer icon).
+
 ### Engine
 
 - **Media I/O (FFmpeg):** probe, frame-accurate decode, 360p proxy

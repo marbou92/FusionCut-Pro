@@ -1,0 +1,16 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <!-- #128: the Fc brand (After-Effects-style wordmark tile) embedded
+         into the executable. The window/tray icons and the About dialog
+         read these paths; the Windows EXE additionally embeds
+         resources/fusioncut.ico through app.rc. -->
+    <qresource prefix="/brand">
+        <file>fusioncut-16.png</file>
+        <file>fusioncut-24.png</file>
+        <file>fusioncut-32.png</file>
+        <file>fusioncut-48.png</file>
+        <file>fusioncut-128.png</file>
+        <file>fusioncut-256.png</file>
+        <file>fusioncut.ico</file>
+    </qresource>
+</RCC>

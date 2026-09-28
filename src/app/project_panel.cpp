@@ -1,5 +1,6 @@
 #include "project_panel.h"
 
+#include <QApplication>
 #include <QComboBox>
 #include <QEvent>
 #include <QFileInfo>
@@ -15,6 +16,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
+#include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -52,11 +54,14 @@ constexpr int kGridCellHeight = kThumbnailHeight + 22;
 // palette's light Base on Win7 inside this dark panel, so the viewport is
 // forced to kSurface2 with 28px rows and the accent-tinted selection (no
 // focus-rectangle clutter). Re-applied per view mode: grid cells round to
-// 8px and inset their thumbnails a touch more so the selection reads like
-// a card. The app-wide sheet styles the same states at 24px/6px; this
-// local sheet wins where it is set, which is the intent here.
+// kRadiusCard (#0-k: grid cells are cards, same 10px language as the
+// quick-mode template cards and the metadata card) and inset their
+// thumbnails a touch more so the selection reads like a card; list rows
+// stay at the 6px row rounding (rows are chips, not cards). The app-wide
+// sheet styles the same states at 24px/6px; this local sheet wins where
+// it is set, which is the intent here.
 QString librarySheet(bool grid) {
-    const QString radius = grid ? QStringLiteral("8px") : QStringLiteral("6px");
+    const QString radius = grid ? QString::number(ui::kRadiusCard) : QStringLiteral("6px");
     const QString padding = grid ? QStringLiteral("2px 6px") : QStringLiteral("2px 4px");
     return QStringLiteral("QListWidget { background: %1; border: none; }"
                           "QListWidget::item { min-height: 28px; border-radius: %2; padding: %3; }"
@@ -70,16 +75,231 @@ QString librarySheet(bool grid) {
         .arg(ui::color(ui::kSurface3).name());
 }
 
-// Usage chip painter (#29): draws a small right-edge rounded chip with
-// the per-path usage count over the standard item rendering. Works in
-// both List and Grid modes; chips only appear for count >= 1.
+// mm:ss for the duration chip (#168). A local two-liner on purpose: the
+// fc::timecode engine speaks HH:MM:SS:FF over a rational FrameRate -
+// more than a 10px thumbnail chip needs, and this TU never included
+// core headers.
+QString formatMmSs(double seconds) {
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    const int total = static_cast<int>(seconds + 0.5);
+    return QStringLiteral("%1:%2").arg(total / 60).arg(total % 60, 2, 10, QLatin1Char('0'));
+}
+
+// #163: the number part of the frame-rate row. Full probe precision with
+// trailing zeros trimmed, so 24.000 reads "24" and 23.976 stays "23.976"
+// (rounding 29.97 to one decimal would print "30" and misreport the rate).
+QString formatFpsNumber(double fps) {
+    QString text = QString::number(fps, 'f', 3);
+    while (text.endsWith(QLatin1Char('0'))) {
+        text.chop(1);
+    }
+    if (text.endsWith(QLatin1Char('.'))) {
+        text.chop(1);
+    }
+    return text;
+}
+
+// Item painter: the usage chip (#29, 22-b geometry kept verbatim) plus
+// the round-3 additions - a duration chip pinned to the thumbnail's
+// bottom-right in grid mode (#168), ONE proxy-pill language in both view
+// modes (#169), and list rows that append the duration after the name in
+// kTextDim (#168; the rows show the display name - the summary lives in
+// the tooltip). Proxy and duration read LIVE from the library through
+// the panel pointer on purpose: the coordinator writes proxyPath
+// straight onto the MediaItem after a proxy transcode (no panel method
+// is called), so per-row role copies would go stale. The lookup is a
+// linear path scan bounded by the library size - trivial at library
+// scales and always current.
 class UsageCountDelegate : public QStyledItemDelegate {
 public:
-    explicit UsageCountDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+    explicit UsageCountDelegate(ProjectPanel *panel, QObject *parent = nullptr)
+        : QStyledItemDelegate(parent), panel_(panel) {}
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override {
-        QStyledItemDelegate::paint(painter, option, index);
+        const fc::MediaItem *item = itemFor(index);
+        const QString duration =
+            (item && item->durationSeconds > 0.0) ? formatMmSs(item->durationSeconds) : QString();
+        const bool proxy = item != nullptr && item->hasProxy();
+        if (isGridView()) {
+            paintGrid(painter, option, index, duration, proxy);
+        } else {
+            paintList(painter, option, index, duration, proxy);
+        }
+    }
+
+private:
+    bool isGridView() const {
+        const auto *view = qobject_cast<const QListView *>(parent());
+        return view != nullptr && view->viewMode() == QListView::IconMode;
+    }
+
+    const fc::MediaItem *itemFor(const QModelIndex &index) const {
+        if (panel_ == nullptr) {
+            return nullptr;
+        }
+        const int i = panel_->library().indexOfPath(index.data(kPathRole).toString());
+        return panel_->library().at(i);
+    }
+
+    // The style's own thumbnail placement (falls back to the centered
+    // 96x54 area the icon size implies on odd styles).
+    QRect thumbnailRect(const QStyleOptionViewItem &option, const QModelIndex &index) const {
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        const QWidget *widget = option.widget;
+        QStyle *style = widget != nullptr ? widget->style() : QApplication::style();
+        QRect rect = style->subElementRect(QStyle::SE_ItemViewItemDecoration, &opt, widget);
+        if (rect.isEmpty()) {
+            rect = QRect(option.rect.left() + (option.rect.width() - kThumbnailWidth) / 2,
+                         option.rect.top(), kThumbnailWidth, kThumbnailHeight);
+        }
+        return rect;
+    }
+
+    void paintGrid(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index,
+                   const QString &duration, bool proxy) const {
+        QStyledItemDelegate::paint(painter, option, index); // background + thumbnail + caption
+        paintUsageChip(painter, option, index);
+        const QRect thumb = thumbnailRect(option, index);
+        const qreal dpr = option.widget != nullptr ? option.widget->devicePixelRatioF() : 1.0;
+        // #168: duration chip pinned to the thumbnail's bottom-right
+        // (black 55% pill, 10px white text). Draws over the usage chip's
+        // left edge in the rare both-present case; the usage chip keeps
+        // its documented 22-b geometry.
+        if (!duration.isEmpty()) {
+            QFont chipFont = option.font;
+            chipFont.setPixelSize(10);
+            const QFontMetrics metrics(chipFont);
+            const int textWidth = metrics.horizontalAdvance(duration);
+            const QRect chip(thumb.right() - textWidth - 8 - 3, thumb.bottom() - 14 - 2,
+                             textWidth + 8, 14);
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(0, 0, 0, 140)); // black @ 55%
+            painter->drawRoundedRect(chip, 4, 4);
+            painter->setFont(chipFont);
+            painter->setPen(Qt::white);
+            painter->drawText(chip, Qt::AlignCenter, duration);
+            painter->restore();
+        }
+        // #169: proxy pill at the thumbnail's top-right, same pill
+        // language as list mode.
+        if (proxy) {
+            bool withIcon = true;
+            QSize pillSize = proxyPillSize(option.font, withIcon);
+            if (pillSize.width() > thumb.width() - 6) {
+                withIcon = false; // drop the check glyph when the pill has no room
+                pillSize = proxyPillSize(option.font, withIcon);
+            }
+            const QRect pill(thumb.right() - pillSize.width() - 3, thumb.top() + 3,
+                             pillSize.width(), pillSize.height());
+            paintProxyPill(painter, pill, option.font, dpr, withIcon);
+        }
+    }
+
+    void paintList(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index,
+                   const QString &duration, bool proxy) const {
+        // Background + icon through the style with the display text
+        // cleared, so this delegate owns the text: nothing overlaps -
+        // the name elides ahead of the duration (#168) and the right
+        // strip parks the proxy pill (#169) and the usage chip (#29).
+        QStyleOptionViewItem opt = option;
+        initStyleOption(&opt, index);
+        const QString text = opt.text;
+        opt.text.clear();
+        const QWidget *widget = option.widget;
+        QStyle *style = widget != nullptr ? widget->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, widget);
+
+        const QFontMetrics metrics(option.font);
+        int textRight = option.rect.right() - 6;
+
+        // Usage chip: the exact 22-b geometry (right edge, v-centered).
+        const int count = index.data(kUsageCountRole).toInt();
+        if (count >= 1) {
+            const QString countText = QString::number(count);
+            const int chipWidth = metrics.horizontalAdvance(countText) + 8;
+            const int chipHeight = option.rect.height() - 4 < 14 ? option.rect.height() - 4 : 14;
+            if (chipWidth >= 14 && option.rect.width() >= chipWidth + 6) {
+                const QRect chip(option.rect.right() - chipWidth - 2,
+                                 option.rect.top() + (option.rect.height() - chipHeight) / 2,
+                                 chipWidth, chipHeight);
+                painter->save();
+                painter->setRenderHint(QPainter::Antialiasing);
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(ui::tint(ui::kAccent));
+                painter->drawRoundedRect(chip, chipHeight / 2, chipHeight / 2);
+                painter->setPen(ui::color(ui::kText));
+                painter->setFont(option.font);
+                painter->drawText(chip, Qt::AlignCenter, countText);
+                painter->restore();
+                textRight = qMin(textRight, chip.left() - 8);
+            }
+        }
+
+        // #169: the same proxy pill as grid mode, docked before the
+        // usage chip (kept when the name would starve).
+        if (proxy) {
+            const qreal dpr = widget != nullptr ? widget->devicePixelRatioF() : 1.0;
+            bool withIcon = true;
+            QSize pillSize = proxyPillSize(option.font, withIcon);
+            if (pillSize.width() > textRight - option.rect.left() - 24) {
+                withIcon = false;
+                pillSize = proxyPillSize(option.font, withIcon);
+            }
+            if (pillSize.width() <= textRight - option.rect.left() - 24) {
+                const QRect pill(textRight - pillSize.width(),
+                                 option.rect.top() + (option.rect.height() - pillSize.height()) / 2,
+                                 pillSize.width(), pillSize.height());
+                paintProxyPill(painter, pill, option.font, dpr, withIcon);
+                textRight = qMin(textRight, pill.left() - 8);
+            }
+        }
+
+        // The style's own text zone (right of the thumbnail).
+        QRect textRect = style->subElementRect(QStyle::SE_ItemViewItemText, &opt, widget);
+        if (textRect.isEmpty()) {
+            textRect = option.rect.adjusted(kThumbnailWidth + 8, 0, 0, 0);
+        }
+        if (textRight < textRect.right()) {
+            textRect.setRight(textRight);
+        }
+
+        // #168: the duration rides after the (elided) name in kTextDim.
+        QFont dimFont = option.font;
+        dimFont.setPixelSize(ui::kFontSmall);
+        const QFontMetrics dimMetrics(dimFont);
+        const int durationWidth =
+            duration.isEmpty() ? 0 : dimMetrics.horizontalAdvance(duration) + 8;
+        const QString elided = text.isEmpty()
+                                   ? QString()
+                                   : metrics.elidedText(text, Qt::ElideRight,
+                                                        qMax(0, textRect.width() - durationWidth));
+        painter->save();
+        painter->setFont(option.font);
+        painter->setPen(option.state & QStyle::State_Selected
+                            ? ui::color(ui::kText)
+                            : option.palette.color(QPalette::Text));
+        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, elided);
+        if (!duration.isEmpty()) {
+            painter->setFont(dimFont);
+            painter->setPen(ui::color(ui::kTextDim));
+            const int dx =
+                textRect.left() + metrics.horizontalAdvance(elided) + (elided.isEmpty() ? 0 : 6);
+            painter->drawText(QRect(dx, textRect.top(), durationWidth, textRect.height()),
+                              Qt::AlignLeft | Qt::AlignVCenter, duration);
+        }
+        painter->restore();
+    }
+
+    // Usage chip painter (#29): 22-b geometry kept verbatim for grid
+    // mode; chips only appear for count >= 1.
+    void paintUsageChip(QPainter *painter, const QStyleOptionViewItem &option,
+                        const QModelIndex &index) const {
         const int count = index.data(kUsageCountRole).toInt();
         if (count < 1) {
             return;
@@ -95,13 +315,51 @@ public:
         const QRect chip(option.rect.right() - chipWidth - 2,
                          option.rect.top() + (option.rect.height() - chipHeight) / 2, chipWidth,
                          chipHeight);
+        painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
         painter->setPen(Qt::NoPen);
-        painter->setBrush(fc::ui::tint(fc::ui::kAccent));
+        painter->setBrush(ui::tint(ui::kAccent));
         painter->drawRoundedRect(chip, chipHeight / 2, chipHeight / 2);
-        painter->setPen(fc::ui::color(fc::ui::kText));
+        painter->setPen(ui::color(ui::kText));
+        painter->setFont(option.font);
         painter->drawText(chip, Qt::AlignCenter, text);
+        painter->restore();
     }
+
+    // #169: one pill language for both view modes - 10px kSuccess text
+    // on a tint(kSuccess) fill, kRadiusPill rounding, check glyph when
+    // the pill has room.
+    QSize proxyPillSize(const QFont &baseFont, bool withIcon) const {
+        QFont font = baseFont;
+        font.setPixelSize(10);
+        const QFontMetrics metrics(font);
+        return QSize(10 + (withIcon ? 13 : 0) + metrics.horizontalAdvance(tr("Proxy")), 14);
+    }
+
+    void paintProxyPill(QPainter *painter, const QRect &rect, const QFont &baseFont, qreal dpr,
+                        bool withIcon) const {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(ui::tint(ui::kSuccess));
+        painter->drawRoundedRect(rect, ui::kRadiusPill, ui::kRadiusPill);
+        QFont font = baseFont;
+        font.setPixelSize(10);
+        painter->setFont(font);
+        painter->setPen(ui::color(ui::kSuccess));
+        QRect textRect = rect;
+        if (withIcon) {
+            const qreal ratio = dpr > 0 ? dpr : 1.0;
+            const QPixmap check = icons::makeIcon("check", ui::color(ui::kSuccess), 10, ratio)
+                                      .pixmap(qRound(10 * ratio)); // DPR-tagged pixmap
+            painter->drawPixmap(rect.left() + 5, rect.top() + (rect.height() - 10) / 2, check);
+            textRect.setLeft(rect.left() + 5 + 13);
+        }
+        painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignHCenter, tr("Proxy"));
+        painter->restore();
+    }
+
+    ProjectPanel *panel_ = nullptr;
 };
 
 } // namespace
@@ -111,8 +369,10 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     list_->setContextMenuPolicy(Qt::CustomContextMenu);
     list_->setIconSize(QSize(kThumbnailWidth, kThumbnailHeight));
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
-    // Usage chips (#29): one delegate for both view modes.
-    list_->setItemDelegate(new UsageCountDelegate(list_));
+    // Usage chips (#29): one delegate for both view modes; it also
+    // paints the duration chip + proxy pill (#168/#169) from live
+    // library state.
+    list_->setItemDelegate(new UsageCountDelegate(this, list_));
 
     importButton_ = new QPushButton(tr("Import Media..."), this);
     // #66: Import is this panel's one primary action - the app-wide sheet
@@ -124,6 +384,7 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     metaName_ = new QLabel(tr("-"), this);
     metaSummary_ = new QLabel(tr("-"), this);
     metaDuration_ = new QLabel(tr("-"), this);
+    metaFps_ = new QLabel(tr("-"), this); // #163
     metaProxy_ = new QLabel(tr("-"), this);
     metaName_->setWordWrap(true);
     metaSummary_->setWordWrap(true);
@@ -221,7 +482,17 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     makeMetaRow(tr("Name"), metaName_);
     makeMetaRow(tr("Format"), metaSummary_);
     makeMetaRow(tr("Duration"), metaDuration_);
+    makeMetaRow(tr("Frame rate"), metaFps_); // #163: "24 fps" style; fps moved out of Duration
     makeMetaRow(tr("Proxy"), metaProxy_);
+
+    // Item-count caption (#162): a passive right-aligned label under
+    // the header; refreshed from the library by updateItemCount().
+    itemCount_ = new QLabel(this);
+    itemCount_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    itemCount_->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2px; }")
+                                  .arg(ui::color(ui::kTextDim).name())
+                                  .arg(QString::number(ui::kFontSmall)));
+    itemCount_->hide();
 
     auto *buttons = new QHBoxLayout();
     buttons->addWidget(importButton_);
@@ -233,6 +504,7 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(feedbackBanner_);
     layout->addWidget(feedbackLabel_);
     layout->addWidget(filterRow);
+    layout->addWidget(itemCount_); // #162: under the header, right-aligned
     layout->addWidget(list_, 1);
     layout->addLayout(buttons);
     layout->addWidget(metaCard);
@@ -288,8 +560,10 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
             metaName_->setText(tr("-"));
             metaSummary_->setText(tr("-"));
             metaDuration_->setText(tr("-"));
+            metaFps_->setText(tr("-"));
             metaProxy_->setText(tr("-"));
             updateEmptyState();
+            updateItemCount(); // #162
         }
     });
     connect(list_, &QListWidget::itemSelectionChanged, this, &ProjectPanel::onSelectionChanged);
@@ -299,12 +573,24 @@ ProjectPanel::ProjectPanel(QWidget *parent) : QWidget(parent) {
     connect(filterEdit_, &QLineEdit::textChanged, this, [this] { applyFilter(); });
     connect(typeCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this] { applyFilter(); });
+
+    // Boot states (#165 verification fix): the empty-state overlay only
+    // refreshed from addMedia/remove before, so a fresh empty library
+    // showed neither the rows nor "No media yet" until the first import.
+    updateEmptyState();
+    updateItemCount();
 }
 
 QIcon ProjectPanel::makePlaceholderIcon(bool audioOnly) const {
-    QImage image(kThumbnailWidth, kThumbnailHeight, QImage::Format_ARGB32);
+    // #206: rendered at the device pixel ratio and DPR-tagged, so the
+    // stand-in stays crisp at 125/150% Windows scaling like the decoded
+    // thumbnails are expected to.
+    const qreal dpr = devicePixelRatioF() > 0.0 ? devicePixelRatioF() : 1.0;
+    QImage image(qRound(kThumbnailWidth * dpr), qRound(kThumbnailHeight * dpr),
+                 QImage::Format_ARGB32);
     image.fill(fc::ui::color(fc::ui::kSurface2));
     QPainter painter(&image);
+    painter.scale(dpr, dpr);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(fc::ui::color(fc::ui::kLine));
     painter.setBrush(fc::ui::color(fc::ui::kSurface3));
@@ -335,7 +621,9 @@ QIcon ProjectPanel::makePlaceholderIcon(bool audioOnly) const {
              << QPoint(kThumbnailWidth / 2 - 7, kThumbnailHeight / 2 + 8);
         painter.drawPolygon(play);
     }
-    return QIcon(QPixmap::fromImage(image));
+    QPixmap pixmap = QPixmap::fromImage(image);
+    pixmap.setDevicePixelRatio(dpr);
+    return QIcon(pixmap);
 }
 
 bool ProjectPanel::eventFilter(QObject *watched, QEvent *event) {
@@ -388,6 +676,7 @@ void ProjectPanel::addMedia(const fc::MediaItem &item) {
     applyFilter(); // respect an active filter for the new row
     list_->setCurrentItem(row);
     updateEmptyState();
+    updateItemCount(); // #162
     requestMissingThumbnails();
 }
 
@@ -409,6 +698,17 @@ void ProjectPanel::setUsageCounts(const QHash<QString, int> &pathToCount) {
     }
 }
 
+void ProjectPanel::updateItemCount() {
+    const int count = library_.items().size();
+    if (count <= 0) {
+        itemCount_->setText(QString());
+        itemCount_->hide(); // the empty state owns the "nothing here" voice
+        return;
+    }
+    itemCount_->setText(count == 1 ? tr("1 item") : tr("%1 items").arg(count));
+    itemCount_->show();
+}
+
 void ProjectPanel::showImportFeedback(int added, int skipped) {
     if (skipped > 0) {
         feedbackLabel_->hide();
@@ -419,6 +719,7 @@ void ProjectPanel::showImportFeedback(int added, int skipped) {
         feedbackLabel_->show();
     }
     feedbackTimer_->start(4000); // auto-hide both surfaces
+    updateItemCount();           // #162: import feedback path keeps the caption current
 }
 
 void ProjectPanel::requestMissingThumbnails() {
@@ -467,16 +768,13 @@ void ProjectPanel::onSelectionChanged() {
     }
     metaName_->setText(QFileInfo(item->path).fileName());
     metaSummary_->setText(item->summary);
-    // Duration readout with the source fps when the probe found video
-    // (audio-only files have no frame rate to show).
-    if (item->durationSeconds > 0.0) {
-        metaDuration_->setText(item->fps > 0.0 ? tr("%1 s @ %2 fps")
-                                                     .arg(item->durationSeconds, 0, 'f', 2)
-                                                     .arg(item->fps, 0, 'f', 3)
-                                               : tr("%1 s").arg(item->durationSeconds, 0, 'f', 2));
-    } else {
-        metaDuration_->setText(tr("-"));
-    }
+    // Duration readout in plain seconds; the frame rate moved to its own
+    // row below (#163) so the card states each fact exactly once.
+    metaDuration_->setText(
+        item->durationSeconds > 0.0 ? tr("%1 s").arg(item->durationSeconds, 0, 'f', 2) : tr("-"));
+    // #163: source fps when the probe found one (audio-only files have
+    // no frame rate to show).
+    metaFps_->setText(item->fps > 0.0 ? tr("%1 fps").arg(formatFpsNumber(item->fps)) : tr("-"));
     metaProxy_->setText(item->hasProxy() ? tr("proxy: ready") : tr("proxy: none"));
 }
 
@@ -496,8 +794,13 @@ void ProjectPanel::onContextMenu(const QPoint &pos) {
     const bool hasProxy = index >= 0 && library_.at(index)->hasProxy();
 
     QMenu menu(this);
-    QAction *load = menu.addAction(tr("Open in Program Monitor"));
-    QAction *proxy = menu.addAction(hasProxy ? tr("Re-generate Proxy") : tr("Generate 360p Proxy"));
+    const qreal dpr = devicePixelRatioF();
+    // #170: icons on the existing items only (play = open in the
+    // monitor, film = the proxy transcode).
+    QAction *load = menu.addAction(icons::makeIcon("play", ui::color(ui::kText), 14, dpr),
+                                   tr("Open in Program Monitor"));
+    QAction *proxy = menu.addAction(icons::makeIcon("film", ui::color(ui::kText), 14, dpr),
+                                    hasProxy ? tr("Re-generate Proxy") : tr("Generate 360p Proxy"));
     QAction *chosen = menu.exec(list_->mapToGlobal(pos));
     if (chosen == load) {
         emit loadRequested(path);

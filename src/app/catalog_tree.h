@@ -8,6 +8,11 @@
 
 namespace fc {
 
+// Leaf favorite flag (suggestion #154): set on every leaf when the
+// isFavorite predicate is provided, so a delegate can render the star
+// without re-running the predicate (Qt::UserRole carries the id).
+constexpr int kCatalogFavoriteRole = Qt::UserRole + 1;
+
 // One display row of a searchable catalog (the effects and the
 // transitions panels feed their catalogs in as row lists).
 struct CatalogRow {
@@ -37,5 +42,18 @@ void rebuildCatalogTree(QTreeWidget *tree, const QVector<CatalogRow> &rows, cons
                         const std::function<QString(const CatalogRow &)> &leafToolTip = {},
                         const std::function<bool(const CatalogRow &)> &isFavorite = {},
                         const QString &favoritesSection = {}, int *leafCountOut = nullptr);
+
+// Shared catalog chrome (#156): dark viewport (0-b bug class), quiet
+// row height, kSurfaceHover hover and the accent-tinted selection with
+// kText - one language for both catalog panels. `cardRows` lifts the
+// rows into card tiles (#153 effect cards / #155 transition rows:
+// kCard background, 1px kLine border, 8px radius, 3px/6px margins) and
+// switches hover to a border brighten only (#154's "hover raise").
+// `rowHeight` is the row min-height in px (#156 base: 26; the effects
+// panel passes 28, the transitions panel 44 for its card rows).
+// The tree's own header row is hidden - the panel header (#166) titles
+// the catalog. Branch disclosure arrows stay NATIVE: the app-wide
+// stylesheet deliberately carries no QTreeView::branch rules.
+void styleCatalogTree(QTreeWidget *tree, int rowHeight = 26, bool cardRows = false);
 
 } // namespace fc

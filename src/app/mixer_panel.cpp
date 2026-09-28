@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -14,6 +15,7 @@
 
 #include "timeline_model.h"
 #include "ui_theme.h"
+#include "ui_widgets.h"
 
 // ui_theme.h tokens live in fc::ui; the panel addresses them as ui::...
 using namespace fc;
@@ -27,6 +29,33 @@ constexpr double kRedAtDb = -3.0;    // amber -> red transition point
 constexpr int kHoldDecayMs = 100;    // 10 Hz hold-decay tick
 constexpr int kHoldIdleMs = 1500;    // decay the hold after 1.5 s idle
 constexpr double kHoldDecayDb = 0.5; // dB per tick once idle
+
+// DPR-marked glyph pixmap (#206) for the panel header (#166/#116).
+QPixmap glyphPixmap(const QString &name, const QColor &color, int logicalSize, qreal dpr) {
+    return icons::makeIcon(name, color, logicalSize, dpr)
+        .pixmap(qRound(logicalSize * dpr), qRound(logicalSize * dpr));
+}
+
+// #157: the mixer's hairline slider language - 2px kLine groove with the
+// accent fill on the filled side and a light round handle. Same colors
+// as the app-wide sheet (and #148's quick-mode position slider), one
+// notch tighter; the local sheet wins where it is set.
+QString hairlineSliderSheet() {
+    return QStringLiteral(
+               "QSlider::groove:horizontal { height: 2px; background: %1; border-radius: 1px; }"
+               "QSlider::sub-page:horizontal { background: %2; border-radius: 1px; }"
+               "QSlider::handle:horizontal { width: 14px; height: 14px; margin: -6px 0;"
+               " border-radius: 7px; background: %3; }"
+               "QSlider::handle:horizontal:hover { background: %4; }"
+               "QSlider::groove:vertical { width: 2px; background: %1; border-radius: 1px; }"
+               "QSlider::sub-page:vertical { background: %2; border-radius: 1px; }"
+               "QSlider::handle:vertical { height: 14px; width: 14px; margin: 0 -6px;"
+               " border-radius: 7px; background: %3; }")
+        .arg(ui::color(ui::kLine).name())
+        .arg(ui::color(ui::kAccent).name())
+        .arg(ui::color(ui::kText).name())
+        .arg(ui::color(ui::kAccentBright).name());
+}
 
 QString dbText(int db) {
     return db <= -60 ? QObject::tr("mute") : QString("%1 dB").arg(db);
@@ -164,15 +193,34 @@ struct QDateTimeWrapper {
 };
 
 MixerPanel::MixerPanel(QWidget *parent) : QWidget(parent) {
-    auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(12, 8, 12, 8);
-    layout->setSpacing(12);
+    // #164: 12px content margins; the header row (#166) sits above the
+    // strips + master row.
+    auto *outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(12, 12, 12, 12);
+    outerLayout->setSpacing(8);
 
-    auto *title = new QLabel(tr("<b>Audio Mixer</b>"), this);
-    auto *titleLayout = new QVBoxLayout;
-    titleLayout->addWidget(title);
-    titleLayout->addStretch(1);
-    layout->addLayout(titleLayout);
+    // Panel header (#166): 40px row - 16px waveform glyph in kTextDim +
+    // 13px semibold title in kText. No count caption: the strip count
+    // only exists after refreshFromModel, so the header stays static.
+    auto *header = new QWidget(this);
+    header->setFixedHeight(40);
+    auto *headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(8);
+    auto *headerGlyph = new QLabel(header);
+    headerGlyph->setPixmap(
+        glyphPixmap("waveform", ui::color(ui::kTextDim), 16, devicePixelRatioF()));
+    auto *headerTitle = new QLabel(tr("Audio mixer"), header);
+    headerTitle->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;color:%1;")
+                                   .arg(ui::color(ui::kText).name()));
+    headerLayout->addWidget(headerGlyph);
+    headerLayout->addWidget(headerTitle);
+    headerLayout->addStretch(1);
+    outerLayout->addWidget(header);
+
+    auto *layout = new QHBoxLayout;
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
 
     // Strips live in a scroll area so an unusual number of audio lanes
     // never breaks the layout.
@@ -189,13 +237,15 @@ MixerPanel::MixerPanel(QWidget *parent) : QWidget(parent) {
     layout->addWidget(scroll, 1);
 
     // Master strip (#46): RIGHTMOST (last in the outer layout) and
-    // visually distinct - 1 px accent border over a raised surface.
+    // visually distinct - 1 px accent border over a raised surface,
+    // rounded to the control radius (8px).
     auto *master = new QWidget(this);
     master->setObjectName(QStringLiteral("fcMasterStrip"));
     master->setAttribute(Qt::WA_StyledBackground, true);
     master->setStyleSheet(QStringLiteral("QWidget#fcMasterStrip{background:%1;"
-                                         "border:1px solid %2;border-radius:4px;}")
-                              .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kAccent).name()));
+                                         "border:1px solid %2;border-radius:%3px;}")
+                              .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kAccent).name())
+                              .arg(ui::kRadiusControl));
     auto *masterLayout = new QVBoxLayout(master);
     masterLayout->setContentsMargins(6, 6, 6, 6);
     auto *masterTitle = new QLabel(tr("Master"), master);
@@ -205,18 +255,28 @@ MixerPanel::MixerPanel(QWidget *parent) : QWidget(parent) {
     masterFader_->setValue(0);
     masterFader_->setToolTip(tr("Master fader - double-click resets to 0 dB"));
     masterFader_->setAccessibleName(tr("Master fader"));
+    // #157: hairline groove + accent fill; the 40px width is the
+    // fader's grab strip (the vertical slider's hit area).
+    masterFader_->setStyleSheet(hairlineSliderSheet());
+    masterFader_->setFixedWidth(40);
     masterFader_->installEventFilter(this);
     masterMeter_ = new LevelMeter(master);
     masterMeter_->setToolTip(tr("Master output level (dBFS) - click to reset the peak hold"));
     masterMeter_->setAccessibleName(tr("Master level meter"));
     masterDbLabel_ = new QLabel(dbText(0), master);
     masterDbLabel_->setAlignment(Qt::AlignCenter);
+    // #157: tabular figures - Qt 5.12 exposes no font-feature API
+    // (QFont::setFeature is Qt 6.7+); Segoe UI's default figures are
+    // tabular and the fixed-width centered label keeps the strip from
+    // jittering as the value changes.
+    masterDbLabel_->setMinimumWidth(48);
     masterLayout->addWidget(masterTitle);
     masterLayout->addWidget(masterFader_, 1);
     masterLayout->addWidget(masterMeter_);
     masterLayout->addWidget(masterDbLabel_);
     master->setFixedWidth(84);
     layout->addWidget(master); // LAST: the master strip is the rightmost
+    outerLayout->addLayout(layout, 1);
 
     connect(masterFader_, &QSlider::valueChanged, this, [this](int db) {
         masterDbLabel_->setText(dbText(db));
@@ -283,10 +343,17 @@ void MixerPanel::buildStrip(const QString &name, bool withPan, Strip &out, QWidg
     out.fader->setValue(0);
     out.fader->setToolTip(tr("%1 fader - double-click resets to 0 dB").arg(name));
     out.fader->setAccessibleName(tr("%1 fader").arg(name));
+    // #157: hairline groove + accent fill; the 40px width is the
+    // fader's grab strip (the vertical slider's hit area).
+    out.fader->setStyleSheet(hairlineSliderSheet());
+    out.fader->setFixedWidth(40);
     out.fader->installEventFilter(this);
 
     out.dbLabel = new QLabel(dbText(0), strip);
     out.dbLabel->setAlignment(Qt::AlignCenter);
+    // #157: tabular figures via a fixed-width centered label (see the
+    // master strip comment - Qt 5.12 exposes no font-feature API).
+    out.dbLabel->setMinimumWidth(48);
 
     out.meter = new LevelMeter(strip);
     out.meter->setAccessibleName(tr("%1 level meter").arg(name));
@@ -301,6 +368,9 @@ void MixerPanel::buildStrip(const QString &name, bool withPan, Strip &out, QWidg
         out.pan = new QSlider(Qt::Horizontal, strip);
         out.pan->setRange(-100, 100);
         out.pan->setValue(0);
+        // #157: the same hairline language as the faders so the strip's
+        // two sliders read as one family.
+        out.pan->setStyleSheet(hairlineSliderSheet());
         out.panLabel = new QLabel(panText(0), strip);
         out.panLabel->setAlignment(Qt::AlignCenter);
         stripLayout->addWidget(out.pan);
@@ -308,10 +378,11 @@ void MixerPanel::buildStrip(const QString &name, bool withPan, Strip &out, QWidg
     }
 
     // Mute / solo pair (checkable, mutually aware at the model level -
-    // the solo LOGIC lives in the flatten, not the buttons). #46: the
-    // letter chips read as icons and light up in their state color when
-    // checked (muted = warning tint, solo = success tint) - the repo
-    // carries no icon assets, so the glyphs ARE the icons.
+    // the solo LOGIC lives in the flatten, not the buttons). #157: both
+    // restyle to 24px circles - mute stays neutral (brightens when
+    // checked), solo keeps its success color and gains the accent
+    // border when active. The repo carries no icon assets, so the
+    // letter glyphs ARE the icons.
     auto *row = new QWidget(strip);
     auto *rowLayout = new QHBoxLayout(row);
     rowLayout->setContentsMargins(0, 0, 0, 0);
@@ -322,21 +393,29 @@ void MixerPanel::buildStrip(const QString &name, bool withPan, Strip &out, QWidg
     out.mute->setToolTip(tr("Mute this track"));
     out.mute->setAccessibleName(tr("Mute %1").arg(name));
     out.mute->setStyleSheet(
-        QStringLiteral("QToolButton{padding:2px;border-radius:3px;}"
-                       "QToolButton:checked{background:%1;color:%2;border:1px solid %2;}")
-            .arg(ui::tint(ui::kWarning).name(), ui::color(ui::kWarning).name()));
+        QStringLiteral("QToolButton{background:%1;border:1px solid %2;border-radius:12px;"
+                       "padding:0;color:%3;font-size:11px;}"
+                       "QToolButton:hover{background:%4;}"
+                       "QToolButton:checked{background:%4;color:%5;border-color:%3;}")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kTextDim).name(), ui::color(ui::kSurfaceHover).name(),
+                 ui::color(ui::kText).name()));
     out.solo = new QToolButton(row);
     out.solo->setText(tr("S"));
     out.solo->setCheckable(true);
     out.solo->setToolTip(tr("Solo this track (other audio tracks fall silent)"));
     out.solo->setAccessibleName(tr("Solo %1").arg(name));
     out.solo->setStyleSheet(
-        QStringLiteral("QToolButton{padding:2px;border-radius:3px;}"
-                       "QToolButton:checked{background:%1;color:%2;border:1px solid %2;}")
-            .arg(ui::tint(ui::kSuccess).name(), ui::color(ui::kSuccess).name()));
+        QStringLiteral("QToolButton{background:%1;border:1px solid %2;border-radius:12px;"
+                       "padding:0;color:%3;font-size:11px;}"
+                       "QToolButton:hover{background:%4;}"
+                       "QToolButton:checked{background:%5;color:%6;border-color:%6;}")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kTextDim).name(), ui::color(ui::kSurfaceHover).name(),
+                 ui::tint(ui::kSuccess).name(), ui::color(ui::kSuccess).name()));
     for (QToolButton *cell : {out.mute, out.solo}) {
-        cell->setMinimumSize(32, 28);
-        rowLayout->addWidget(cell, 1);
+        cell->setFixedSize(24, 24); // #157: 24px circles
+        rowLayout->addWidget(cell, 1, Qt::AlignHCenter);
     }
     stripLayout->addWidget(row);
 

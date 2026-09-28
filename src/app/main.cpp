@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QFont>
+#include <QIcon>
 #include <QStringList>
 
 #include <fc/version.h>

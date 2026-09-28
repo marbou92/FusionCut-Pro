@@ -130,17 +130,22 @@ TransportBar::TransportBar(QWidget *parent) : QWidget(parent) {
     timecodeShake_ = new QPropertyAnimation(timecodeEditor_, "pos", this);
     timecodeShake_->setDuration(kShakeMs);
 
-    // #56: one 4/8 px padding rhythm across the bar.
+    // #56: one 4/8 px padding rhythm across the bar. #187: the layout
+    // mirrors the QuickTime pattern - timecode left, scrub across the
+    // middle, tools and volume at the right end.
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(8);
+    layout->addWidget(timecode_);
+    layout->addWidget(position_, 1);
     layout->addWidget(stepBack_);
     layout->addWidget(playButton_);
     layout->addWidget(stepFwd_);
-    layout->addWidget(position_, 1);
-    layout->addWidget(timecode_);
     layout->addWidget(muteButton_);
     layout->addWidget(volume_);
+    // #188: an 80 px hairline volume - long enough to scrub by ear,
+    // short enough to keep the tools centered.
+    volume_->setFixedWidth(80);
 
     connect(playButton_, &QPushButton::clicked, this, &TransportBar::onPlayClicked);
     connect(stepBack_, &QPushButton::clicked, this, [this] {

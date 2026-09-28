@@ -32,6 +32,22 @@ namespace {
 
 constexpr int kSliderSteps = 1000;
 
+// #161: an 11px kTextDim sentence-case section caption. The wrapper
+// carries the spacing contract (8px above the caption, 4px below it) so
+// every page gets the same rhythm without touching page margins.
+QWidget *sectionCaption(const QString &text, QWidget *parent) {
+    auto *wrap = new QWidget(parent);
+    auto *wrapLayout = new QVBoxLayout(wrap);
+    wrapLayout->setContentsMargins(0, 8, 0, 4);
+    wrapLayout->setSpacing(0);
+    auto *label = new QLabel(text, wrap);
+    label->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2px; }")
+                             .arg(ui::color(ui::kTextDim).name())
+                             .arg(QString::number(ui::kFontSmall)));
+    wrapLayout->addWidget(label);
+    return wrap;
+}
+
 QString formatValue(const fc::EffectParamDescriptor &p, double v) {
     const double span = p.maxValue - p.minValue;
     const int decimals = span > 30.0 ? 1 : 2;
@@ -196,6 +212,9 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
 
     auto *stackLayout = new QVBoxLayout(stackPage_);
     stackLayout->setContentsMargins(0, 0, 0, 0);
+    // #161: section caption above the clip editor group; the label under
+    // it keeps titling the concrete target ("Clip N - effect stack").
+    stackLayout->addWidget(sectionCaption(tr("Clip"), stackPage_));
     stackLayout->addWidget(clipLabel_);
     stackLayout->addWidget(list_, 1);
     stackLayout->addWidget(buttonRow);
@@ -223,6 +242,8 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
 
     auto *transLayout = new QVBoxLayout(transitionPage_);
     transLayout->setContentsMargins(0, 0, 0, 0);
+    // #161: section caption above the transition editor group.
+    transLayout->addWidget(sectionCaption(tr("Transition"), transitionPage_));
     transLayout->addWidget(transitionLabel_);
     transLayout->addWidget(transitionPair_);
     transLayout->addWidget(durRow);
@@ -277,7 +298,10 @@ EffectControlsPanel::EffectControlsPanel(QWidget *parent) : QWidget(parent) {
     fadesNote->setStyleSheet(
         QStringLiteral("QLabel { color: %1; }").arg(ui::color(ui::kTextDim).name()));
     auto *fadesLayout = new QVBoxLayout(fadesPage_);
-    fadesLayout->setContentsMargins(8, 8, 8, 8);
+    // #161: the caption block carries the 8px top spacing, so the page
+    // margin only pads the sides/bottom.
+    fadesLayout->setContentsMargins(8, 0, 8, 8);
+    fadesLayout->addWidget(sectionCaption(tr("Audio fades"), fadesPage_));
     fadesLayout->addWidget(fadesLabel_);
     fadesLayout->addWidget(fadeInRow);
     fadesLayout->addWidget(fadeOutRow);
@@ -610,6 +634,8 @@ void EffectControlsPanel::rebuildParams() {
             auto *diamond = new QPushButton(QString::fromUtf8("\u25C6"), rowWidget);
             diamond->setToolTip(tr("Toggle a keyframe for this parameter at the current "
                                    "playhead position (inside the clip)"));
+            // #203: the glyph-only button still needs a spoken name.
+            diamond->setAccessibleName(tr("Toggle keyframe"));
             diamond->setFlat(true);
             diamond->setFixedWidth(28);
             const bool has = fx.keyframeAt(p.key, kfFrame) != nullptr;

@@ -4,10 +4,13 @@
 #include <QWidget>
 
 class QEvent;
-class QLabel;
 class QLineEdit;
 class QObject;
 class QTreeWidget;
+
+namespace fc {
+class EmptyState;
+} // namespace fc
 
 // Pro Mode left panel (tabbed with Project): the effects browser.
 // Built from fc::effectCatalog() (the real engine catalog, not a static
@@ -15,9 +18,9 @@ class QTreeWidget;
 // add an effect instance to the SELECTED timeline clip. Favorites
 // (suggestion #32) persist under QSettings "effects/favorites" and float
 // to the top in a pinned "Favorites" section; toggled from the leaf
-// context menu. The tree is a drag SOURCE (suggestion #33): leaves are
-// offered as "application/x-fc-effect-id" UTF-8 payloads with
-// Qt::MoveAction for the timeline's drop targets.
+// context menu or the row's star (#154). The tree is a drag SOURCE
+// (suggestion #33): leaves are offered as "application/x-fc-effect-id"
+// UTF-8 payloads with Qt::MoveAction for the timeline's drop targets.
 class EffectsPanel : public QWidget {
     Q_OBJECT
 
@@ -40,6 +43,6 @@ private:
 
     QLineEdit *search_ = nullptr;
     QTreeWidget *tree_ = nullptr;
-    QLabel *treeHint_ = nullptr; // "no matches" hint inside the viewport
+    fc::EmptyState *emptyState_ = nullptr; // "no matches" overlay in the viewport (#165)
     QSet<QString> favorites_;
 };

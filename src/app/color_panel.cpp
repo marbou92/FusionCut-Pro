@@ -18,6 +18,28 @@ namespace {
 constexpr int kSliderSteps = 1000;
 constexpr int kChipMinHeight = 28; // >= 28 px hit targets on small buttons (#63)
 
+// DPR-marked glyph pixmap (#206) for the panel header (#166/#116).
+QPixmap glyphPixmap(const QString &name, const QColor &color, int logicalSize, qreal dpr) {
+    return fc::icons::makeIcon(name, color, logicalSize, dpr)
+        .pixmap(qRound(logicalSize * dpr), qRound(logicalSize * dpr));
+}
+
+// #157/#158: the shared hairline slider language (2px kLine groove,
+// accent fill on the filled side, light round handle) - the same sheet
+// the mixer strips use, so both editing panels read as one family.
+QString hairlineSliderSheet() {
+    return QStringLiteral(
+               "QSlider::groove:horizontal { height: 2px; background: %1; border-radius: 1px; }"
+               "QSlider::sub-page:horizontal { background: %2; border-radius: 1px; }"
+               "QSlider::handle:horizontal { width: 14px; height: 14px; margin: -6px 0;"
+               " border-radius: 7px; background: %3; }"
+               "QSlider::handle:horizontal:hover { background: %4; }")
+        .arg(fc::ui::color(fc::ui::kLine).name())
+        .arg(fc::ui::color(fc::ui::kAccent).name())
+        .arg(fc::ui::color(fc::ui::kText).name())
+        .arg(fc::ui::color(fc::ui::kAccentBright).name());
+}
+
 // The corrector is THE Color Panel effect (catalog entry).
 constexpr const char *kCorrectorId = "color.corrector";
 
@@ -71,8 +93,24 @@ ColorPanel::ColorPanel(QWidget *parent) : QWidget(parent) {
 }
 
 void ColorPanel::buildUi() {
-    clipLabel_ = new QLabel(tr("No clip selected"), this);
-    clipLabel_->setWordWrap(true);
+    // Panel header (#166): 40px row - 16px glyph in kTextDim + the clip
+    // title in 13px semibold kText. The label starts BLANK: the
+    // empty-state overlay owns the "no clip" message (the 0-d single
+    // empty-state contract); setClip titles a real target only.
+    auto *header = new QWidget(this);
+    header->setFixedHeight(40);
+    auto *headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(8);
+    auto *headerGlyph = new QLabel(header);
+    headerGlyph->setPixmap(
+        glyphPixmap("filters", fc::ui::color(fc::ui::kTextDim), 16, devicePixelRatioF()));
+    clipLabel_ = new QLabel(header);
+    clipLabel_->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;color:%1;")
+                                  .arg(fc::ui::color(fc::ui::kText).name()));
+    headerLayout->addWidget(headerGlyph);
+    headerLayout->addWidget(clipLabel_);
+    headerLayout->addStretch(1);
 
     auto *host = new QWidget(this);
     auto *form = new QVBoxLayout(host);
@@ -98,15 +136,24 @@ void ColorPanel::buildUi() {
         rowLayout->setContentsMargins(0, 0, 0, 0);
         rowLayout->setSpacing(0);
 
-        auto *name = new QLabel(QString::fromUtf8(spec.label) + ":", row);
+        // #158: the parameter name reads as an 11px kTextDim caption
+        // above its slider (the round-2 metadata-card caption pairing).
+        const QString labelText = QString::fromUtf8(spec.label);
+        auto *name = new QLabel(labelText + ":", row);
+        name->setStyleSheet(
+            QStringLiteral("font-size:11px;color:%1;").arg(fc::ui::color(fc::ui::kTextDim).name()));
         auto *ctrlRow = new QWidget(row);
         auto *ctrlLayout = new QHBoxLayout(ctrlRow);
         ctrlLayout->setContentsMargins(0, 0, 0, 0);
         ctrlLayout->setSpacing(6);
         auto *slider = new QSlider(Qt::Horizontal, ctrlRow);
         slider->setRange(0, kSliderSteps);
+        slider->setStyleSheet(hairlineSliderSheet()); // #158: mixer hairline language
+        slider->setAccessibleName(tr("%1 slider").arg(labelText));
         auto *value = new QLabel(ctrlRow);
         value->setMinimumWidth(56);
+        value->setStyleSheet(
+            QStringLiteral("font-size:12px;color:%1;").arg(fc::ui::color(fc::ui::kText).name()));
         ctrlLayout->addWidget(slider, 1);
         ctrlLayout->addWidget(value);
 
@@ -168,8 +215,8 @@ void ColorPanel::buildUi() {
     });
 
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(6, 6, 6, 6);
-    layout->addWidget(clipLabel_);
+    layout->setContentsMargins(12, 12, 12, 12); // 12px rhythm (#164)
+    layout->addWidget(header);
     layout->addWidget(scroll_, 1);
     layout->addWidget(resetButton_);
 
@@ -203,7 +250,19 @@ void ColorPanel::buildChips() {
         chip->setText(tr(spec.label));
         chip->setToolTip(spec.tip);
         chip->setAccessibleName(tr("%1 color preset").arg(tr(spec.label)));
-        chip->setAutoRaise(true); // QToolButton's flat look (no setFlat)
+        // #158: the chips are the panel's swatch stand-in - 6px-radius
+        // kCard tiles with a hairline border. They are momentary
+        // actions (no persistent active state exists), so the "active
+        // ring" is honored as the hover state: the border brightens to
+        // accent @ 120 - no fake checked ring.
+        chip->setStyleSheet(
+            QStringLiteral("QToolButton{background:%1;border:1px solid %2;border-radius:6px;"
+                           "padding:2px 10px;color:%3;}"
+                           "QToolButton:hover{background:%4;border-color:%5;}")
+                .arg(fc::ui::color(fc::ui::kCard).name(), fc::ui::color(fc::ui::kLine).name(),
+                     fc::ui::color(fc::ui::kText).name(),
+                     fc::ui::color(fc::ui::kSurfaceHover).name(),
+                     fc::ui::withAlpha(fc::ui::kAccent, 120).name(QColor::HexArgb)));
         chip->setMinimumHeight(kChipMinHeight);
         rowLayout->addWidget(chip);
         *spec.slot = chip;
@@ -275,8 +334,9 @@ const fc::EffectInstance *ColorPanel::corrector() const {
 void ColorPanel::setClip(int64_t clipId, const std::vector<fc::EffectInstance> &stack) {
     clipId_ = clipId;
     stack_ = stack;
-    clipLabel_->setText(clipId < 0 ? tr("No clip selected")
-                                   : tr("Clip %1 - grade").arg(qlonglong(clipId)));
+    // The header only titles a REAL target; the empty-state overlay owns
+    // the "no clip" message (the 0-d single empty-state contract).
+    clipLabel_->setText(clipId < 0 ? QString() : tr("Clip %1 - grade").arg(qlonglong(clipId)));
     refresh();
     updateEmptyState();
 }
@@ -318,19 +378,24 @@ void ColorPanel::refresh() {
     }
 }
 
-// Empty state (#61): when no clip is selected the editing affordances
-// step aside for the hint. Driven from the existing setClip path.
+// Empty state (#61/#165): when no clip is selected the editing
+// affordances step aside for the hint. Driven from the existing setClip
+// path; the icon is a makeIcon glyph (#116) instead of a text glyph.
 void ColorPanel::updateEmptyState() {
     const bool empty = clipId_ < 0;
     if (!emptyState_) {
         emptyState_ = new fc::EmptyState(this);
-        emptyState_->setGlyph(tr("\u25D0")); // half-filled circle: the grade split
+        const qreal dpr = devicePixelRatioF();
+        emptyState_->setIcon(
+            fc::icons::makeIcon("filters", fc::ui::color(fc::ui::kTextDisabled), 36, dpr), 36, dpr);
         emptyState_->setTitle(tr("Select a clip to grade"));
         emptyState_->setHint(tr("Click a video clip in the timeline - its color correction "
                                 "appears here."));
         auto *panelLayout = layout();
         if (panelLayout) {
-            qobject_cast<QVBoxLayout *>(panelLayout)->insertWidget(1, emptyState_);
+            // Stretch 1 so the hint centers in the panel while the
+            // editing widgets are hidden.
+            qobject_cast<QVBoxLayout *>(panelLayout)->insertWidget(1, emptyState_, 1);
         }
     }
     emptyState_->refresh(empty);

@@ -38,6 +38,10 @@ class SegmentedControl;
 // Import feedback (#30): showImportFeedback() flashes a transient line
 // above the list. Filtering (#31): name filter + type combo, "/" focuses
 // the filter. Empty state (#61): an overlay when the library is empty.
+// Round 3 (#162/#163/#168/#169/#170): an item-count caption under the
+// header, fps in the metadata card, a duration chip + one proxy-pill
+// language in both view modes (painted live from the library), and
+// icons on the context menu items.
 class ProjectPanel : public QWidget {
     Q_OBJECT
 
@@ -71,6 +75,7 @@ private slots:
 
 private:
     void applyViewMode(bool grid);
+    void updateItemCount(); // #162: passive count caption under the header
     void requestMissingThumbnails();
     void pumpThumbnailRequests();
     void applyFilter();
@@ -86,7 +91,12 @@ private:
     QLabel *metaName_ = nullptr;
     QLabel *metaSummary_ = nullptr;
     QLabel *metaDuration_ = nullptr;
+    QLabel *metaFps_ = nullptr; // #163: source frame rate when the probe found one
     QLabel *metaProxy_ = nullptr;
+
+    // Item-count caption (#162): a passive 11px dim label under the
+    // header row, refreshed from the library on add/remove/import.
+    QLabel *itemCount_ = nullptr;
 
     // Header row (#81): a segmented List | Grid switch (same persisted
     // "project/viewMode" logic) plus the filter field and type combo.

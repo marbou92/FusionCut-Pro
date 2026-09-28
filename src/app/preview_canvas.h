@@ -40,6 +40,11 @@ public:
     void setGuidesVisible(bool on);
     bool guidesVisible() const { return guidesVisible_; }
 
+    // Monitor label chip (#186): a small "Source" / "Program" pill
+    // painted top-left over the canvas so the two monitors never read
+    // identically at a glance. Empty (default) paints nothing.
+    void setLabel(const QString &text);
+
     // Preview quality (suggestion #22): the frame is downscaled to
     // half/quarter of the displayed width before it is painted back
     // into the SAME displayed rect. Paint-side only - never affects
@@ -84,12 +89,14 @@ private:
     void buildOverlays();
     void positionOverlays();
     void drawGuides(QPainter &painter, const QRect &frameRect) const;
+    void drawLabelChip(QPainter &painter) const;
 
     QImage current_;
     QPixmap buffer_;
     double aspectHint_ = 16.0 / 9.0;
     double lastPts_ = 0.0;
     bool guidesVisible_ = false;
+    QString label_;
     Quality quality_ = Quality::Full;
     QComboBox *qualityBox_ = nullptr;
     QFrame *miniTransport_ = nullptr;

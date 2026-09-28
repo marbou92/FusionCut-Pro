@@ -25,6 +25,7 @@ class QLabel;
 class QThread;
 class QAction;
 class QStackedWidget;
+class QSystemTrayIcon;
 class DecodeWorker;
 class ColorPanel;
 class EffectsPanel;
@@ -42,6 +43,7 @@ class QuickModeView;
 namespace fc {
 class ScopesPanel;
 class SegmentedControl;
+class BusySpinner; // status-bar busy ring, defined in mainwindow.cpp
 } // namespace fc
 class TextPanel;
 class TimelinePanel;
@@ -70,6 +72,11 @@ private:
     void applyDarkTheme();
     void buildMenus();
     void buildStatusBar();
+    // #130: the branded Windows 7 tray icon + menu (no-op when the
+    // machine has no tray).
+    void buildTray();
+    // #136: re-feeds the Quick-mode media strip from the library.
+    void refreshQuickStrip();
     void buildProWorkspace();
     void buildQuickWorkspace();
     void buildDecodeThread();
@@ -388,7 +395,8 @@ private:
     int64_t audioStartSample_ = 0;
     std::atomic<int64_t> audioPulled_{0};
     uint64_t audioSpansRevision_ = 0;
-    bool audioDeviceWarned_ = false; // one "device lost" message per run
+    bool audioDeviceWarned_ = false;      // one "device lost" message per run
+    bool audioUnavailableWarned_ = false; // one "no usable device" message per session
     // Proxy state: one job at a time (a second Ctrl+P used to overwrite
     // proxySourcePath_ and cross-wire both jobs' done handling).
     bool proxyRunning_ = false;
@@ -407,6 +415,10 @@ private:
     // View > Reset Workspace (#3).
     QLabel *statusResolution_ = nullptr;
     QLabel *statusDirty_ = nullptr;
+    QLabel *statusVersion_ = nullptr;      // #123
+    BusySpinner *statusSpinner_ = nullptr; // #198
+    QSystemTrayIcon *tray_ = nullptr;      // #130
+    bool loopPlayback_ = false;            // #193
     ScopesPanel *scopesPanel_ = nullptr;
     QByteArray defaultWindowState_;
 };

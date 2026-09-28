@@ -161,16 +161,25 @@ TextPanel::TextPanel(QWidget *parent) : QWidget(parent) {
 
 void TextPanel::buildUi() {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setContentsMargins(12, 12, 12, 12); // 12px rhythm (#164)
     layout->setSpacing(4);
 
+    // The panel's header line (#159): 13px semibold kText, sentence
+    // case. It titles a real editing target and carries the no-clip
+    // hint otherwise (the panel has no separate empty state - the
+    // editor + Add button stay usable, so nothing is forced away).
     info_ = new QLabel(this);
     info_->setWordWrap(true);
+    info_->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;color:%1;")
+                             .arg(ui::color(ui::kText).name()));
     layout->addWidget(info_);
 
     addButton_ = new QPushButton(tr("Add Text Clip"), this);
     addButton_->setToolTip(
         tr("Creates a 4 s text clip at the playhead on a new text track (Ctrl+T)"));
+    // The panel's ONE accent action (#166): adding a text clip is the
+    // primary action.
+    addButton_->setProperty("fcAccent", true);
     connect(addButton_, &QPushButton::clicked, this, [this] { emit addTextClipRequested(); });
     layout->addWidget(addButton_);
 
@@ -183,6 +192,16 @@ void TextPanel::buildUi() {
     editor_->setAcceptRichText(false);
     editor_->setMinimumHeight(120);
     editor_->setPlaceholderText(tr("Type the title text..."));
+    // #159: the editor is an input - it adopts the global input language
+    // (kSurface3 chrome, kLine hairline, 8px radius, accent focus ring);
+    // the app-wide sheet only covers QLineEdit/QSpinBox, so QTextEdit
+    // carries the same recipe locally (no light styles remain).
+    editor_->setStyleSheet(
+        QStringLiteral("QTextEdit { background: %1; border: 1px solid %2; border-radius: 8px;"
+                       " color: %3; selection-background-color: %4; }"
+                       "QTextEdit:focus { border-color: %4; }")
+            .arg(ui::color(ui::kSurface3).name(), ui::color(ui::kLine).name(),
+                 ui::color(ui::kText).name(), ui::color(ui::kAccent).name()));
     connect(editor_, &QTextEdit::textChanged, this, [this] {
         if (!loading_) {
             pushDoc();
@@ -248,6 +267,7 @@ void TextPanel::buildUi() {
     bold_ = new QToolButton(styleRow);
     bold_->setText(tr("B"));
     bold_->setToolTip(tr("Bold (selection)"));
+    bold_->setAccessibleName(tr("Bold")); // #203: the glyph alone is not a name
     bold_->setCheckable(true);
     QFont boldFont = bold_->font();
     boldFont.setBold(true);
@@ -266,6 +286,7 @@ void TextPanel::buildUi() {
     italic_ = new QToolButton(styleRow);
     italic_->setText(tr("I"));
     italic_->setToolTip(tr("Italic (selection)"));
+    italic_->setAccessibleName(tr("Italic")); // #203
     italic_->setCheckable(true);
     QFont italicFont = italic_->font();
     italicFont.setItalic(true);
@@ -284,6 +305,7 @@ void TextPanel::buildUi() {
     underline_ = new QToolButton(styleRow);
     underline_->setText(tr("U"));
     underline_->setToolTip(tr("Underline (selection)"));
+    underline_->setAccessibleName(tr("Underline")); // #203
     underline_->setCheckable(true);
     QFont underlineFont = underline_->font();
     underlineFont.setUnderline(true);
@@ -301,6 +323,7 @@ void TextPanel::buildUi() {
 
     color_ = new QPushButton(tr("A"), styleRow);
     color_->setToolTip(tr("Text color (selection)"));
+    color_->setAccessibleName(tr("Text color")); // #203
     connect(color_, &QPushButton::clicked, this, [this] {
         if (loading_) {
             return;
@@ -665,11 +688,15 @@ void TextPanel::buildPreview() {
     previewLabel_->setScaledContents(true); // letterboxes inside the 16:9 holder
     previewLabel_->setAlignment(Qt::AlignCenter);
     previewLabel_->setText(tr("Preview"));
+    // #159: the preview renders as a card (1px kLine border, 8px
+    // radius); the interior stays kCanvas so honest image content sits
+    // on the monitor tone.
     previewLabel_->setStyleSheet(QStringLiteral("QLabel{background:%1;color:%2;"
-                                                "border:1px solid %3;}")
+                                                "border:1px solid %3;border-radius:%4px;}")
                                      .arg(ui::color(ui::kCanvas).name(),
                                           ui::color(ui::kTextDisabled).name(),
-                                          ui::color(ui::kLine).name()));
+                                          ui::color(ui::kLine).name())
+                                     .arg(ui::kRadiusControl));
     holderLayout->addWidget(previewLabel_);
 
     auto *previewRow = new QWidget(this);

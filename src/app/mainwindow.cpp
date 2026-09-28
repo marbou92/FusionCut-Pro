@@ -35,8 +35,10 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QSystemTrayIcon>
 #include <QTabWidget>
 #include <QThread>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <fc/version.h>
@@ -73,6 +75,48 @@
 #include "video_decoder.h"
 
 namespace fc {
+
+// Round-3 #198: the status-bar busy spinner - a painted 8-dot ring that
+// exists only while a job (proxy, export) runs. 80 ms steps at 16 px
+// cost nothing on the 1 GB budget; tokens only.
+class BusySpinner : public QWidget {
+public:
+    explicit BusySpinner(QWidget *parent = nullptr) : QWidget(parent) {
+        setFixedSize(16, 16);
+        step_.setInterval(80);
+        connect(&step_, &QTimer::timeout, this, [this] {
+            phase_ = (phase_ + 1) % 8;
+            update();
+        });
+        hide();
+    }
+    void setBusy(bool busy) {
+        setVisible(busy);
+        if (busy) {
+            step_.start();
+        } else {
+            step_.stop();
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QPointF c(8.0, 8.0);
+        for (int i = 0; i < 8; ++i) {
+            const double a = (i - phase_) * M_PI / 4.0;
+            const QPointF dot = c + QPointF(std::cos(a), std::sin(a)) * 5.5;
+            p.setPen(Qt::NoPen);
+            p.setBrush(ui::withAlpha(ui::kText, 30 + ((i + phase_) % 8) * 28));
+            p.drawEllipse(dot, 1.4, 1.4);
+        }
+    }
+
+private:
+    QTimer step_;
+    int phase_ = 0;
+};
 
 namespace {
 
@@ -278,6 +322,9 @@ QString buildAppStylesheet(const QString &indicatorDir) {
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle(tr("FusionCut Pro"));
     resize(1280, 720);
+    // #129: the layout below 1024x640 collapses (docks under 200 px
+    // hide their content and the timeline drops under the tool row).
+    setMinimumSize(1024, 640);
     applyDarkTheme();
 
     buildDecodeThread();
@@ -285,6 +332,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildQuickWorkspace();
     buildMenus();
     buildStatusBar();
+    buildTray(); // #130: branded Windows tray icon (skipped when none)
     // Reset Workspace (#3) needs the pristine dock snapshot BEFORE any
     // user customization is restored on top of it.
     defaultWindowState_ = saveState();
@@ -333,7 +381,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                     tr("Audio device lost - playback continues on the system clock."), 8000);
             }
         }
+        // The transport, timecode and timeline playhead follow the CLOCK
+        // every tick. They used to ride decoded-frame arrivals, so any
+        // stretch without a frame (EOF tail, undecodable span, a slow
+        // source switch) froze the slider while the timecode kept running
+        // - "the slider does not move with the video". The frameReady
+        // handler still re-asserts the same values (scrubbing has no
+        // tick); both writers agree by construction.
+        timeline_->setPlayhead(playhead_);
+        transport_->setPosition(playhead_);
+        quickView_->setPosition(playhead_);
         if (playhead_ >= sequenceDuration_) {
+            // Loop playback (#193): wrap to the head and RE-ANCHOR the
+            // audio stream (the mixer pulls strictly forward - a wrap
+            // without a re-anchor would read the seconds AFTER the end).
+            if (loopPlayback_) {
+                playhead_ = 0.0;
+                startAudioPreview();
+                requestFrameAt(playhead_);
+                return;
+            }
             playhead_ = sequenceDuration_;
             requestFrameAt(playhead_);
             startPlayback(false);
@@ -353,6 +420,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(delKey, &QShortcut::activated, this, [this] { deleteSelectedClip(); });
     auto *backspace = new QShortcut(QKeySequence(Qt::Key_Backspace), this);
     connect(backspace, &QShortcut::activated, this, [this] { deleteSelectedClip(); });
+    // Alt+Left / Alt+Right (#180): nudge the SELECTED clip one frame;
+    // the plain arrows keep stepping the playhead.
+    auto *nudgeLeft = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_Left), this);
+    connect(nudgeLeft, &QShortcut::activated, this, [this] { timeline_->nudgeSelectedClip(-1); });
+    auto *nudgeRight = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_Right), this);
+    connect(nudgeRight, &QShortcut::activated, this, [this] { timeline_->nudgeSelectedClip(1); });
+    // , / . (#191): the alternate frame-step pair (Premiere muscle memory).
+    auto *stepComma = new QShortcut(QKeySequence(Qt::Key_Comma), this);
+    connect(stepComma, &QShortcut::activated, this, [this] { stepFrames(-1); });
+    auto *stepPeriod = new QShortcut(QKeySequence(Qt::Key_Period), this);
+    connect(stepPeriod, &QShortcut::activated, this, [this] { stepFrames(1); });
+    // Ctrl+1 / Ctrl+2 (#126): the mode switch from the keyboard.
+    auto *proKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_1), this);
+    connect(proKey, &QShortcut::activated, this, [this] { setMode(true); });
+    auto *quickKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_2), this);
+    connect(quickKey, &QShortcut::activated, this, [this] { setMode(false); });
 
     restoreLayout();
 
@@ -593,10 +676,13 @@ void MainWindow::buildDecodeThread() {
     connect(proxyWorker_, &DecodeWorker::proxyDone, this,
             [this](bool ok, const QString &errorOrPath) {
                 proxyRunning_ = false;
+                statusSpinner_->setBusy(false);
                 const int index = projectPanel_->library().indexOfPath(proxySourcePath_);
                 if (auto *item = projectPanel_->library().at(index)) {
                     if (ok) {
                         item->proxyPath = errorOrPath;
+                        Toast::showOn(this,
+                                      tr("Proxy ready: %1").arg(QFileInfo(errorOrPath).fileName()));
                         statusBar()->showMessage(tr("Proxy ready: %1").arg(errorOrPath), 8000);
                     } else {
                         statusBar()->showMessage(tr("Proxy failed: %1").arg(errorOrPath), 8000);
@@ -663,6 +749,7 @@ void MainWindow::buildProWorkspace() {
     auto *sourceTitle = new QLabel(tr("Source"), sourceGroup);
     sourceTitle->setAlignment(Qt::AlignCenter);
     sourceCanvas_ = new PreviewCanvas(sourceGroup);
+    sourceCanvas_->setLabel(tr("Source")); // #186 monitor label chip
     sourceLayout->addWidget(sourceTitle);
     sourceLayout->addWidget(sourceCanvas_, 1);
 
@@ -673,6 +760,7 @@ void MainWindow::buildProWorkspace() {
     auto *programTitle = new QLabel(tr("Program"), programGroup);
     programTitle->setAlignment(Qt::AlignCenter);
     programCanvas_ = new PreviewCanvas(programGroup);
+    programCanvas_->setLabel(tr("Program")); // #186 monitor label chip
     transport_ = new TransportBar(programGroup);
     programLayout->addWidget(programTitle);
     programLayout->addWidget(programCanvas_, 1);
@@ -905,19 +993,26 @@ void MainWindow::buildProWorkspace() {
                 markDirty();
                 statusBar()->showMessage(tr("Transition removed."), 4000);
             });
-    connect(timeline_, &TimelinePanel::splitRequested, this, [this](int trackIndex, int64_t frame) {
-        if (const fc::Track *track = model_.trackAt(trackIndex); track && track->locked) {
-            statusBar()->showMessage(tr("Track %1 is locked - unlock it (header L) to split.")
-                                         .arg(QString::fromStdString(track->name)));
-            return;
-        }
-        pushUndo();
-        if (model_.splitAt(frame, trackIndex)) {
-            updateSequenceDuration();
-        } else {
-            cancelUndoPush(); // nothing to split at that frame
-        }
-    });
+    connect(timeline_, qOverload<int, int64_t>(&TimelinePanel::splitRequested), this,
+            [this](int trackIndex, int64_t frame) {
+                if (const fc::Track *track = model_.trackAt(trackIndex); track && track->locked) {
+                    statusBar()->showMessage(
+                        tr("Track %1 is locked - unlock it (header L) to split.")
+                            .arg(QString::fromStdString(track->name)));
+                    return;
+                }
+                pushUndo();
+                if (model_.splitAt(frame, trackIndex)) {
+                    updateSequenceDuration();
+                } else {
+                    cancelUndoPush(); // nothing to split at that frame
+                }
+            });
+    // The timeline toolbar's split button (#182) shares the entry point
+    // with the Clip menu action; qOverload<> keeps the two signals of
+    // the same name resolvable at the connect sites.
+    connect(timeline_, qOverload<>(&TimelinePanel::splitRequested), this,
+            [this] { splitAtPlayhead(); });
     // ---- timeline editing wiring ----
     connect(timeline_, &TimelinePanel::clipMoveRequested, this,
             [this](int64_t clipId, int trackIndex, int64_t startFrame) {
@@ -983,6 +1078,34 @@ void MainWindow::buildQuickWorkspace() {
             statusBar()->showMessage(
                 tr("Template \"%1\" needs media - import files first").arg(templateId), 6000);
         }
+    });
+    // Round-3 Quick Mode tools (#139-#142): every tool routes through
+    // the SAME engine entry points the Pro menus use - no parallel logic.
+    connect(quickView_, &QuickModeView::textToolRequested, this, [this] {
+        ensureTextTrack();
+        addTextClip();
+        Toast::showOn(this, tr("Title added - edit it in the Text panel (Pro Mode)"));
+    });
+    connect(quickView_, &QuickModeView::audioToolRequested, this, [this] { importMedia(); });
+    connect(quickView_, &QuickModeView::captionsRequested, this, [this] { importCaptions(); });
+    connect(quickView_, &QuickModeView::workspaceToolRequested, this, [this](const QString &tool) {
+        // Honest affordance (#142): the full effect / transition /
+        // filter workspace lives in Pro Mode - switch and raise it.
+        setMode(true);
+        for (QDockWidget *dock : findChildren<QDockWidget *>()) {
+            if (dock->objectName() == tool) {
+                dock->show();
+                dock->raise();
+            }
+        }
+        Toast::showOn(this, tr("The %1 workspace lives in Pro Mode").arg(tool));
+    });
+    // Media strip (#136): a card tap is the library double-click flow -
+    // arm the add intent, the probe places the clip at the playhead.
+    connect(quickView_, &QuickModeView::mediaActivated, this, [this](const QString &path) {
+        pendingAddClipPath_ = path;
+        pendingAddToken_ = ++loadTokenCounter_;
+        loadClip(path, pendingAddToken_);
     });
 }
 
@@ -1103,6 +1226,12 @@ void MainWindow::buildMenus() {
             setDistractionFree(false);
         }
     });
+    // Loop playback (#193): the transport wraps to the head instead of
+    // stopping at the end (see the play-clock's end-of-sequence branch).
+    QAction *loopAction = addMenuAction(view, tr("&Loop Playback"));
+    loopAction->setCheckable(true);
+    loopAction->setChecked(loopPlayback_);
+    connect(loopAction, &QAction::toggled, this, [this](bool on) { loopPlayback_ = on; });
     view->addSeparator();
     // Workspace presets (#2): each preset raises the panel pair its
     // workflow lives in.
@@ -1149,30 +1278,90 @@ void MainWindow::buildMenus() {
     QMenu *help = menuBar()->addMenu(tr("&Help"));
     QAction *aboutAction = help->addAction(tr("&About FusionCut Pro"));
     connect(aboutAction, &QAction::triggered, this, [this] {
-        // #72/#109: the build/budget line lives here, not in the status bar.
+        // #72/#109: the build/budget line lives here, not in the status
+        // bar. #0-g: the Qt version is the REAL runtime version
+        // (qVersion()) - the dialog used to claim 5.15 regardless of
+        // what the binary was actually built against.
         QMessageBox::about(this, tr("About FusionCut Pro"),
-                           tr("<b>FusionCut Pro %1</b><br/>Dual-mode editor shell."
+                           tr("<img src=\":/brand/fusioncut-128.png\" width=\"64\" "
+                              "height=\"64\" align=\"left\">"
+                              "<b>FusionCut Pro %1</b><br/>Dual-mode editor shell."
                               "<br/><br/>Engine: %2"
-                              "<br/>1 GB RAM target \u00b7 Qt 5.15 \u00b7 FFmpeg \u00b7 Windows 7+"
+                              "<br/>1 GB RAM target \u00b7 Qt %3 \u00b7 FFmpeg \u00b7 Windows 7+"
                               "<br/>License: GPL-3.0-or-later"
                               "<br/><a href=\"https://github.com/marbou92/FusionCut-Pro\">"
-                              "github.com/marbou92/FusionCut-Pro</a>")
+                              "github.com/marbou92/FusionCut-Pro</a><clear>")
                                .arg(FC_VERSION_STRING)
-                               .arg(QString::fromStdString(ffmpegVersionInfo())));
+                               .arg(QString::fromStdString(ffmpegVersionInfo()))
+                               .arg(QString::fromLatin1(qVersion())));
     });
 }
 
 void MainWindow::buildStatusBar() {
     statusBar()->showMessage(tr("Pro Mode - import media to begin (Ctrl+I)"));
-    // Permanent readouts (#6): sequence summary + dirty/saved dot. The
-    // build/budget line moved to Help > About (round-22 #72).
+    // Permanent readouts (#6): version (#123), sequence summary, dirty/
+    // saved dot, and the round-3 busy spinner (#198). The build/budget
+    // line moved to Help > About (round-22 #72).
+    statusVersion_ = new QLabel(tr("v%1").arg(QLatin1String(FC_VERSION_STRING)), this);
+    statusVersion_->setObjectName(QStringLiteral("fcStatusDim"));
+    statusSpinner_ = new BusySpinner(this);
     statusResolution_ = new QLabel(this);
     statusResolution_->setToolTip(tr("Program frame size and sequence frame rate"));
     statusDirty_ = new QLabel(this);
     statusDirty_->setToolTip(tr("Project has unsaved changes"));
     statusDirty_->setText(tr("\u25CB"));
+    statusBar()->addPermanentWidget(statusVersion_);
+    statusBar()->addPermanentWidget(statusSpinner_);
     statusBar()->addPermanentWidget(statusResolution_);
     statusBar()->addPermanentWidget(statusDirty_);
+}
+
+// Windows 7 tray (#130): the branded icon replaces the default
+// generic-application one. A tray is optional hardware - when the
+// machine has none, nothing is created and nothing changes.
+void MainWindow::buildTray() {
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        return;
+    }
+    QIcon brand(":/brand/fusioncut-32.png");
+    if (brand.isNull()) {
+        return;
+    }
+    tray_ = new QSystemTrayIcon(brand, this);
+    tray_->setToolTip(tr("FusionCut Pro"));
+    QMenu *menu = new QMenu(this);
+    QAction *toggle = menu->addAction(tr("Show / Hide Window"));
+    connect(toggle, &QAction::triggered, this, [this] { setVisible(!isVisible()); });
+    QAction *importTray = menu->addAction(tr("Import Media..."));
+    connect(importTray, &QAction::triggered, this, [this] {
+        setVisible(true);
+        importMedia();
+    });
+    menu->addSeparator();
+    QAction *exit = menu->addAction(tr("Exit FusionCut Pro"));
+    connect(exit, &QAction::triggered, this, &QMainWindow::close);
+    tray_->setContextMenu(menu);
+    connect(tray_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason r) {
+        if (r == QSystemTrayIcon::DoubleClick || r == QSystemTrayIcon::Trigger) {
+            setVisible(!isVisible());
+        }
+    });
+    tray_->show();
+}
+
+// Quick Mode media strip (#136): the strip mirrors the library, so it
+// is re-fed from the library after every mutation of it.
+void MainWindow::refreshQuickStrip() {
+    if (!quickView_) {
+        return;
+    }
+    QStringList names;
+    QStringList paths;
+    for (const fc::MediaItem *item : projectPanel_->library().items()) {
+        names << item->displayName;
+        paths << item->path;
+    }
+    quickView_->setMediaItems(names, paths);
 }
 
 void MainWindow::setMode(bool pro) {
@@ -1280,7 +1469,82 @@ void MainWindow::importFiles(const QStringList &files) {
             rebuildAudioSnapshot();
             continue;
         }
-        if (first) {
+        if (hasVideo) {
+            // VIDEO IMPORT PLACES CLIPS: File > Import and the Quick-mode
+            // drop used to only LOAD the file into the monitor - the token
+            // gate inside loadClip dropped the add intent, mediaInfo never
+            // placed anything, and the timeline stayed empty (which also
+            // silenced preview audio: no clips, no spans). The probe
+            // already knows the extent, so place the clip DIRECTLY from
+            // that data - full length, appended at the sequence end - and
+            // use the decoder round trip only for the monitor picture.
+            const bool hadVideoTrack =
+                std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                            [](const fc::Track &t) { return !t.isAudio && !t.isText; });
+            const bool hadAudioTrack = std::any_of(model_.tracks().begin(), model_.tracks().end(),
+                                                   [](const fc::Track &t) { return t.isAudio; });
+            int64_t sourceOut = 0;
+            if (probed && info.durationSeconds() > 0.0) {
+                sourceOut = static_cast<int64_t>(std::llround(info.durationSeconds() * fps_));
+            }
+            if (sourceOut <= 0) {
+                // Unknown extent (duration-less containers): only the
+                // decoder can size the clip, so arm the add intent for the
+                // FIRST file of the batch; later files report instead of
+                // silently hi-jacking the monitor mid-import.
+                if (first) {
+                    pendingAddClipPath_ = file;
+                    pendingAddToken_ = ++loadTokenCounter_;
+                    loadClip(file, pendingAddToken_);
+                    first = false;
+                } else {
+                    statusBar()->showMessage(
+                        tr("Could not size %1 - double-click it in the library to place it.")
+                            .arg(item.displayName),
+                        8000);
+                }
+            } else {
+                startPlayback(false);
+                // One undo entry covers the video clip, the audio rider,
+                // and any lazily created lane; a fully rejected placement
+                // pops it again.
+                pushUndo();
+                const int videoTrack = firstVideoTrack();
+                const int64_t start =
+                    static_cast<int64_t>(std::llround(model_.durationSeconds() * fps_));
+                const QString label = QFileInfo(file).completeBaseName();
+                bool placedAny = model_.addClip(videoTrack, file.toStdString(), label.toStdString(),
+                                                0, sourceOut, start) > 0;
+                if (hasAudio) {
+                    const int audioTrack = ensureAudioTrack();
+                    if (model_.addClip(audioTrack, file.toStdString(), label.toStdString(), 0,
+                                       sourceOut, start) > 0) {
+                        placedAny = true;
+                    }
+                }
+                if (placedAny) {
+                    statusBar()->showMessage(
+                        tr("Imported %1 - clips placed on the timeline.").arg(item.displayName),
+                        8000);
+                } else if (hadVideoTrack && (!hasAudio || hadAudioTrack)) {
+                    cancelUndoPush(); // nothing changed at any level
+                }
+                updateSequenceDuration();
+                timeline_->setModel(&model_);
+                timeline_->update();
+                markDirty();
+                rebuildAudioSnapshot();
+                // The first video file still loads into the monitor so the
+                // user sees what arrived - deliberately WITHOUT an add
+                // intent (the clip is already placed above).
+                if (first) {
+                    loadClip(file);
+                    first = false;
+                }
+            }
+        } else if (first) {
+            // No probe video and not audio-only (unknown/unsupported
+            // media): monitor-only, exactly as before.
             loadClip(file);
             first = false;
         }
@@ -1289,6 +1553,7 @@ void MainWindow::importFiles(const QStringList &files) {
     // successful import promotes the rail to the Arrange step.
     if (added > 0) {
         quickView_->setStep(1);
+        refreshQuickStrip(); // #136: the strip mirrors the library
     }
     projectPanel_->showImportFeedback(added, skipped);
 }
@@ -1349,6 +1614,9 @@ void MainWindow::addPendingClip(const QString &sourcePath, int64_t sourceOutFram
     }
     if (!placedAny && hadVideoTrack && (!withAudio || hadAudioTrack)) {
         cancelUndoPush(); // nothing changed at any level
+        // Overlap rejections were silent before - from the outside that
+        // is indistinguishable from "the timeline refuses to show clips".
+        statusBar()->showMessage(tr("No room at the playhead - the clip was not placed."), 8000);
     }
     updateSequenceDuration();
     rebuildAudioSnapshot();
@@ -1394,7 +1662,8 @@ void MainWindow::deleteSelectedClip() {
     if (!(timeline_ && timeline_->isRippleEnabled() && model_.rippleDelete(selectedClipId_))) {
         model_.removeClip(selectedClipId_);
     }
-    forgetTextLayer(selectedClipId_); // stale layers never resurrect
+    Toast::showOn(this, tr("Clip deleted - Ctrl+Z to undo")); // #199
+    forgetTextLayer(selectedClipId_);                         // stale layers never resurrect
     selectedClipId_ = -1;
     lastProgramClipId_ = -1;
     timeline_->clearSelection();
@@ -1599,10 +1868,13 @@ void MainWindow::updateSequenceDuration() {
     sequenceDuration_ = dur; // the extent playback + stepping follow
     timeline_->setSequenceDuration(dur);
     // The transport drives the PROGRAM (the timeline sequence); once
-    // clips exist the sequence extent replaces the media duration.
-    if (seq > 0.0) {
-        transport_->setMedia(dur, fps_);
-    }
+    // clips exist the sequence extent replaces the media duration. The
+    // setMedia is UNCONDITIONAL now: a transport left at duration 0
+    // pinned its slider to 0 in setPosition forever - the visible half
+    // of "the slider does not move with the video". The same fallback
+    // extent `dur` (sequence, else media, else 10 s) is what playback
+    // follows, so the slider range always matches the playhead's world.
+    transport_->setMedia(dur, fps_);
     // Quick Mode's transport spans the same extent; a duration > 0 is
     // what enables its scrub slider (the 10 s placeholder must not).
     quickView_->setMedia(seq > 0.0 || duration_ > 0.0 ? dur : 0.0, fps_);
@@ -1626,6 +1898,9 @@ void MainWindow::generateProxy(const QString &sourcePath) {
         return;
     }
     proxyRunning_ = true;
+    if (statusSpinner_) {
+        statusSpinner_->setBusy(true);
+    }
     proxySourcePath_ = sourcePath;
     statusBar()->showMessage(tr("Proxy job queued: %1").arg(QFileInfo(sourcePath).fileName()));
     QMetaObject::invokeMethod(proxyWorker_, "runProxyJob", Q_ARG(QString, sourcePath),
@@ -2184,6 +2459,12 @@ void MainWindow::startAudioPreview() {
     }
     int rate = 0, channels = 0;
     if (!audioPreview_->probe(rate, channels)) {
+        // Silence with zero feedback read as a broken app. Say why, once.
+        if (!audioUnavailableWarned_) {
+            audioUnavailableWarned_ = true;
+            statusBar()->showMessage(tr("Audio preview unavailable - no usable output device."),
+                                     8000);
+        }
         return; // no usable audio output on this machine
     }
     previewMixer_ = std::make_unique<fc::AudioWindowMixer>(rate, channels);
@@ -2799,6 +3080,7 @@ void MainWindow::openProject() {
             item.proxyPath = proxy;
         }
         projectPanel_->addMedia(item);
+        refreshQuickStrip(); // the Quick-mode strip mirrors the library
     }
 
     duration_ = model_.durationSeconds();
@@ -3275,12 +3557,16 @@ void MainWindow::finishExport(bool ok, const QString &error, const QString &path
     // would not decode mixed as silence instead of killing the job) -
     // it arrives captured in the queued call, not through shared state.
     exportRunning_ = false;
+    if (statusSpinner_) {
+        statusSpinner_->setBusy(false);
+    }
     if (exportDialog_) {
         exportDialog_->deleteLater();
         exportDialog_ = nullptr;
         exportBar_ = nullptr;
     }
     if (ok) {
+        Toast::showOn(this, tr("Export complete"));
         if (!audioNote.isEmpty()) {
             statusBar()->showMessage(
                 tr("Export complete: %1 (audio note: %2)").arg(path, audioNote), 12000);
@@ -3380,7 +3666,8 @@ void MainWindow::setDistractionFree(bool on) {
 // Keyboard map (#58): every binding in one place.
 void MainWindow::showKeyboardMap() {
     const QString keys = tr("Space - Play / Pause\n"
-                            "Left / Right - Step one frame\n"
+                            "Left / Right or , / . - Step one frame\n"
+                            "Alt+Left / Alt+Right - Nudge selected clip one frame\n"
                             "C - Split at Playhead\n"
                             "Delete / Backspace - Delete selected clip\n"
                             "Ctrl+I - Import Media\n"

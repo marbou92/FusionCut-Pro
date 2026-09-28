@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <QComboBox>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -195,6 +196,7 @@ void PreviewCanvas::paintEvent(QPaintEvent *) {
     if (current_.isNull()) {
         painter.setPen(ui::color(ui::kTextDisabled));
         painter.drawText(rect(), Qt::AlignCenter, tr("No media loaded\nImport a file to begin"));
+        drawLabelChip(painter);
         return;
     }
 
@@ -235,6 +237,38 @@ void PreviewCanvas::paintEvent(QPaintEvent *) {
     if (guidesVisible_) {
         drawGuides(painter, QRect(x, y, drawW, drawH));
     }
+    drawLabelChip(painter);
+}
+
+void PreviewCanvas::setLabel(const QString &text) {
+    if (label_ == text) {
+        return;
+    }
+    label_ = text;
+    update();
+}
+
+// #186: the "Source" / "Program" chip, painted LAST so it sits over the
+// frame and the guides. Same export-safety argument as #21: this is a
+// widget-only overlay - the core pipeline never sees it.
+void PreviewCanvas::drawLabelChip(QPainter &painter) const {
+    if (label_.isEmpty()) {
+        return;
+    }
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QFont chip = font();
+    chip.setPointSizeF(std::max(7.0, font().pointSizeF() * 0.85));
+    painter.setFont(chip);
+    const QFontMetrics metrics(chip);
+    const int textW = metrics.horizontalAdvance(label_);
+    const QRect chipRect(8, 8, textW + 14, 18);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(ui::withAlpha(ui::kCanvas, 170));
+    painter.drawRoundedRect(chipRect, 4, 4);
+    painter.setPen(ui::withAlpha(ui::kText, 200));
+    painter.drawText(chipRect, Qt::AlignCenter, label_);
+    painter.restore();
 }
 
 void PreviewCanvas::drawGuides(QPainter &painter, const QRect &frameRect) const {

@@ -62,7 +62,13 @@ struct AudioPreview::Impl {
 
     int rate = 0;
     int channels = 0;
-    bool isFloat = true;
+    // The negotiated device sample type. Shared-mode mix formats are
+    // float32 in practice, but int16 and int32 devices exist (and a
+    // wrong guess here either whispers garbage or hands the device raw
+    // float bits as integers - the old "32 bits = float" shortcut did
+    // exactly that on int32 mix formats).
+    enum class DeviceFormat { Float32, Int16, Int32 };
+    DeviceFormat outFormat = DeviceFormat::Float32;
 
     // ---- shared state ----
     std::thread thread;
@@ -119,18 +125,54 @@ struct AudioPreview::Impl {
 namespace {
 
 // Parses the negotiated mix format into the geometry the mixer needs.
-void parseMixFormat(const WAVEFORMATEX *fmt, int &rate, int &ch, bool &isFloat) {
+// Returns false for sample types the render path cannot feed.
+bool parseMixFormat(const WAVEFORMATEX *fmt, int &rate, int &ch,
+                    AudioPreview::Impl::DeviceFormat &outFormat) {
     rate = fmt->nSamplesPerSec;
     ch = fmt->nChannels;
-    isFloat = false;
+    outFormat = AudioPreview::Impl::DeviceFormat::Float32;
     if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        isFloat = fmt->wBitsPerSample == 32;
-    } else if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->cbSize >= 22) {
+        outFormat = fmt->wBitsPerSample == 32 ? AudioPreview::Impl::DeviceFormat::Float32
+                                              : AudioPreview::Impl::DeviceFormat::Int16;
+        return fmt->wBitsPerSample == 32;
+    }
+    if (fmt->wFormatTag == WAVE_FORMAT_PCM) {
+        if (fmt->wBitsPerSample == 16) {
+            outFormat = AudioPreview::Impl::DeviceFormat::Int16;
+            return true;
+        }
+        if (fmt->wBitsPerSample == 32) {
+            outFormat = AudioPreview::Impl::DeviceFormat::Int32;
+            return true;
+        }
+        return false;
+    }
+    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->cbSize >= 22) {
         const WAVEFORMATEXTENSIBLE *ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(fmt);
         // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {00000003-0000-0010-8000-00aa00389b71}
-        isFloat = ext->SubFormat.Data1 == 3 && ext->SubFormat.Data2 == 0 &&
-                  ext->SubFormat.Data3 == 0x0010 && ext->Samples.wValidBitsPerSample == 32;
+        const bool isFloatSub =
+            ext->SubFormat.Data1 == 3 && ext->SubFormat.Data2 == 0 &&
+            ext->SubFormat.Data3 == 0x0010 && ext->SubFormat.Data4[0] == 0x80 &&
+            ext->SubFormat.Data4[1] == 0x00 && ext->SubFormat.Data4[2] == 0xaa &&
+            ext->SubFormat.Data4[3] == 0x00 && ext->SubFormat.Data4[4] == 0x38 &&
+            ext->SubFormat.Data4[5] == 0x9b && ext->SubFormat.Data4[6] == 0x71;
+        // KSDATAFORMAT_SUBTYPE_PCM {00000001-0000-0010-8000-00aa00389b71}
+        const bool isPcmSub = ext->SubFormat.Data1 == 1 && ext->SubFormat.Data2 == 0 &&
+                              ext->SubFormat.Data3 == 0x0010;
+        if (isFloatSub && ext->Samples.wValidBitsPerSample == 32) {
+            outFormat = AudioPreview::Impl::DeviceFormat::Float32;
+            return true;
+        }
+        if (isPcmSub && ext->Samples.wValidBitsPerSample == 16 && fmt->wBitsPerSample == 16) {
+            outFormat = AudioPreview::Impl::DeviceFormat::Int16;
+            return true;
+        }
+        if (isPcmSub && ext->Samples.wValidBitsPerSample == 32 && fmt->wBitsPerSample == 32) {
+            outFormat = AudioPreview::Impl::DeviceFormat::Int32;
+            return true;
+        }
     }
+    return false;
 }
 
 } // namespace
@@ -211,13 +253,14 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
 
         {
             int rate = 0, ch = 0;
-            bool isFloat = false;
-            parseMixFormat(format, rate, ch, isFloat);
-            // Only 1/2-channel float or int16 mix formats can be fed
-            // (the mixer produces interleaved float; int16 converts on
-            // write). Anything else: refuse audio preview, keep the app
-            // silent-but-working.
-            const bool geometryOk = rate >= 8000 && rate <= 192000 && (ch == 1 || ch == 2);
+            AudioPreview::Impl::DeviceFormat fmt = AudioPreview::Impl::DeviceFormat::Float32;
+            const bool typeKnown = parseMixFormat(format, rate, ch, fmt);
+            // Only 1/2-channel float or int16/int32 mix formats can be
+            // fed (the mixer produces interleaved float; int formats
+            // convert on write). Anything else: refuse audio preview,
+            // keep the app silent-but-working.
+            const bool geometryOk =
+                typeKnown && rate >= 8000 && rate <= 192000 && (ch == 1 || ch == 2);
             if (!geometryOk) {
                 impl_->closeAll();
                 std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -227,16 +270,17 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
             }
             impl_->rate = rate;
             impl_->channels = ch;
-            impl_->isFloat = isFloat || format->wBitsPerSample == 32;
+            impl_->outFormat = fmt;
         }
 
-        // Event-driven shared mode: a modest buffer (twice the device
-        // period) keeps latency in the tens of milliseconds.
-        REFERENCE_TIME period = 0, minPeriod = 0;
-        if (FAILED(client->GetDevicePeriod(&period, &minPeriod)) || period <= 0) {
-            period = 100000; // 10 ms default
-        }
-        const REFERENCE_TIME bufferDuration = period * 2;
+        // Event-driven shared mode. Per the WASAPI contract the buffer
+        // duration MUST be 0 for shared + EVENTCALLBACK streams: the
+        // engine picks its own buffer and GetBufferSize below reports
+        // it. Windows 10 tolerates a nonzero hint; Windows 7 - the
+        // target platform - can fail Initialize outright or accept it
+        // and then never signal the event, which starved the render
+        // loop into 200 ms WAIT_TIMEOUT chunks (chopped, lagging, and
+        // on some drivers dead-silent audio).
         impl_->streamEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         impl_->controlEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (!impl_->streamEvent || !impl_->controlEvent) {
@@ -246,9 +290,8 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
             impl_->ready.notify_all();
             return;
         }
-        const HRESULT initRc =
-            client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                               bufferDuration, 0, format, nullptr);
+        const HRESULT initRc = client->Initialize(
+            AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, format, nullptr);
         if (FAILED(initRc) || FAILED(client->SetEventHandle(impl_->streamEvent)) ||
             FAILED(client->GetBufferSize(&impl_->bufferFrames)) ||
             FAILED(client->GetService(__uuidof(IAudioRenderClient),
@@ -332,14 +375,23 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                 failed_ = true; // the render pipeline is wedged: no submission, frozen clock
                 continue;
             }
-            if (impl_->isFloat) {
+            if (impl_->outFormat == AudioPreview::Impl::DeviceFormat::Float32) {
                 std::memcpy(dst, scratch.data(), size_t(frames) * ch * sizeof(float));
-            } else {
+            } else if (impl_->outFormat == AudioPreview::Impl::DeviceFormat::Int16) {
                 // int16 device (rare in shared mode): convert + clamp.
                 int16_t *out = reinterpret_cast<int16_t *>(dst);
                 for (size_t i = 0; i < scratch.size(); ++i) {
                     const double v = std::clamp(double(scratch[i]), -1.0, 1.0);
                     out[i] = int16_t(std::lrint(v * 32767.0));
+                }
+            } else {
+                // int32 device: same clamp, wider target (the old code
+                // guessed "32 bits = float" and pasted raw float bits
+                // into the int32 buffer - full-scale white noise).
+                int32_t *out = reinterpret_cast<int32_t *>(dst);
+                for (size_t i = 0; i < scratch.size(); ++i) {
+                    const double v = std::clamp(double(scratch[i]), -1.0, 1.0);
+                    out[i] = int32_t(std::llrint(v * 2147483647.0));
                 }
             }
             if (FAILED(impl_->render->ReleaseBuffer(frames, 0))) {

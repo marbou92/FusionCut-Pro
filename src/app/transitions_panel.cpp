@@ -16,6 +16,7 @@
 #include "catalog_tree.h"
 #include "transitions.h"
 #include "ui_theme.h"
+#include "ui_widgets.h"
 
 // ui_theme.h tokens live in fc::ui; the panel addresses them as ui::...
 using namespace fc;
@@ -29,8 +30,10 @@ constexpr int kTransitionIdRole = Qt::UserRole;
 
 // Schematic preview card (suggestion #36): paints the currently hovered
 // / selected transition kind as a two-rect A|B composite at the live
-// flipbook progress. No Q_OBJECT needed - the panel drives it purely
-// through setProgress()/setKind(); styles come from ui_theme tokens.
+// flipbook progress, rounded to the 8px tile radius (#155's corner
+// language - the A/B colors stay semantic: warm outgoing, accent
+// incoming). No Q_OBJECT needed - the panel drives it purely through
+// setProgress()/setKind(); styles come from ui_theme tokens.
 // Defined at GLOBAL scope ON PURPOSE: transitions_panel.h forward-
 // declares this class at global scope for the preview_ member, and an
 // anonymous-namespace definition here would be a DIFFERENT, unrelated
@@ -61,11 +64,18 @@ protected:
         if (band.width() < 8 || band.height() < 8) {
             return;
         }
-        // Two schematic "clips": A (outgoing, warm) and B (incoming,
-        // accent) composed per kind at the live progress.
+        // Rounded 8px tile (kRadiusControl) holding the two schematic
+        // "clips": A (outgoing, warm) and B (incoming, accent) composed
+        // per kind at the live progress.
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const qreal radius = ui::kRadiusControl;
+        QPainterPath tile;
+        tile.addRoundedRect(QRectF(band), radius, radius);
         const QColor a = ui::mix(ui::color(ui::kSurface3), ui::color(ui::kWarning), 0.35);
         const QColor b = ui::color(ui::kAccent);
         const double p = progress_;
+        painter.save();
+        painter.setClipPath(tile);
         if (kind_.startsWith(QLatin1String("wipe"))) {
             const int split = band.left() + static_cast<int>(band.width() * p);
             painter.fillRect(QRect(band.left(), band.top(), split - band.left(), band.height()), a);
@@ -88,8 +98,9 @@ protected:
             painter.fillRect(band, b);
             painter.setOpacity(1.0);
         }
+        painter.restore();
         painter.setPen(ui::color(ui::kLine));
-        painter.drawRect(band);
+        painter.drawPath(tile);
     }
 
 private:
@@ -107,7 +118,9 @@ TransitionsPanel::TransitionsPanel(QWidget *parent) : QWidget(parent) {
     preview_ = new TransitionPreviewCard(this);
     previewLabel_ = new QLabel(tr("Hover a transition to preview it"), this);
     previewLabel_->setAlignment(Qt::AlignCenter);
-    previewLabel_->setStyleSheet(QStringLiteral("color:%1;").arg(ui::color(ui::kTextDim).name()));
+    // #155: the card's caption reads as an 11px kTextDim annotation.
+    previewLabel_->setStyleSheet(
+        QStringLiteral("font-size:11px;color:%1;").arg(ui::color(ui::kTextDim).name()));
 
     tree_ = new QTreeWidget(this);
     tree_->setHeaderLabel(tr("Transitions"));
@@ -116,16 +129,22 @@ TransitionsPanel::TransitionsPanel(QWidget *parent) : QWidget(parent) {
     tree_->viewport()->setAttribute(Qt::WA_Hover, true);
     tree_->viewport()->installEventFilter(this);
     tree_->setAccessibleName(tr("Transitions catalog"));
-    // Suggestion #61: the "no matches" hint lives inside the viewport.
-    // Created BEFORE rebuildTree() below: rebuildTree unconditionally
-    // updates the hint (it must exist even to stay hidden) - constructing
-    // it after the call made the ctor dereference a null QLabel (the
-    // next startup crash behind the 20260919 QTimer one).
-    treeHint_ = new QLabel(this);
-    treeHint_->setAlignment(Qt::AlignCenter);
-    treeHint_->setWordWrap(true);
-    treeHint_->setStyleSheet(QStringLiteral("color:%1;").arg(ui::color(ui::kTextDim).name()));
-    treeHint_->hide();
+    // #155: the catalog is a plain tree with no delegate, so the honest
+    // card conversion is the row fallback - 44px card-rows (kCard tile,
+    // 1px kLine, 8px radius, accent selection) via the shared sheet.
+    styleCatalogTree(tree_, 44, true);
+    // Empty-state overlay (#165, same pattern as Effect Controls): owns
+    // the "no matches" message inside the viewport. Created BEFORE
+    // rebuildTree() below: rebuildTree unconditionally updates the
+    // overlay (it must exist even to stay hidden) - constructing it
+    // after the call made the ctor dereference a null widget (the next
+    // startup crash behind the 20260919 QTimer one).
+    emptyState_ = new fc::EmptyState(tree_->viewport());
+    emptyState_->setObjectName(QStringLiteral("fcEmptyOverlay"));
+    emptyState_->setAttribute(Qt::WA_StyledBackground, true);
+    emptyState_->setStyleSheet(QStringLiteral("QWidget#fcEmptyOverlay { background: %1; }")
+                                   .arg(ui::color(ui::kSurface2).name()));
+    emptyState_->hide();
     rebuildTree(QString());
 
     flipTimer_ = new QTimer(this);
@@ -139,14 +158,42 @@ TransitionsPanel::TransitionsPanel(QWidget *parent) : QWidget(parent) {
         preview_->setProgress(flipProgress_);
     });
 
+    // Panel header (#166): 40px row - 16px glyph in kTextDim + 13px
+    // semibold title in kText + the catalog count caption.
+    const qreal dpr = devicePixelRatioF();
+    auto *header = new QWidget(this);
+    header->setFixedHeight(40);
+    auto *headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(8);
+    auto *headerGlyph = new QLabel(header);
+    headerGlyph->setPixmap(icons::makeIcon("transitions", ui::color(ui::kTextDim), 16, dpr)
+                               .pixmap(qRound(16 * dpr), qRound(16 * dpr)));
+    auto *headerTitle = new QLabel(tr("Transitions"), header);
+    headerTitle->setStyleSheet(QStringLiteral("font-size:13px;font-weight:600;color:%1;")
+                                   .arg(ui::color(ui::kText).name()));
+    auto *headerCount = new QLabel(header);
+    headerCount->setStyleSheet(
+        QStringLiteral("font-size:11px;color:%1;").arg(ui::color(ui::kTextDim).name()));
+    headerCount->setText(
+        tr("%1 transitions").arg(static_cast<int>(fc::transitionCatalog().size())));
+    headerLayout->addWidget(headerGlyph);
+    headerLayout->addWidget(headerTitle);
+    headerLayout->addStretch(1);
+    headerLayout->addWidget(headerCount);
+
     auto *apply = new QPushButton(tr("Apply to Selected Clip's Cut"), this);
     apply->setToolTip(tr("Adds the transition to the cut after the clip selected in "
                          "the timeline (or double-click a transition)"));
     apply->setAccessibleName(apply->text());
+    // The panel's ONE accent action (#166): applying a transition is the
+    // primary action; everything else stays neutral.
+    apply->setProperty("fcAccent", true);
 
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(6, 6, 6, 6);
-    layout->setSpacing(6);
+    layout->setContentsMargins(12, 12, 12, 12); // 12px rhythm (#164)
+    layout->setSpacing(8);
+    layout->addWidget(header);
     layout->addWidget(search_);
     layout->addWidget(preview_);
     layout->addWidget(previewLabel_);
@@ -233,9 +280,18 @@ void TransitionsPanel::rebuildTree(const QString &filter) {
                 .arg(row.label, row.id);
         },
         {}, {}, &leafCount);
-    // Empty-state hint (#61): the filter emptied the catalog.
-    treeHint_->setText(tr("No transitions match \"%1\"").arg(filter));
-    treeHint_->setGeometry(tree_->viewport()->rect().adjusted(8, 8, -8, -8));
-    treeHint_->raise();
-    treeHint_->setVisible(leafCount == 0);
+    // Empty state (#165): the filter emptied the catalog - the overlay
+    // owns the message (search glyph + title + hint).
+    if (leafCount == 0) {
+        const qreal dpr = devicePixelRatioF();
+        emptyState_->setIcon(icons::makeIcon("search", ui::color(ui::kTextDisabled), 36, dpr), 36,
+                             dpr);
+        emptyState_->setTitle(tr("No matches"));
+        emptyState_->setHint(tr("No transitions match \"%1\"").arg(filter));
+        emptyState_->setGeometry(emptyState_->parentWidget()->rect());
+        emptyState_->raise();
+        emptyState_->refresh(true);
+    } else {
+        emptyState_->refresh(false);
+    }
 }

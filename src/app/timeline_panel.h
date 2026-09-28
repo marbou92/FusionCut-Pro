@@ -23,8 +23,9 @@ class SegmentedControl;
 // full mouse editing - drag-move clips with a magnetic-snap ghost
 // (model findDropPosition), edge-drag trim (start/end), Alt+edge-drag
 // rolling boundary edits, header L/M/S click toggling, a Select/Blade
-// segmented tool row + a separate Ripple toggle, razor hover preview
-// line, and visual dimming for locked / muted / non-solo tracks.
+// segmented tool row + a separate Ripple toggle + a Split-at-playhead
+// action button (#182), razor hover preview line, clip hover feedback
+// (#200), and visual dimming for locked / muted / non-solo tracks.
 //
 // horizontal scrolling: the lane content is drawn in CONTENT
 // coordinates and shifted by one scrollX_ offset under a clip rect
@@ -34,9 +35,9 @@ class SegmentedControl;
 //
 // vertical scrolling (#12): the same scheme runs vertically - scrollY_
 // shifts every lane row (and the header cells) while the ruler row and
-// the header column stay frozen. The wheel routes VERTICALLY when the
-// track stack overflows the lanes viewport and horizontally otherwise.
-// Ctrl+wheel zooms around the cursor (#10), playback follows the
+// the header column stay frozen. #184: the wheel (over the ruler band
+// too) scrolls the timeline horizontally and Shift+wheel scrolls the
+// track stack vertically. Ctrl+wheel zooms around the cursor (#10), playback follows the
 // playhead (#11), drags auto-page at the viewport edges, and the panel
 // carries a minimumSizeHint so the bottom dock can no longer shrink it
 // below two usable track rows.
@@ -55,6 +56,15 @@ public:
     // ripple edit toggle - when on, MainWindow routes delete /
     // end-trim through the model ripple variants (gaps close).
     bool isRippleEnabled() const { return rippleEnabled_; }
+
+    // #180: nudge the selected clip by `frames` timeline frames when
+    // the destination is free (MainWindow wires Alt+Left/Right). The
+    // move reuses the drag commit path: model findDropPosition must
+    // land EXACTLY on the desired frame, then clipMoveRequested emits
+    // so MainWindow's validation / undo / audio refresh stay the one
+    // and only edit path. No-op without a selection, on a locked lane,
+    // or when the spot is occupied.
+    void nudgeSelectedClip(int64_t frames);
 
     // #12: the panel never shrinks below the tool row + ruler + two
     // track rows + the scroll/zoom chrome. QDockWidget honors the
@@ -88,6 +98,13 @@ signals:
     // it to the transition editor in Effect Controls.
     void transitionSelected(int64_t transitionId);
     void splitRequested(int trackIndex, int64_t frame);
+    // #182: the toolbar split button carries no lane context -
+    // MainWindow routes it to splitAtPlayhead() (the selected clip's
+    // lane, else the first video lane). OVERLOAD NOTE: with both
+    // signals declared, a pointer-to-member connect of the razor-click
+    // signal must disambiguate via
+    // qOverload<int, int64_t>(&TimelinePanel::splitRequested).
+    void splitRequested();
     void deleteRequested();
     // :
     // Ghost-resolved drop: startFrame comes from findDropPosition
@@ -237,6 +254,7 @@ private:
     int scrollY_ = 0; // vertical scroll offset (px past the first lane's top)
     int64_t selectedClipId_ = -1;
     int64_t selectedTransitionId_ = -1;
+    int64_t hoveredClipId_ = -1; // #200: clip under the mouse (hover paint)
     bool razorMode_ = false;
     bool rippleEnabled_ = false;
     bool followPlayhead_ = true;  // #11: playback auto-follow is armed
@@ -275,4 +293,5 @@ private:
 
     fc::SegmentedControl *toolSegment_ = nullptr; // #86: Select / Blade
     QToolButton *rippleTool_ = nullptr;
+    QToolButton *splitTool_ = nullptr; // #182: split-at-playhead action button
 };

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QCache>
 #include <QColor>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
@@ -50,6 +51,21 @@ namespace icons {
 // back to a small circle so a missing glyph is visible, not silent.
 inline QIcon makeIcon(const QString &name, const QColor &color, int logicalSize = 20,
                       qreal dpr = 1.0) {
+    // #208: a glyph is deterministic in (name, color, size, DPR), so the
+    // rendered pixmap is cached - re-styling sweeps and repeated builds
+    // of toolbars/panels never re-render the same stroke path. GUI-thread
+    // only (a UI helper), so the plain QCache needs no mutex; 512 slots
+    // cover every (name, color, size, DPR) tuple the app can ask for.
+    static QCache<QString, QPixmap> cache;
+    static const bool cacheReady = (cache.setMaxCost(512), true);
+    Q_UNUSED(cacheReady);
+    const QString key = QStringLiteral("%1|%2|%3|%4")
+                            .arg(name, color.name(QColor::HexArgb))
+                            .arg(logicalSize)
+                            .arg(dpr, 0, 'f', 2);
+    if (QPixmap *const hit = cache.object(key)) {
+        return QIcon(*hit);
+    }
     const int px = qMax(1, qRound(logicalSize * dpr));
     QPixmap pm(px, px);
     pm.setDevicePixelRatio(dpr == 0 ? 1.0 : dpr);
@@ -297,6 +313,7 @@ inline QIcon makeIcon(const QString &name, const QColor &color, int logicalSize 
     } else {
         p.drawEllipse(QRectF(8, 8, 8, 8)); // unknown glyph: visible dot
     }
+    cache.insert(key, new QPixmap(pm));
     return QIcon(pm);
 }
 

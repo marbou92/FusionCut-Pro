@@ -10,6 +10,10 @@ class QTimer;
 class QTreeWidget;
 class TransitionPreviewCard;
 
+namespace fc {
+class EmptyState;
+} // namespace fc
+
 // Pro Mode left panel : the transitions catalog browser.
 // Mirrors EffectsPanel: a search box filters the catalog by label / id /
 // category; double-click or the Apply button requests the transition on
@@ -38,7 +42,7 @@ private:
     QTreeWidget *tree_ = nullptr;
     TransitionPreviewCard *preview_ = nullptr;
     QLabel *previewLabel_ = nullptr;
-    QLabel *treeHint_ = nullptr; // "no matches" hint inside the viewport
+    fc::EmptyState *emptyState_ = nullptr; // "no matches" overlay in the viewport (#165)
     QTimer *flipTimer_ = nullptr;
     double flipProgress_ = 0.0;
 };
