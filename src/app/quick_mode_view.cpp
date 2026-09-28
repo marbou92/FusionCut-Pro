@@ -6,6 +6,7 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
@@ -50,13 +51,17 @@ constexpr int kTransportIconSize = 18;
 constexpr int kStepIconSize = 14;
 constexpr int kEmptyIconSize = 44;
 constexpr int kCardIconSize = 26;
-// Media strip cards (#136): 96x54 covers in 108x76 cards, 84px strip.
-constexpr int kStripTileW = 96;
-constexpr int kStripTileH = 54;
-constexpr int kStripCardW = 108;
-constexpr int kStripCardH = 76;
-constexpr int kStripHeight = 84;
-constexpr int kStripGlyphSize = 22;
+// Library grid (round 4): 88x50 covers in 104x74 cards, 2 columns in a
+// 248px panel. The old horizontal strip became CapCut's library grid.
+constexpr int kTileW = 88;
+constexpr int kTileH = 50;
+constexpr int kGridCardW = 104;
+constexpr int kGridCardH = 74;
+constexpr int kLibraryWidth = 248;
+constexpr int kDetailsWidth = 236;
+constexpr int kLibraryColumns = 2;
+constexpr int kGridGlyphSize = 20;
+constexpr int kImportCircleSize = 28;
 // Export pill (#143): chevron on the right of the text.
 constexpr int kExportChevronSize = 14;
 
@@ -107,11 +112,29 @@ QFrame *toolbarSeparator(QWidget *parent) {
     return separator;
 }
 
-// Shared 96x54 cover tile (#77/#136): rounded kSurface3->kCard gradient
+// CapCut import tile's accent circle: a filled accent disc with a white
+// plus glyph - the tile's whole point is being findable on a dark page.
+QPixmap accentPlusPixmap(qreal dpr) {
+    const qreal ratio = dpr > 0 ? dpr : 1.0;
+    QPixmap pm(qRound(kImportCircleSize * ratio), qRound(kImportCircleSize * ratio));
+    pm.setDevicePixelRatio(ratio);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(Qt::NoPen);
+    p.setBrush(ui::color(ui::kAccent));
+    p.drawEllipse(QRectF(0, 0, kImportCircleSize, kImportCircleSize));
+    const QPixmap glyph = icons::makeIcon(QStringLiteral("plus"), QColor(Qt::white), 14, ratio)
+                              .pixmap(qRound(14 * ratio), qRound(14 * ratio));
+    p.drawPixmap(QPointF((kImportCircleSize - 14) / 2.0, (kImportCircleSize - 14) / 2.0), glyph);
+    return pm;
+}
+
+// Shared 88x50 cover tile (#77/#136): rounded kSurface3->kCard gradient
 // with a centered dim glyph and a 1px hairline - drawn once, at dpr.
 QPixmap gradientTilePixmap(const QString &glyphName, qreal dpr, int radius) {
-    const qreal w = kStripTileW;
-    const qreal h = kStripTileH;
+    const qreal w = kTileW;
+    const qreal h = kTileH;
     const qreal ratio = dpr > 0 ? dpr : 1.0;
     QPixmap pm(qRound(w * ratio), qRound(h * ratio));
     pm.setDevicePixelRatio(ratio);
@@ -131,9 +154,9 @@ QPixmap gradientTilePixmap(const QString &glyphName, qreal dpr, int radius) {
     // back with the devicePixelRatio tag intact (the DPR-aware
     // QIcon::pixmap(QSize, qreal) overload is Qt 6 only).
     const QPixmap glyph =
-        icons::makeIcon(glyphName, ui::color(ui::kTextDim), kCardIconSize, ratio)
-            .pixmap(QSize(qRound(kCardIconSize * ratio), qRound(kCardIconSize * ratio)));
-    p.drawPixmap(QPointF((w - kCardIconSize) / 2.0, (h - kCardIconSize) / 2.0), glyph);
+        icons::makeIcon(glyphName, ui::color(ui::kTextDim), kGridGlyphSize, ratio)
+            .pixmap(QSize(qRound(kGridGlyphSize * ratio), qRound(kGridGlyphSize * ratio)));
+    p.drawPixmap(QPointF((w - kGridGlyphSize) / 2.0, (h - kGridGlyphSize) / 2.0), glyph);
     return pm;
 }
 
@@ -148,9 +171,9 @@ QPixmap templateCardPixmap(const QString &glyphName, const QString &name, qreal 
     QFont chipFont = p.font();
     chipFont.setPixelSize(10);
     const QFontMetrics fm(chipFont);
-    const QString elided = fm.elidedText(name, Qt::ElideRight, kStripTileW - 18);
-    const qreal chipW = qMin<qreal>(kStripTileW - 8.0, fm.horizontalAdvance(elided) + 10.0);
-    const QRectF chip(4.0, kStripTileH - 20.0, chipW, 16.0);
+    const QString elided = fm.elidedText(name, Qt::ElideRight, kTileW - 18);
+    const qreal chipW = qMin<qreal>(kTileW - 8.0, fm.horizontalAdvance(elided) + 10.0);
+    const QRectF chip(4.0, kTileH - 20.0, chipW, 16.0);
     QPainterPath chipPath;
     chipPath.addRoundedRect(chip, 4, 4);
     QColor scrim(Qt::black); // #146: black 55% alpha (not a hex literal)
@@ -162,11 +185,11 @@ QPixmap templateCardPixmap(const QString &glyphName, const QString &name, qreal 
     return pm;
 }
 
-// Media strip cover (#136): the real thumbnail cropped to fill the
-// 16:9 tile, DPR-aware, clipped to a 6px rounded rect by the painter.
+// Library card cover (#136): the real thumbnail cropped to fill the
+// tile, DPR-aware, clipped to a 6px rounded rect by the painter.
 QPixmap mediaCoverPixmap(const QImage &thumb, qreal dpr) {
-    const qreal w = kStripTileW;
-    const qreal h = kStripTileH;
+    const qreal w = kTileW;
+    const qreal h = kTileH;
     const qreal ratio = dpr > 0 ? dpr : 1.0;
     QPixmap pm(qRound(w * ratio), qRound(h * ratio));
     pm.setDevicePixelRatio(ratio);
@@ -192,28 +215,29 @@ QPixmap mediaCoverPixmap(const QImage &thumb, qreal dpr) {
     return pm;
 }
 
-// The strip's first card cover (#136/#138): accent-tinted fill over
-// kCard with a centered plus glyph in kOnAccent and an accent border.
-QPixmap importCardPixmap(qreal dpr) {
-    const qreal w = kStripTileW;
-    const qreal h = kStripTileH;
-    const qreal ratio = dpr > 0 ? dpr : 1.0;
-    QPixmap pm(qRound(w * ratio), qRound(h * ratio));
-    pm.setDevicePixelRatio(ratio);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    QPainterPath card;
-    card.addRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), 6, 6);
-    p.fillPath(card, ui::mix(ui::color(ui::kCard), ui::color(ui::kAccent), 0.18));
-    p.setPen(QPen(ui::color(ui::kAccent), 1));
-    p.setBrush(Qt::NoBrush);
-    p.drawPath(card);
-    const QPixmap glyph =
-        icons::makeIcon(QStringLiteral("plus"), ui::color(ui::kOnAccent), kStripGlyphSize, ratio)
-            .pixmap(QSize(qRound(kStripGlyphSize * ratio), qRound(kStripGlyphSize * ratio)));
-    p.drawPixmap(QPointF((w - kStripGlyphSize) / 2.0, (h - kStripGlyphSize) / 2.0), glyph);
-    return pm;
+// Details panel cells (round 4): dim 11px keys, light 11px values - the
+// token pair keeps the panel readable on kSurface2.
+QLabel *detailKeyLabel(const QString &text) {
+    auto *label = new QLabel(text);
+    label->setStyleSheet(QStringLiteral("color: %1; font-size: %2px;")
+                             .arg(ui::color(ui::kTextDim).name())
+                             .arg(QString::number(ui::kFontSmall)));
+    label->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    return label;
+}
+
+QLabel *detailValueLabel(bool wrap) {
+    auto *value = new QLabel(QStringLiteral("-"));
+    value->setStyleSheet(QStringLiteral("color: %1; font-size: %2px;")
+                             .arg(ui::color(ui::kText).name())
+                             .arg(QString::number(ui::kFontSmall)));
+    value->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    value->setWordWrap(wrap);
+    if (wrap) {
+        // The save path is the one value worth copying out of the panel.
+        value->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
+    return value;
 }
 
 // Painted position slider (#148): a 2px rounded groove across the full
@@ -324,20 +348,21 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
         2);
     timecode_->setEnabled(false);
 
-    // #135: three zones - top bar (step rail | aspect pill | Export
-    // pill), the preview canvas (stretch), and the fixed-height bottom
-    // stack (slider row, transport row, tool bar, template covers,
-    // media strip).
+    // Round 4: the CapCut editor columns - Import library (left),
+    // Player (center), Details (right) - over the shared top bar, with
+    // the tool bar + template covers as the bottom stack.
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(16, 12, 16, 12);
+    root->setContentsMargins(12, 10, 12, 10);
     root->setSpacing(8);
     root->addWidget(buildTopBar());
-    root->addWidget(buildCanvasZone(), 1);
-    root->addWidget(buildPositionRow());
-    root->addWidget(buildTransportRow());
+    auto *columns = new QHBoxLayout;
+    columns->setSpacing(8);
+    columns->addWidget(buildLibraryPanel());
+    columns->addWidget(buildPlayerColumn(), 1);
+    columns->addWidget(buildDetailsPanel());
+    root->addLayout(columns, 1);
     root->addWidget(buildToolbar());
     root->addWidget(buildTemplateStrip());
-    root->addWidget(buildMediaStrip());
 
     connect(playButton_, &QToolButton::clicked, this, [this] {
         // The playing STATE lives on the button as a dynamic property
@@ -369,11 +394,12 @@ QuickModeView::QuickModeView(QWidget *parent) : QWidget(parent) {
     });
     refreshTimecode();
 
-    // Children (canvas, buttons, labels, the empty state, the strip's
-    // viewport) would swallow drag events before the page sees them:
-    // forward every drag event that lands on ANY descendant widget back
-    // into this page's own handlers via an event filter (#53). Called
-    // after the UI is fully built.
+    // Children (canvas, buttons, labels, the empty state, the library
+    // grid's viewport and cards) would swallow drag events before the
+    // page sees them: forward every drag event that lands on ANY
+    // descendant widget back into this page's own handlers via an
+    // event filter (#53). Cards built later (rebuildMediaGrid) install
+    // the filter when they are created. Called after the UI is built.
     const QList<QWidget *> children = findChildren<QWidget *>();
     for (QWidget *child : children) {
         child->installEventFilter(this);
@@ -582,21 +608,194 @@ void QuickModeView::setStep(int step) {
     applyStepStyles();
 }
 
-QWidget *QuickModeView::buildCanvasZone() {
+QWidget *QuickModeView::buildLibraryPanel() {
+    // CapCut's Import panel (owner screenshot 4): a dashed drop tile
+    // over the media grid. The panel is a fixed-width card so the
+    // player keeps the center of the window at every dock size.
+    libraryPanel_ = new QFrame(this);
+    libraryPanel_->setObjectName(QStringLiteral("fcQuickLibrary"));
+    libraryPanel_->setStyleSheet(
+        QStringLiteral("QFrame#fcQuickLibrary { background: %1; border: 1px solid %2; "
+                       "border-radius: %3px; }")
+            .arg(ui::color(ui::kSurface2).name(), ui::color(ui::kLine).name())
+            .arg(QString::number(ui::kRadiusCard)));
+    libraryPanel_->setFixedWidth(kLibraryWidth);
+
+    auto *layout = new QVBoxLayout(libraryPanel_);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->setSpacing(8);
+
+    // The dashed Import tile: accent circle + label (CapCut's blue
+    // plus disc), the panel's only interactive element above the grid.
+    auto *tile = new QToolButton(libraryPanel_);
+    tile->setObjectName(QStringLiteral("fcQuickImportTile"));
+    tile->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    tile->setIcon(QIcon(accentPlusPixmap(devicePixelRatioF())));
+    tile->setIconSize(QSize(kImportCircleSize, kImportCircleSize));
+    tile->setText(tr("Import"));
+    tile->setToolTip(tr("Drag and drop videos, photos, and audio files here, or click to browse"));
+    tile->setAccessibleName(tr("Import"));
+    tile->setFixedHeight(78);
+    tile->setCursor(Qt::PointingHandCursor);
+    tile->setStyleSheet(
+        QStringLiteral("QToolButton#fcQuickImportTile { background: transparent; "
+                       "border: 1px dashed %1; border-radius: %3px; color: %2; "
+                       "font-weight: 600; font-size: %4px; padding: 4px 6px 2px 6px; }"
+                       "QToolButton#fcQuickImportTile:hover { border-color: %5; background: %6; }"
+                       "QToolButton#fcQuickImportTile:pressed { background: transparent; }")
+            .arg(ui::color(ui::kLine).name(), ui::color(ui::kText).name())
+            .arg(QString::number(ui::kRadiusCard))
+            .arg(QString::number(ui::kFontBody))
+            .arg(ui::color(ui::kAccent).name(), ui::color(ui::kSurface3).name()));
+    connect(tile, &QToolButton::clicked, this, [this] { emit importRequested(); });
+    layout->addWidget(tile);
+
+    auto *hint =
+        new QLabel(tr("Drag and drop videos, photos, and audio files here"), libraryPanel_);
+    hint->setStyleSheet(QStringLiteral("color: %1; font-size: %2px;")
+                            .arg(ui::color(ui::kTextDim).name())
+                            .arg(QString::number(ui::kFontSmall)));
+    hint->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    // The media grid: 2 columns of cover cards (the old strip's cards,
+    // re-homed; a tap is still the library double-click flow).
+    mediaGridArea_ = new QScrollArea(libraryPanel_);
+    mediaGridArea_->setObjectName(QStringLiteral("fcQuickMediaGrid"));
+    mediaGridArea_->setFrameShape(QFrame::NoFrame);
+    mediaGridArea_->setWidgetResizable(true);
+    mediaGridArea_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    mediaGridArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    mediaGridArea_->setStyleSheet(
+        QStringLiteral("QScrollArea#fcQuickMediaGrid, QScrollArea#fcQuickMediaGrid > QWidget "
+                       "{ background: transparent; border: none; }"));
+
+    mediaGridWidget_ = new QWidget;
+    mediaGridLayout_ = new QGridLayout(mediaGridWidget_);
+    mediaGridLayout_->setContentsMargins(0, 0, 4, 0);
+    mediaGridLayout_->setHorizontalSpacing(8);
+    mediaGridLayout_->setVerticalSpacing(8);
+    mediaGridLayout_->setColumnStretch(0, 1);
+    mediaGridLayout_->setColumnStretch(1, 1);
+    gridHint_ = new QLabel(tr("Imported media appears here"), mediaGridWidget_);
+    gridHint_->setStyleSheet(QStringLiteral("color: %1; font-size: %2px;")
+                                 .arg(ui::color(ui::kTextDisabled).name())
+                                 .arg(QString::number(ui::kFontSmall)));
+    gridHint_->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    gridHint_->setWordWrap(true);
+    mediaGridLayout_->addWidget(gridHint_, 0, 0, 1, kLibraryColumns);
+    mediaGridArea_->setWidget(mediaGridWidget_);
+
+    layout->addWidget(mediaGridArea_, 1);
+    rebuildMediaGrid();
+    return libraryPanel_;
+}
+
+QWidget *QuickModeView::buildPlayerColumn() {
+    auto *column = new QWidget(this);
+    auto *layout = new QVBoxLayout(column);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+
+    // Player header (CapCut): the title on the left, a details-panel
+    // toggle on the right. The toggle is real chrome - it shows or
+    // hides the Details column for narrow windows.
+    auto *header = new QWidget(column);
+    auto *headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(2, 0, 2, 0);
+    headerLayout->setSpacing(6);
+    auto *title = new QLabel(tr("Player"), header);
+    title->setStyleSheet(QStringLiteral("color: %1; font-size: %2px; font-weight: 600;")
+                             .arg(ui::color(ui::kText).name())
+                             .arg(QString::number(ui::kFontBody)));
+    headerLayout->addWidget(title);
+    headerLayout->addStretch(1);
+    detailsToggle_ = new QToolButton(header);
+    detailsToggle_->setIcon(icons::makeIcon(QStringLiteral("list"), ui::color(ui::kTextDim),
+                                            kToolbarIconSize, devicePixelRatioF()));
+    detailsToggle_->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
+    detailsToggle_->setAutoRaise(true);
+    detailsToggle_->setToolTip(tr("Show or hide the details panel"));
+    detailsToggle_->setAccessibleName(tr("Toggle details panel"));
+    connect(detailsToggle_, &QToolButton::clicked, this, [this](bool on) {
+        if (detailsPanel_ != nullptr) {
+            detailsPanel_->setVisible(on);
+        }
+    });
+    headerLayout->addWidget(detailsToggle_);
+    layout->addWidget(header);
+
     // #152: the canvas lives in a kCanvas-toned frame with a 1px kLine
-    // border and QSS radius 12. The 10px margins keep the square canvas
-    // corners well inside the rounded frame, so the honest rounded
-    // frame works and no square fallback is needed.
-    auto *zone = new QFrame(this);
+    // border and radius 12. The 10px margins keep the square canvas
+    // corners well inside the rounded frame.
+    auto *zone = new QFrame(column);
     zone->setObjectName(QStringLiteral("fcQuickCanvasZone"));
     zone->setStyleSheet(
         QStringLiteral("QFrame#fcQuickCanvasZone { background: %1; border: 1px solid %2; "
                        "border-radius: 12px; }")
             .arg(ui::color(ui::kCanvas).name(), ui::color(ui::kLine).name()));
-    auto *layout = new QVBoxLayout(zone);
-    layout->setContentsMargins(10, 10, 10, 10);
-    layout->addWidget(canvas_);
-    return zone;
+    auto *zoneLayout = new QVBoxLayout(zone);
+    zoneLayout->setContentsMargins(10, 10, 10, 10);
+    zoneLayout->addWidget(canvas_);
+    layout->addWidget(zone, 1);
+
+    layout->addWidget(buildPositionRow());
+    layout->addWidget(buildTransportRow());
+    return column;
+}
+
+QWidget *QuickModeView::buildDetailsPanel() {
+    // CapCut's Details panel (owner screenshots): project rows over a
+    // card surface, with the Modify action handing off to Pro Mode.
+    detailsPanel_ = new QFrame(this);
+    detailsPanel_->setObjectName(QStringLiteral("fcQuickDetails"));
+    detailsPanel_->setStyleSheet(
+        QStringLiteral("QFrame#fcQuickDetails { background: %1; border: 1px solid %2; "
+                       "border-radius: %3px; }")
+            .arg(ui::color(ui::kSurface2).name(), ui::color(ui::kLine).name())
+            .arg(QString::number(ui::kRadiusCard)));
+    detailsPanel_->setFixedWidth(kDetailsWidth);
+
+    auto *layout = new QVBoxLayout(detailsPanel_);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(10);
+
+    auto *title = new QLabel(tr("Details"), detailsPanel_);
+    title->setStyleSheet(QStringLiteral("color: %1; font-size: %2px; font-weight: 600;")
+                             .arg(ui::color(ui::kText).name())
+                             .arg(QString::number(ui::kFontBody)));
+    layout->addWidget(title);
+
+    auto *form = new QGridLayout;
+    form->setHorizontalSpacing(10);
+    form->setVerticalSpacing(8);
+    QLabel *keys[] = {detailKeyLabel(tr("Name:")),         detailKeyLabel(tr("Path:")),
+                      detailKeyLabel(tr("Aspect ratio:")), detailKeyLabel(tr("Resolution:")),
+                      detailKeyLabel(tr("Frame rate:")),   detailKeyLabel(tr("Duration:"))};
+    QLabel *values[] = {
+        detailName_ = detailValueLabel(false),   detailPath_ = detailValueLabel(true),
+        detailAspect_ = detailValueLabel(false), detailResolution_ = detailValueLabel(false),
+        detailFps_ = detailValueLabel(false),    detailDuration_ = detailValueLabel(false)};
+    for (int row = 0; row < 6; ++row) {
+        form->addWidget(keys[row], row, 0);
+        form->addWidget(values[row], row, 1);
+    }
+    form->setColumnStretch(1, 1);
+    layout->addLayout(form);
+
+    layout->addStretch(1);
+    auto *footer = new QHBoxLayout;
+    footer->addStretch(1);
+    auto *modify = new QPushButton(tr("Modify"), detailsPanel_);
+    modify->setToolTip(tr("Aspect, resolution and rate live in Pro Mode"));
+    modify->setAccessibleName(tr("Modify project settings"));
+    modify->setFixedHeight(26);
+    modify->setCursor(Qt::PointingHandCursor);
+    connect(modify, &QPushButton::clicked, this, [this] { emit detailsModifyRequested(); });
+    footer->addWidget(modify);
+    layout->addLayout(footer);
+    return detailsPanel_;
 }
 
 QWidget *QuickModeView::buildPositionRow() {
@@ -639,7 +838,7 @@ QWidget *QuickModeView::buildTemplateStrip() {
                            "media onto the placeholders."));
     layout->addWidget(caption);
 
-    // Template cards (#77, covers upgraded by #146): 96x54 gradient
+    // Template cards (#77, covers upgraded by #146): 88x50 gradient
     // tile with a centered glyph and a name chip bottom-left, label
     // underneath, accent hover. The ids/signals are unchanged - the
     // template strip is only a face lift.
@@ -666,10 +865,10 @@ QWidget *QuickModeView::buildTemplateStrip() {
         button->setAutoRaise(true);
         button->setIcon(
             QIcon(templateCardPixmap(QString::fromUtf8(card.glyph), tr(card.label), dpr)));
-        button->setIconSize(QSize(kStripTileW, kStripTileH));
+        button->setIconSize(QSize(kTileW, kTileH));
         button->setText(tr(card.label));
         button->setToolTip(tr(card.tooltip));
-        button->setFixedSize(112, 86); // tile + label under it (#77)
+        button->setFixedSize(108, 82); // tile + label under it (#77)
         button->setCursor(Qt::PointingHandCursor);
         button->setStyleSheet(
             QStringLiteral("QToolButton { border: 1px solid %1; border-radius: 8px; "
@@ -691,11 +890,12 @@ QWidget *QuickModeView::buildTemplateStrip() {
 
 QWidget *QuickModeView::buildToolbar() {
     // Floating tool bar (#137): CapCut's tool order in one centered
-    // elevated frame, hairline separators between the tools. Every tool
-    // now EMITS (#139-#142) - the behavior (title, audio import, SRT,
-    // Pro workspace hand-off) lives in MainWindow. The former inert
-    // sticker/enhance/crop placeholders are deleted: dead controls with
-    // a "Coming later" promise are not honest chrome.
+    // elevated frame, hairline separators between the tools. Round 4
+    // adds the edit trio from the owner screenshots (undo / redo /
+    // split) - they EMIT and MainWindow routes them into the same
+    // engine entry points the Pro menus use. The former inert
+    // sticker/enhance/crop placeholders stay deleted: dead controls
+    // with a "Coming later" promise are not honest chrome.
     auto *wrap = new QWidget(this);
     auto *centered = new QHBoxLayout(wrap);
     centered->setContentsMargins(0, 0, 0, 0);
@@ -712,7 +912,23 @@ QWidget *QuickModeView::buildToolbar() {
     const qreal dpr = devicePixelRatioF();
     const QColor iconColor = ui::color(ui::kText);
 
+    // Edit trio (round 4): undo, redo, split-at-playhead.
+    auto *undoTool = toolbarButton(tr("Undo"), tr("Undo the last edit (Ctrl+Z)"),
+                                   QStringLiteral("reset"), iconColor, dpr, bar);
+    connect(undoTool, &QPushButton::clicked, this, [this] { emit undoRequested(); });
+    layout->addWidget(undoTool);
+    auto *redoTool = toolbarButton(tr("Redo"), tr("Redo the undone edit (Ctrl+Y)"),
+                                   QStringLiteral("redo"), iconColor, dpr, bar);
+    connect(redoTool, &QPushButton::clicked, this, [this] { emit redoRequested(); });
+    layout->addWidget(redoTool);
+    layout->addWidget(toolbarSeparator(bar));
+    auto *splitTool = toolbarButton(tr("Split"), tr("Split the clip at the playhead"),
+                                    QStringLiteral("blade"), iconColor, dpr, bar);
+    connect(splitTool, &QPushButton::clicked, this, [this] { emit splitRequested(); });
+    layout->addWidget(splitTool);
+
     // #138: Import Media… is the only accent-filled control in the zone.
+    layout->addWidget(toolbarSeparator(bar));
     auto *addMedia = toolbarButton(tr("Import Media…"), tr("Import media files"),
                                    QStringLiteral("plus"), ui::color(ui::kOnAccent), dpr, bar);
     addMedia->setProperty("fcAccent", true);
@@ -778,43 +994,27 @@ QWidget *QuickModeView::buildToolbar() {
     return wrap;
 }
 
-QWidget *QuickModeView::buildMediaStrip() {
-    // #136: a horizontal strip of library cards below the tool bar.
-    // Fixed 84px, no vertical scrollbar, the horizontal one is the
-    // global 8px overlay; the wheel scrolls horizontally (eventFilter).
-    mediaStrip_ = new QScrollArea(this);
-    mediaStrip_->setObjectName(QStringLiteral("fcMediaStrip"));
-    mediaStrip_->setFixedHeight(kStripHeight);
-    mediaStrip_->setFrameShape(QFrame::NoFrame);
-    mediaStrip_->setWidgetResizable(true);
-    mediaStrip_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    mediaStrip_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    mediaStrip_->setStyleSheet(
-        QStringLiteral("QScrollArea#fcMediaStrip, QScrollArea#fcMediaStrip > QWidget "
-                       "{ background: transparent; border: none; }"));
-
-    mediaRow_ = new QWidget;
-    mediaRowLayout_ = new QHBoxLayout(mediaRow_);
-    mediaRowLayout_->setContentsMargins(8, 4, 8, 4);
-    mediaRowLayout_->setSpacing(8);
-    mediaStrip_->setWidget(mediaRow_);
-
-    rebuildMediaStrip();
-    return mediaStrip_;
-}
-
-void QuickModeView::rebuildMediaStrip() {
-    if (mediaRowLayout_ == nullptr) {
+void QuickModeView::rebuildMediaGrid() {
+    if (mediaGridLayout_ == nullptr) {
         return;
     }
-    // Replace the strip contents (#136): delete the previous cards,
-    // then the accent Import card first, then one card per item.
+    // Replace the grid contents (#136, grid edition): delete the
+    // previous cards, then lay the current library back out. The hint
+    // label is a permanent grid member (row 0, spanning) and only
+    // shows while the library is empty.
     QLayoutItem *item = nullptr;
-    while ((item = mediaRowLayout_->takeAt(0)) != nullptr) {
-        if (item->widget() != nullptr) {
+    while ((item = mediaGridLayout_->takeAt(0)) != nullptr) {
+        if (item->widget() != nullptr && item->widget() != gridHint_) {
             item->widget()->deleteLater();
         }
         delete item;
+    }
+
+    const int count = qMin(mediaNames_.size(), mediaPaths_.size());
+    gridHint_->setVisible(count == 0);
+    if (count == 0) {
+        mediaGridLayout_->addWidget(gridHint_, 0, 0, 1, kLibraryColumns);
+        return;
     }
 
     const qreal dpr = devicePixelRatioF();
@@ -829,54 +1029,44 @@ void QuickModeView::rebuildMediaStrip() {
             .arg(ui::color(ui::kAccent).name(), ui::color(ui::kSurface3).name(),
                  ui::color(ui::kSurfacePress).name());
 
-    // The accent "+ Import" card (#0-h naming): always first.
-    auto *importCard = new QToolButton(mediaRow_);
-    importCard->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-    importCard->setAutoRaise(true);
-    importCard->setIcon(QIcon(importCardPixmap(dpr)));
-    importCard->setIconSize(QSize(kStripTileW, kStripTileH));
-    importCard->setText(tr("Import Media…"));
-    importCard->setToolTip(tr("Import media files"));
-    importCard->setAccessibleName(tr("Import Media…"));
-    importCard->setFixedSize(kStripCardW, kStripCardH);
-    importCard->setCursor(Qt::PointingHandCursor);
-    importCard->setStyleSheet(cardStyle);
-    connect(importCard, &QToolButton::clicked, this, [this] { emit importRequested(); });
-    mediaRowLayout_->addWidget(importCard);
-
     // One card per media item: real thumbnail when one arrived via
     // setStripThumbnail, gradient film tile otherwise; the name is
     // elided to the tile width below in 11px.
     QFont nameFont = font();
     nameFont.setPixelSize(ui::kFontSmall);
     const QFontMetrics nameMetrics(nameFont);
-    const int count = qMin(mediaNames_.size(), mediaPaths_.size());
     for (int i = 0; i < count; ++i) {
         const QString &name = mediaNames_.at(i);
         const QString &path = mediaPaths_.at(i);
         const QImage thumb = thumbnails_.value(path);
-        auto *card = new QToolButton(mediaRow_);
+        auto *card = new QToolButton(mediaGridWidget_);
         card->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
         card->setAutoRaise(true);
         card->setIcon(QIcon(thumb.isNull() ? gradientTilePixmap(QStringLiteral("film"), dpr, 6)
                                            : mediaCoverPixmap(thumb, dpr)));
-        card->setIconSize(QSize(kStripTileW, kStripTileH));
-        card->setText(nameMetrics.elidedText(name, Qt::ElideRight, kStripTileW - 8));
+        card->setIconSize(QSize(kTileW, kTileH));
+        card->setText(nameMetrics.elidedText(name, Qt::ElideRight, kTileW - 8));
         card->setToolTip(name);
         card->setAccessibleName(name);
-        card->setFixedSize(kStripCardW, kStripCardH);
+        card->setFixedSize(kGridCardW, kGridCardH);
         card->setCursor(Qt::PointingHandCursor);
         card->setStyleSheet(cardStyle);
         connect(card, &QToolButton::clicked, this, [this, path] { emit mediaActivated(path); });
-        mediaRowLayout_->addWidget(card);
+        // The page-level event filter is built once in the constructor;
+        // cards are built here, so they opt in one by one (full-page
+        // drop forwarding keeps working over the grid, #53).
+        card->installEventFilter(this);
+        mediaGridLayout_->addWidget(card, i / kLibraryColumns, i % kLibraryColumns,
+                                    Qt::AlignHCenter | Qt::AlignTop);
     }
-    mediaRowLayout_->addStretch(1);
+    // Keep the grid packed to the top when the library is short.
+    mediaGridLayout_->setRowStretch(count / kLibraryColumns + 1, 1);
 }
 
 void QuickModeView::setMediaItems(const QStringList &names, const QStringList &paths) {
     mediaNames_ = names;
     mediaPaths_ = paths;
-    // Prune thumbnails of items that left the strip (1 GB RAM budget).
+    // Prune thumbnails of items that left the grid (1 GB RAM budget).
     for (auto it = thumbnails_.begin(); it != thumbnails_.end();) {
         if (!mediaPaths_.contains(it.key())) {
             it = thumbnails_.erase(it);
@@ -884,7 +1074,7 @@ void QuickModeView::setMediaItems(const QStringList &names, const QStringList &p
             ++it;
         }
     }
-    rebuildMediaStrip();
+    rebuildMediaGrid();
 }
 
 void QuickModeView::setStripThumbnail(const QString &path, const QImage &thumb) {
@@ -895,7 +1085,34 @@ void QuickModeView::setStripThumbnail(const QString &path, const QImage &thumb) 
     if (!mediaPaths_.contains(path)) {
         return; // kept for the item's arrival, not drawn yet
     }
-    rebuildMediaStrip();
+    rebuildMediaGrid();
+}
+
+void QuickModeView::setDetails(const QString &projectName, const QString &projectPath,
+                               const QString &aspect, const QSize &resolution, double fps,
+                               double durationSeconds) {
+    if (detailName_ == nullptr) {
+        return;
+    }
+    detailName_->setText(projectName.isEmpty() ? QStringLiteral("-") : projectName);
+    detailName_->setToolTip(projectName);
+    detailPath_->setText(projectPath.isEmpty() ? tr("Not saved yet") : projectPath);
+    detailPath_->setToolTip(projectPath);
+    detailAspect_->setText(aspect.isEmpty() ? QStringLiteral("-") : aspect);
+    detailResolution_->setText(
+        resolution.width() > 0 && resolution.height() > 0
+            ? QStringLiteral("%1 × %2").arg(resolution.width()).arg(resolution.height())
+            : QStringLiteral("-"));
+    detailFps_->setText(fps > 1.0 ? tr("%1 fps").arg(fps, 0, 'f', 2) : QStringLiteral("-"));
+    if (durationSeconds > 0.0 && fps_ > 1.0) {
+        // Same math as the timecode chip: fps as a milli-rational.
+        const fc::FrameRate rate{static_cast<uint32_t>(std::lround(fps_ * 1000.0)), 1000, false};
+        const int64_t frames = static_cast<int64_t>(std::llround(durationSeconds * fps_));
+        detailDuration_->setText(
+            QString::fromStdString(fc::Timecode::fromFrames(frames, rate).toString()));
+    } else {
+        detailDuration_->setText(QStringLiteral("-"));
+    }
 }
 
 void QuickModeView::setMedia(double durationSeconds, double fps) {
@@ -1051,17 +1268,6 @@ bool QuickModeView::eventFilter(QObject *watched, QEvent *event) {
         // default behavior.
         if (watched == canvas_ && duration_ <= 0.0) {
             mouseDoubleClickEvent(static_cast<QMouseEvent *>(event));
-            return true;
-        }
-        break;
-    case QEvent::Wheel:
-        // #136: the media strip is horizontal-only - a wheel spin over
-        // the strip scrolls the cards sideways instead of doing nothing.
-        if (mediaStrip_ != nullptr && watched == mediaStrip_->viewport()) {
-            QWheelEvent *wheelEvent = static_cast<QWheelEvent *>(event);
-            if (QScrollBar *bar = mediaStrip_->horizontalScrollBar()) {
-                bar->setValue(bar->value() - wheelEvent->angleDelta().y());
-            }
             return true;
         }
         break;

@@ -47,8 +47,12 @@ public:
 
     // Preview quality (suggestion #22): the frame is downscaled to
     // half/quarter of the displayed width before it is painted back
-    // into the SAME displayed rect. Paint-side only - never affects
-    // export. Self-contained (no wiring needed).
+    // into the SAME displayed rect. Since round 4 the setting ALSO
+    // reaches the decode worker through qualityChanged (MainWindow
+    // wires it): the decoder then scales frames to half/quarter size
+    // on its way out, so reduced quality cuts REAL decode-to-paint
+    // work - preview gets measurably smoother on slow machines - while
+    // export still renders at full resolution.
     enum class Quality { Full, Half, Quarter };
     void setQuality(Quality quality);
     Quality quality() const { return quality_; }
@@ -75,6 +79,11 @@ public slots:
 signals:
     // Emitted on user scrub inside the canvas.
     void seekRequested(double seconds);
+
+    // The quality dropdown changed (also emitted by setQuality). The
+    // PROGRAM monitor's signal is the one MainWindow forwards to the
+    // decode worker; the Source monitor's copy stays paint-only.
+    void qualityChanged(int quality);
 
     // Mini transport (#24): step the SOURCE by +1/-1 frames.
     void sourceStepRequested(int frames);

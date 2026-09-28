@@ -1,6 +1,9 @@
 #include "decode_worker.h"
 
+#include <atomic>
 #include <cmath>
+
+#include <QMetaObject>
 
 #include "media_item.h"
 #include "media_probe.h"
@@ -12,6 +15,18 @@ struct DecodeWorker::Impl {
     QString openPath;
     double lastPts = -1.0;
     double fps = 0.0;
+
+    // Latest-wins request state (see the class contract in the header).
+    // pendingTarget: the newest requested position, -1 when consumed.
+    // drainQueued: a drain job is queued/running. Both are touched from
+    // the GUI thread (requestFrame) and the worker thread (drain), so
+    // both are atomics; the flag protocol is the standard single-slot
+    // coalescing pattern - a request that lands while drainQueued is
+    // true is guaranteed to be seen by the running/queued drain's loop,
+    // and a request that lands after the drain consumed everything
+    // finds drainQueued false and queues a fresh drain.
+    std::atomic<double> pendingTarget{-1.0};
+    std::atomic<bool> drainQueued{false};
 };
 
 DecodeWorker::DecodeWorker(QObject *parent) : QObject(parent), d(new Impl) {}
@@ -24,6 +39,7 @@ void DecodeWorker::open(const QString &path, qint64 token) {
     std::string error;
     if (!d->decoder.open(path.toStdString(), error)) {
         d->openPath.clear();
+        d->pendingTarget = -1.0; // stale display requests must not outlive the open
         emit failed(QString::fromStdString(error));
         return;
     }
@@ -44,6 +60,7 @@ void DecodeWorker::openQuiet(const QString &path, qint64 token) {
     std::string error;
     if (!d->decoder.open(path.toStdString(), error)) {
         d->openPath.clear();
+        d->pendingTarget = -1.0;
         emit failed(QString::fromStdString(error));
         return;
     }
@@ -60,6 +77,49 @@ void DecodeWorker::openQuiet(const QString &path, qint64 token) {
 }
 
 void DecodeWorker::requestFrame(double seconds) {
+    if (d->openPath.isEmpty()) {
+        return;
+    }
+    // Store the newest target, then make sure exactly one drain job is
+    // queued. requestFrame runs on the GUI thread (via invokeMethod)
+    // and on the worker thread (open()'s t=0 display request); the
+    // atomic protocol above keeps both correct.
+    d->pendingTarget.store(seconds);
+    if (!d->drainQueued.exchange(true)) {
+        QMetaObject::invokeMethod(this, "drainQueuedSlot", Qt::QueuedConnection);
+    }
+}
+
+void DecodeWorker::setOutputScale(double factor) {
+    // Clamped hard: only the documented preview scales are meaningful,
+    // and an off-list value would just waste scale re-configurations.
+    if (factor >= 0.9) {
+        factor = 1.0;
+    } else if (factor >= 0.4) {
+        factor = 0.5;
+    } else {
+        factor = 0.25;
+    }
+    d->decoder.setOutputScale(factor);
+}
+
+void DecodeWorker::drainQueuedSlot() {
+    // Worker thread. Clear the flag FIRST: a request that arrives after
+    // this point sees drainQueued == false and queues a fresh drain, so
+    // nothing can be stranded; a request that arrived before it is
+    // picked up by the loop below (the flag is what makes N queued
+    // requests collapse into at most one decode per fresh arrival).
+    d->drainQueued.store(false);
+    while (true) {
+        const double target = d->pendingTarget.exchange(-1.0);
+        if (target < 0.0) {
+            break;
+        }
+        decodeAt(target);
+    }
+}
+
+void DecodeWorker::decodeAt(double seconds) {
     if (d->openPath.isEmpty()) {
         return;
     }
@@ -114,4 +174,5 @@ void DecodeWorker::shutdown() {
     d->decoder.close();
     d->openPath.clear();
     d->lastPts = -1.0;
+    d->pendingTarget = -1.0;
 }

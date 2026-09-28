@@ -4,6 +4,7 @@
 
 #include <QHash>
 #include <QImage>
+#include <QSize>
 #include <QStringList>
 
 #include "preview_canvas.h"
@@ -14,6 +15,7 @@ class QDragEnterEvent;
 class QDragLeaveEvent;
 class QDragMoveEvent;
 class QDropEvent;
+class QGridLayout;
 class QMouseEvent;
 class QPaintEvent;
 class QLabel;
@@ -26,13 +28,25 @@ namespace fc {
 class EmptyState;
 }
 
-// Quick Mode page: CapCut-style simplified layout - large
-// preview, prominent toolbar, aspect selector. Shares the decode worker
-// and playback state with Pro Mode via signals routed through MainWindow.
-// The transport row mirrors TransportBar's discipline: the position
-// slider scrubs the program (enabled once a duration is known), the
-// step buttons walk one frame, and the slider + timecode FOLLOW the
-// playhead without re-emitting seek.
+// Quick Mode page: the CapCut editor layout (owner screenshots, round 4).
+// Three columns over a shared top bar and bottom tool stack:
+//   left   - the Import library: a dashed drag-and-drop tile, then the
+//            imported media as a 2-column card grid (a card tap places
+//            the clip, exactly like the old strip's tap);
+//   center - the Player: header row (title + a details-panel toggle),
+//            the preview canvas, the timecode + painted position slider,
+//            and the circular transport;
+//   right  - the Details panel: the project rows CapCut shows (Name,
+//            Path, Aspect ratio, Resolution, Frame rate, Duration) with
+//            a Modify action that hands off to Pro Mode.
+// The bottom stack keeps the floating tool bar (now with undo/redo/split)
+// and the template covers.
+//
+// Shares the decode worker and playback state with Pro Mode via signals
+// routed through MainWindow. The transport row mirrors TransportBar's
+// discipline: the position slider scrubs the program (enabled once a
+// duration is known), the step buttons walk one frame, and the slider +
+// timecode FOLLOW the playhead without re-emitting seek.
 //
 // Onboarding surfaces (suggestions #52-54 + round-2 #73-#79): a numbered
 // progress rail at the top (1 Import -> 2 Arrange -> 3 Export; the
@@ -41,16 +55,8 @@ class EmptyState;
 // (#74; hides once a program duration is known) with full-page
 // drag-and-drop of media files (local files only, forwarded from every
 // child via an event filter, #53), double-click-to-import while empty
-// (#106), a floating icon-first tool bar (#75/#76), template cards
-// (#77) and a circular QuickTime-style transport (#79).
-//
-// Round 3 (#135-#152) translates the CapCut structure: three zones -
-// top bar (step rail | aspect pill | Export pill), the preview canvas,
-// and a fixed-height bottom stack (painted position slider + timecode
-// chip, centered transport circles, wired tool bar, media strip). The
-// tool bar emits the new *ToolRequested/workspaceToolRequested signals;
-// the media strip is coordinator-fed via setMediaItems/setStripThumbnail
-// and reports activations through mediaActivated.
+// (#106), template cards (#77) and a circular QuickTime-style transport
+// (#79).
 class QuickModeView : public QWidget {
     Q_OBJECT
 
@@ -69,13 +75,19 @@ public slots:
     // Highlights the current step in the rail: 0 = import,
     // 1 = arrange, 2 = export (values outside 0-2 are clamped).
     void setStep(int step);
-    // Media strip (#136): parallel name/path lists REPLACE the strip
-    // contents (the accent Import card always stays first). Pairs are
-    // matched by index; a leftover of the longer list is ignored.
+    // Media library (#136, grid edition): parallel name/path lists
+    // REPLACE the grid contents (the dashed Import tile above the grid
+    // is permanent). Pairs are matched by index; a leftover of the
+    // longer list is ignored.
     void setMediaItems(const QStringList &names, const QStringList &paths);
-    // 16:9 cover for the strip card at `path`. Stored for the next
-    // rebuild when the item is not on the strip yet.
+    // 16:9 cover for the library card at `path`. Stored for the next
+    // rebuild when the item is not on the grid yet.
     void setStripThumbnail(const QString &path, const QImage &thumb);
+    // Details panel (CapCut "Details"): the project's name, save path,
+    // aspect string ("16:9" or "-"), preview resolution, frame rate and
+    // program duration. Values land verbatim; "-" hides a row value.
+    void setDetails(const QString &projectName, const QString &projectPath, const QString &aspect,
+                    const QSize &resolution, double fps, double durationSeconds);
 
 signals:
     // Routed to the same playback engine as Pro Mode.
@@ -83,7 +95,7 @@ signals:
     void seekRequested(double seconds);
     void stepRequested(int frames); // +1 / -1
     // The step rail's Import chip + the hero empty state's primary
-    // action (routed to MainWindow::importMedia).
+    // action + the dashed Import tile (routed to MainWindow::importMedia).
     void importRequested();
     // The step-rail Export chip (routed to MainWindow::exportMedia).
     void exportRequested();
@@ -92,17 +104,24 @@ signals:
     // A template card was clicked; templateId is "title-broll",
     // "vlog" or "slideshow" (#54).
     void templateRequested(const QString &templateId);
-    // Tool bar #139: the Text tool (MainWindow adds a default title).
+    // Tool bar: the Text tool (MainWindow adds a default title).
     void textToolRequested();
-    // Tool bar #140: the Audio tool (import with an audio filter).
+    // Tool bar: the Audio tool (import with an audio filter).
     void audioToolRequested();
-    // Tool bar #141: the Captions tool (the existing SRT import flow).
+    // Tool bar: the Captions tool (the existing SRT import flow).
     void captionsRequested();
-    // Tool bar #142: Effects/Transitions/Filters; `tool` is "effects",
+    // Tool bar: Effects/Transitions/Filters; `tool` is "effects",
     // "transitions" or "filters" (MainWindow raises that Pro panel).
     void workspaceToolRequested(const QString &tool);
-    // Media strip #136: a media card was activated.
+    // Library grid: a media card was activated.
     void mediaActivated(const QString &path);
+    // Tool bar edit tools (round 4): routed to MainWindow's undo, redo
+    // and split-at-playhead engine entry points.
+    void undoRequested();
+    void redoRequested();
+    void splitRequested();
+    // Details panel "Modify": switch to Pro Mode (project settings).
+    void detailsModifyRequested();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -118,13 +137,14 @@ protected:
 private:
     QWidget *buildTopBar();
     QWidget *buildStepRail();
-    QWidget *buildCanvasZone();
+    QWidget *buildLibraryPanel();
+    QWidget *buildPlayerColumn();
+    QWidget *buildDetailsPanel();
     QWidget *buildPositionRow();
     QWidget *buildTransportRow();
     QWidget *buildTemplateStrip();
     QWidget *buildToolbar();
-    QWidget *buildMediaStrip();
-    void rebuildMediaStrip();
+    void rebuildMediaGrid();
     void applyStepStyles();
     void refreshTimecode();
 
@@ -138,12 +158,24 @@ private:
     QComboBox *aspectBox_ = nullptr;
     QPushButton *stepChips_[3] = {nullptr, nullptr, nullptr};
     QWidget *stepLinks_[2] = {nullptr, nullptr};
-    QScrollArea *mediaStrip_ = nullptr;
-    QWidget *mediaRow_ = nullptr;
-    QBoxLayout *mediaRowLayout_ = nullptr;
 
-    // Media strip model (#136): parallel lists + thumbnail cache keyed
-    // by path (pruned when items leave the strip).
+    // Three-column editor (round 4).
+    QWidget *libraryPanel_ = nullptr;
+    QWidget *detailsPanel_ = nullptr;
+    QScrollArea *mediaGridArea_ = nullptr;
+    QWidget *mediaGridWidget_ = nullptr;
+    QGridLayout *mediaGridLayout_ = nullptr;
+    QLabel *gridHint_ = nullptr;
+    QToolButton *detailsToggle_ = nullptr;
+    QLabel *detailName_ = nullptr;
+    QLabel *detailPath_ = nullptr;
+    QLabel *detailAspect_ = nullptr;
+    QLabel *detailResolution_ = nullptr;
+    QLabel *detailFps_ = nullptr;
+    QLabel *detailDuration_ = nullptr;
+
+    // Media grid model (#136): parallel lists + thumbnail cache keyed
+    // by path (pruned when items leave the grid).
     QStringList mediaNames_;
     QStringList mediaPaths_;
     QHash<QString, QImage> thumbnails_;

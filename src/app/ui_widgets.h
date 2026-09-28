@@ -258,6 +258,9 @@ inline QIcon makeIcon(const QString &name, const QColor &color, int logicalSize 
     } else if (name == QLatin1String("reset")) { // circular arrow
         p.drawArc(QRectF(5, 5, 14, 14), 45 * 16, 270 * 16);
         tri(QPointF(19.6, 6.2), QPointF(19.6, 12.6), QPointF(14.6, 9.4));
+    } else if (name == QLatin1String("redo")) { // circular arrow, mirrored (quick toolbar)
+        p.drawArc(QRectF(5, 5, 14, 14), 225 * 16, 270 * 16);
+        tri(QPointF(4.4, 6.2), QPointF(4.4, 12.6), QPointF(9.4, 9.4));
     } else if (name == QLatin1String("waveform")) {
         line(4, 10, 4, 14);
         line(8, 7, 8, 17);

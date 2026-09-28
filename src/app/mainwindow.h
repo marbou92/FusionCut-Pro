@@ -11,6 +11,8 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -161,6 +163,10 @@ private:
     // sequence duration = timeline extent (falls back to the loaded
     // media duration for an empty timeline); refreshes panel + transport.
     void updateSequenceDuration();
+    // Pushes the project's Name/Path/Aspect/Resolution/Frame rate/
+    // Duration rows to the Quick Mode Details panel (round 4). Cheap
+    // string work; called from the funnels that change those values.
+    void updateQuickDetails();
 
     // effects pipeline - raw-frame cache + live stack application.
     // frameReady stores the decoded frame (pre-effects) and the clip it
@@ -209,8 +215,12 @@ private:
     void rebuildAudioSnapshot();
     // Opens the WASAPI preview device, builds the mixer at the device's
     // rate, and starts pulling the mixed timeline from the playhead.
+    // The device STAYS OPEN between plays (round 4): play/pause move
+    // the stream between parked and rendering, so both are instant.
     void startAudioPreview();
-    // Stops the preview stream and joins its thread.
+    // Parks the preview stream (device stays open). Frees the mixer
+    // only when the parked handshake completed - a wedged pull callback
+    // keeps its mixer alive instead of freeing it underneath itself.
     void stopAudioPreview();
 
     // cut transitions - add/remove/duration routing for the
@@ -374,6 +384,10 @@ private:
     std::list<std::pair<int64_t, QImage>> textLayerLru_; // front = most recent
     std::unordered_map<int64_t, std::list<std::pair<int64_t, QImage>>::iterator> textLayerIndex_;
     QSize lastProgramSize_{1280, 720};
+    // The size the Quick Details panel last showed (frameReady gates
+    // its updateQuickDetails call on a change - the panel must not
+    // re-stringify on every decoded frame).
+    QSize quickDetailsSize_{0, 0};
 
     // The SELECTED color-emoji font (one of the machine's installed
     // fonts - the app bundles none): the GUI-side painter + its path +
@@ -397,6 +411,14 @@ private:
     uint64_t audioSpansRevision_ = 0;
     bool audioDeviceWarned_ = false;      // one "device lost" message per run
     bool audioUnavailableWarned_ = false; // one "no usable device" message per session
+    bool audioSilentWarned_ = false;      // one "no audio clips" message per session
+    bool audioBeginWarned_ = false;       // one "could not start" message per session
+    // First mixer pull error (audio thread writes, the GUI tick reads
+    // and surfaces): a source that will not open/decode otherwise dies
+    // silently - the exact "audio is not playing" report with no clue.
+    std::mutex audioErrorMutex_;
+    std::string audioPullError_;
+    std::atomic<bool> audioPullErrorFresh_{false};
     // Proxy state: one job at a time (a second Ctrl+P used to overwrite
     // proxySourcePath_ and cross-wire both jobs' done handling).
     bool proxyRunning_ = false;

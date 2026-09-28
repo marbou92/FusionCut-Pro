@@ -36,6 +36,17 @@ public:
     // left empty in that case) or on failure.
     bool readFrame(DecodedFrame &out, std::string &error);
 
+    // Output scale for the PREVIEW pipeline: 1.0 (default) = native
+    // resolution, 0.5 / 0.25 = frames are scaled down on the way out.
+    // The H.264/H.265 decode itself stays full-resolution (a codec
+    // cannot decode a downscaled picture); what the scale cuts is all
+    // the per-frame work AFTER the codec - the full-frame YUV->RGBA
+    // conversion, the QImage copy, the effect composite and the paint -
+    // which is exactly the work that made 1/2 preview feel identical to
+    // Full. Export is untouched: it renders through its own pipeline.
+    void setOutputScale(double factor);
+    double outputScale() const { return outputScale_; }
+
 private:
     bool ensureScaler(std::string &error);
 
@@ -52,6 +63,8 @@ private:
     AVPixelFormat scalerSrcFormat_ = AV_PIX_FMT_NONE;
     int scalerSrcW_ = 0;
     int scalerSrcH_ = 0;
+    double scalerSrcScale_ = 1.0;
+    double outputScale_ = 1.0;
 };
 
 } // namespace fc

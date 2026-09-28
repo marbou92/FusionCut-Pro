@@ -294,6 +294,16 @@ QString buildAppStylesheet(const QString &indicatorDir) {
             "QGroupBox { background: %15; border: 1px solid %5; border-radius: 10px; "
             "  margin-top: 12px; padding-top: 6px; }"
             "QGroupBox::title { subcontrol-origin: margin; left: 10px; color: %6; }"
+            // -- round 4: labels and tool buttons could still fall back
+            //    to a light-palette BLACK on the dark chrome (any widget
+            //    whose palette was not the app-wide one). Explicit color
+            //    rules close that hole; widget-local stylesheets and the
+            //    :disabled states still win where they are set. --
+            "QLabel { color: %6; }"
+            "QLabel:disabled { color: %7; }"
+            "QToolButton { color: %6; }"
+            "QToolButton:disabled { color: %7; }"
+            "QDockWidget { color: %6; }"
             "QLabel#fcToast { background: %3; border: 1px solid %5; border-radius: 17px; "
             "  padding: 7px 18px; color: %6; font-weight: 600; }")
             // Chained single-arg form: QString::arg replaces the lowest
@@ -330,6 +340,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildDecodeThread();
     buildProWorkspace();
     buildQuickWorkspace();
+    updateQuickDetails(); // Details panel starts at the untitled defaults
     buildMenus();
     buildStatusBar();
     buildTray(); // #130: branded Windows tray icon (skipped when none)
@@ -347,6 +358,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     playClock_ = new QTimer(this);
     playClock_->setTimerType(Qt::CoarseTimer);
     connect(playClock_, &QTimer::timeout, this, [this] {
+        // Surface the first mixer pull error (parked by the audio
+        // thread): a source that will not open or decode used to die
+        // in total silence with zero feedback - the exact "audio is
+        // not playing" report with nothing to go on.
+        if (audioPullErrorFresh_.exchange(false)) {
+            std::string pullError;
+            {
+                std::lock_guard<std::mutex> lock(audioErrorMutex_);
+                pullError = audioPullError_;
+            }
+            statusBar()->showMessage(
+                tr("Audio source error: %1").arg(QString::fromStdString(pullError)), 8000);
+        }
         // While the preview audio device runs, ITS consumed position is
         // the playhead's clock (a QTimer drifts with load; the audio
         // stream cannot). Without audio the wall tick advances as
@@ -502,6 +526,13 @@ void MainWindow::applyDarkTheme() {
     pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x777777));
     pal.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x777777));
     setPalette(pal);
+    // Round 4: the palette is now APPLICATION-WIDE. It used to be set
+    // on MainWindow only, so every widget OUTSIDE its parent chain
+    // (top-level dialogs, static QFileDialog/QMessageBox convenience
+    // popups, native popups on Win7) kept the LIGHT default palette -
+    // their plain labels painted near-black text on the dark QSS
+    // chrome. qApp->setPalette covers every window in the process.
+    qApp->setPalette(pal);
     // #98 (round-3): the app-wide control stylesheet - every native-light
     // Win7 control (menus, tabs, scrollbars, combos, inputs, checks,
     // tooltips, splitters, sliders) goes dark with the Apple language.
@@ -587,6 +618,10 @@ void MainWindow::buildDecodeThread() {
         frameClipId_ = lastProgramClipId_;
         if (!frame.isNull() && frame.width() > 0 && frame.height() > 0) {
             lastProgramSize_ = frame.size(); // text-over-black base geometry
+            if (lastProgramSize_ != quickDetailsSize_) {
+                quickDetailsSize_ = lastProgramSize_;
+                updateQuickDetails(); // Details panel follows the preview resolution
+            }
         }
         // The timeline playhead + transport show the TIMELINE position
         // (playhead_), not the source-relative pts of the arriving
@@ -1100,13 +1135,39 @@ void MainWindow::buildQuickWorkspace() {
         }
         Toast::showOn(this, tr("The %1 workspace lives in Pro Mode").arg(tool));
     });
-    // Media strip (#136): a card tap is the library double-click flow -
+    // Media grid (#136): a card tap is the library double-click flow -
     // arm the add intent, the probe places the clip at the playhead.
     connect(quickView_, &QuickModeView::mediaActivated, this, [this](const QString &path) {
         pendingAddClipPath_ = path;
         pendingAddToken_ = ++loadTokenCounter_;
         loadClip(path, pendingAddToken_);
     });
+    // Round 4 Quick Mode: the edit trio routes into the same engine
+    // entry points the Pro menus use, and the Details panel's Modify
+    // hands off to Pro Mode (aspect/resolution/rate live there).
+    connect(quickView_, &QuickModeView::undoRequested, this, [this] { undo(); });
+    connect(quickView_, &QuickModeView::redoRequested, this, [this] { redo(); });
+    connect(quickView_, &QuickModeView::splitRequested, this, [this] { splitAtPlayhead(); });
+    connect(quickView_, &QuickModeView::detailsModifyRequested, this, [this] {
+        setMode(true);
+        Toast::showOn(this, tr("Aspect, resolution and frame rate live in Pro Mode"));
+    });
+    // Preview quality drives the DECODE, not just the paint (round 4):
+    // the program + quick canvases show the same program frames, so
+    // either dropdown rescales the shared decode worker (0.5 / 0.25
+    // cut the post-codec work - conversion, composite, copy, paint -
+    // and 1/2 preview finally plays smoother than Full). The Source
+    // monitor's dropdown stays paint-side on purpose: its quality is
+    // independent, and the worker's scale is one shared knob.
+    const auto applyDecodeScale = [this](int quality) {
+        const double factor = quality == 1 ? 0.5 : quality == 2 ? 0.25 : 1.0;
+        QMetaObject::invokeMethod(worker_, "setOutputScale", Q_ARG(double, factor));
+        if (!playing_) {
+            requestFrameAt(playhead_); // re-render the paused frame at the new scale
+        }
+    };
+    connect(programCanvas_, &PreviewCanvas::qualityChanged, this, applyDecodeScale);
+    connect(quickView_->canvas(), &PreviewCanvas::qualityChanged, this, applyDecodeScale);
 }
 
 void MainWindow::buildMenus() {
@@ -1888,8 +1949,34 @@ void MainWindow::updateSequenceDuration() {
     // every MainWindow model mutation funnels through here;
     // keep the transition editor in sync with pruned/clamped transitions.
     syncTransitionEditor();
+    updateQuickDetails(); // trims/extends show up in the Details duration
     // same funnel marks the project dirty.
     markDirty();
+}
+
+void MainWindow::updateQuickDetails() {
+    if (quickView_ == nullptr) {
+        return;
+    }
+    const QFileInfo info(projectPath_);
+    const QString name = projectPath_.isEmpty() ? tr("Untitled project") : info.completeBaseName();
+    const QString path =
+        projectPath_.isEmpty() ? QString() : QDir::toNativeSeparators(info.absoluteFilePath());
+    // Aspect from the preview frame geometry (the numbers the monitor
+    // letterboxes to), reduced the classic way - 1280x720 reads 16:9.
+    QString aspect;
+    const QSize size = lastProgramSize_;
+    if (size.width() > 0 && size.height() > 0) {
+        int a = size.width();
+        int b = size.height();
+        while (b != 0) {
+            const int t = a % b;
+            a = b;
+            b = t;
+        }
+        aspect = QStringLiteral("%1:%2").arg(size.width() / a).arg(size.height() / a);
+    }
+    quickView_->setDetails(name, path, aspect, size, fps_, sequenceDuration_);
 }
 
 void MainWindow::generateProxy(const QString &sourcePath) {
@@ -1933,6 +2020,11 @@ void MainWindow::startPlayback(bool playing) {
     } else {
         playClock_->stop();
         stopAudioPreview();
+        // Instant pause, part 2: the monitor may be showing a frame
+        // the clock has already moved past (decode latency). Re-resolve
+        // the EXACT paused position so the picture lands with the
+        // playhead instead of a beat behind it.
+        requestFrameAt(playhead_);
     }
 }
 
@@ -2455,6 +2547,13 @@ void MainWindow::startAudioPreview() {
     audioDeviceWarned_ = false; // a fresh run gets a fresh "device lost" message
     rebuildAudioSnapshot();
     if (!audioSpans_.hasAudio()) {
+        // The other side of "audio is not playing": silence with zero
+        // feedback read as a broken app. Say why, once per session.
+        if (!audioSilentWarned_) {
+            audioSilentWarned_ = true;
+            statusBar()->showMessage(
+                tr("No audio clips on the audio tracks - playing without sound."), 6000);
+        }
         return; // nothing to hear: no device, no mixer, the tick keeps time
     }
     int rate = 0, channels = 0;
@@ -2474,26 +2573,53 @@ void MainWindow::startAudioPreview() {
     audioPulled_ = 0;
     fc::AudioWindowMixer *mixer = previewMixer_.get();
     const int64_t startSample = audioStartSample_;
-    audioPreview_->begin([this, mixer, startSample, rate](float *dst, int frames) {
-        // Audio render thread: ONLY thread-safe state is touched here
-        // (the snapshot mutex + the mixer, which this thread alone
-        // owns while running).
-        std::vector<fc::AudioSpan> spans;
-        double master = 1.0;
-        audioSpans_.take(spans, master);
-        mixer->setMasterGain(master); // live fader moves
-        const int64_t position = startSample + audioPulled_.load();
-        std::string pullError;
-        mixer->pull(spans, position, frames, dst, pullError);
-        audioPulled_ += frames;
-    });
+    const bool started =
+        audioPreview_->begin([this, mixer, startSample, rate](float *dst, int frames) {
+            // Audio render thread: ONLY thread-safe state is touched here
+            // (the snapshot mutex + the mixer, which this thread alone
+            // owns while running).
+            std::vector<fc::AudioSpan> spans;
+            double master = 1.0;
+            audioSpans_.take(spans, master);
+            mixer->setMasterGain(master); // live fader moves
+            const int64_t position = startSample + audioPulled_.load();
+            std::string pullError;
+            mixer->pull(spans, position, frames, dst, pullError);
+            audioPulled_ += frames;
+            if (!pullError.empty()) {
+                // Never touch widgets from the audio thread: park the FIRST
+                // error and let the GUI tick surface it (see the timer).
+                std::lock_guard<std::mutex> lock(audioErrorMutex_);
+                if (audioPullError_.empty()) {
+                    audioPullError_ = pullError;
+                }
+                audioPullErrorFresh_ = true;
+            }
+        });
+    if (!started && !audioBeginWarned_) {
+        // probe() succeeded but the stream refused to start (device
+        // wedged while parked). The tick falls back to the wall clock;
+        // say why instead of failing silently.
+        audioBeginWarned_ = true;
+        statusBar()->showMessage(tr("Audio preview could not start - playback continues "
+                                    "without sound."),
+                                 8000);
+    }
 }
 
 void MainWindow::stopAudioPreview() {
     if (audioPreview_) {
-        audioPreview_->stop();
+        // Instant pause: parks the WASAPI stream and keeps the device
+        // open, so the next play skips the whole reopen. A false return
+        // means the render thread is wedged inside the driver - keep
+        // the mixer alive (the pull callback may still reference it)
+        // instead of freeing it underneath itself.
+        if (audioPreview_->stop()) {
+            previewMixer_.reset();
+        }
+    } else {
+        previewMixer_.reset();
     }
-    previewMixer_.reset();
 }
 
 void MainWindow::importCaptions() {
@@ -2986,6 +3112,7 @@ bool MainWindow::saveProjectAs() {
         updateWindowTitle();
         return false;
     }
+    updateQuickDetails(); // the Details panel follows the saved name/path
     return true;
 }
 
@@ -3036,6 +3163,7 @@ void MainWindow::openProject() {
     // model (the old code kept whatever fps the last probe adopted).
     fps_ = model_.fps();
     sequenceFpsSet_ = true;
+    updateQuickDetails(); // the loaded project's identity lands in Details
     selectedClipId_ = -1;
     selectedTransitionId_ = -1;
     lastProgramClipId_ = -1;

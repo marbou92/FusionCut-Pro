@@ -59,6 +59,7 @@ void PreviewCanvas::setQuality(Quality quality) {
         qualityBox_->setCurrentIndex(static_cast<int>(quality));
         qualityBox_->blockSignals(false);
     }
+    emit qualityChanged(static_cast<int>(quality));
     update();
 }
 
@@ -115,6 +116,7 @@ void PreviewCanvas::buildOverlays() {
     connect(qualityBox_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
                 quality_ = static_cast<Quality>(index);
+                emit qualityChanged(index);
                 update();
             });
 

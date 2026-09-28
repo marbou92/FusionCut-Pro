@@ -46,6 +46,12 @@ const wchar_t kClsidMMDeviceEnumerator[] = L"{BCDE0395-E52F-467C-8E3D-C457929169
 
 constexpr REFERENCE_TIME kReferenceUnitsPerSecond = 10000000; // 100 ns units
 
+// Bounded handshake waits: begin()/stop() must never hang the GUI on a
+// wedged driver, but a park/resume handshake is normally microseconds
+// (the render thread waits on the control event with a 200 ms poll
+// ceiling, and SetEvent wakes it immediately).
+constexpr auto kHandshakeTimeout = std::chrono::seconds(2);
+
 // The negotiated device sample type. Shared-mode mix formats are
 // float32 in practice, but int16 and int32 devices exist (and a
 // wrong guess here either whispers garbage or hands the device raw
@@ -70,7 +76,7 @@ struct AudioPreview::Impl {
     IAudioRenderClient *render = nullptr;
     WAVEFORMATEX *format = nullptr; // CoTaskMemAlloc'd mix format
     HANDLE streamEvent = nullptr;   // buffer-empty notifications
-    HANDLE controlEvent = nullptr;  // begin/stop control changes
+    HANDLE controlEvent = nullptr;  // begin/stop/release control changes
     UINT32 bufferFrames = 0;
     bool comInit = false;
 
@@ -82,11 +88,22 @@ struct AudioPreview::Impl {
     // ---- shared state ----
     std::thread thread;
     std::mutex mutex;
-    std::condition_variable ready; // probe handshake
+    std::condition_variable ready; // probe + begin/stop handshakes
     bool probeDone = false;
-    bool probeOk = false;
+    // Parked (idle) vs rendering: the begin/stop handshakes wait on the
+    // transitions. Guarded by `mutex` for the CV waits, but ALSO read
+    // lock-free (stop()'s fast path, begin()'s guard), so atomics.
+    std::atomic<bool> probeOk{false};
+    std::atomic<bool> idle{true};
+    // Set once the open phase finished (probe handshake done). Read by
+    // probe()'s fast path on the GUI thread without the mutex - it is
+    // only a hint (a false negative costs one full open; a false
+    // positive is impossible because it is cleared BEFORE the thread
+    // exits and probe() re-checks failed_).
+    std::atomic<bool> open{false};
     std::atomic<bool> exitFlag{false};
     std::atomic<bool> beginFlag{false};
+    std::atomic<bool> stopFlag{false};
     std::atomic<bool> playing{false};
     PullFn pull; // installed by begin() (before Start)
     std::atomic<int64_t> playedFrames{0};
@@ -187,23 +204,34 @@ bool parseMixFormat(const WAVEFORMATEX *fmt, int &rate, int &ch, DeviceFormat &o
 AudioPreview::AudioPreview() : impl_(new Impl) {}
 
 AudioPreview::~AudioPreview() {
-    stop();
+    release();
 }
 
 bool AudioPreview::probe(int &sampleRate, int &channels) {
-    if (impl_->thread.joinable()) {
-        stop(); // a re-probe implies a fresh run
+    // Fast path: the device from a previous run is still open and
+    // healthy - hand back the cached geometry without touching COM.
+    // This is what makes a play-after-pause instant.
+    if (impl_->open.load() && !failed_.load()) {
+        sampleRate = impl_->rate;
+        channels = impl_->channels;
+        return true;
+    }
+    if (failed_.load() || impl_->thread.joinable()) {
+        release(); // a dead device (or a stale thread) needs a fresh open
     }
     impl_->probeDone = false;
     impl_->probeOk = false;
     impl_->exitFlag = false;
     impl_->beginFlag = false;
+    impl_->stopFlag = false;
+    impl_->idle = true;
     impl_->playing = false;
     impl_->playedFrames = 0;
     failed_ = false; // a fresh run starts optimistic (the device may be back)
-
     // The render thread owns every COM object (created, used, and
     // released there - a clean apartment story, nothing cross-thread).
+    // It stays alive for the WHOLE session: open once, then serve
+    // begin/stop by parking and resuming the stream.
     impl_->thread = std::thread([this]() {
         if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
             std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -311,105 +339,138 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
             return;
         }
 
-        // Probe succeeded: signal the caller, then WAIT for begin/stop.
+        // Probe succeeded: signal the caller, then enter the service
+        // loop (parked) with the device HELD OPEN.
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             impl_->probeDone = true;
             impl_->probeOk = true;
+            impl_->idle = true;
             impl_->ready.notify_all();
         }
-
-        // ---- pre-roll wait: hold the stream stopped ----
-        while (!impl_->exitFlag.load() && !impl_->beginFlag.load()) {
-            WaitForSingleObject(impl_->controlEvent, 200);
-        }
-        if (impl_->exitFlag.load()) {
-            impl_->closeAll();
-            return;
-        }
-
-        // ---- render loop ----
-        if (FAILED(impl_->client->Start())) {
-            failed_ = true; // device death: the transport must not trust this clock
-            impl_->closeAll();
-            return;
-        }
-        impl_->playing = true;
-        int64_t submitted = 0;
-        std::vector<float> scratch;
-        while (!impl_->exitFlag.load()) {
-            HANDLE waits[2] = {impl_->controlEvent, impl_->streamEvent};
-            const DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 200);
-            if (rc == WAIT_OBJECT_0) {
-                break; // control: stop
+        impl_->open = true;
+        // ---- service loop: park / render / park / ... ----
+        while (true) {
+            // Parked: hold the stream stopped until begin() or exit.
+            while (!impl_->exitFlag.load() && !impl_->beginFlag.load()) {
+                WaitForSingleObject(impl_->controlEvent, 200);
             }
-            if (rc != WAIT_OBJECT_0 + 1 && rc != WAIT_TIMEOUT) {
-                failed_ = true;
-                break; // unexpected: bail out rather than spin
-            }
-            UINT32 padding = 0;
-            if (FAILED(impl_->client->GetCurrentPadding(&padding))) {
-                failed_ = true; // endpoint gone / format changed
+            if (impl_->exitFlag.load()) {
                 break;
             }
-            impl_->playedFrames = submitted - int64_t(padding);
-            const UINT32 available =
-                padding < impl_->bufferFrames ? impl_->bufferFrames - padding : 0;
-            if (available == 0) {
-                continue;
+            impl_->beginFlag = false;
+
+            if (FAILED(impl_->client->Start())) {
+                failed_ = true; // device death while parked: force a reopen next probe
+                break;
             }
-            const int frames = static_cast<int>(available);
-            const int ch = impl_->channels;
-            scratch.assign(size_t(frames) * ch, 0.0f);
+            impl_->playing = true;
             {
-                // The pull callback runs HERE (audio thread). Any
-                // failure is silence, never an exception off the
-                // audio thread.
-                const PullFn pull = [&]() {
-                    std::lock_guard<std::mutex> lock(impl_->mutex);
-                    return impl_->pull;
-                }();
-                if (pull) {
-                    try {
-                        pull(scratch.data(), frames);
-                    } catch (...) {
-                        std::fill(scratch.begin(), scratch.end(), 0.0f);
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                impl_->idle = false;
+                impl_->ready.notify_all(); // begin()'s handshake returns here
+            }
+
+            // ---- render loop ----
+            bool dead = false;
+            int64_t submitted = 0;
+            std::vector<float> scratch;
+            while (!impl_->exitFlag.load() && !impl_->stopFlag.load()) {
+                HANDLE waits[2] = {impl_->controlEvent, impl_->streamEvent};
+                const DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 200);
+                if (rc == WAIT_OBJECT_0) {
+                    break; // control: stop
+                }
+                if (rc != WAIT_OBJECT_0 + 1 && rc != WAIT_TIMEOUT) {
+                    failed_ = true; // unexpected: bail out rather than spin
+                    dead = true;
+                    break;
+                }
+                UINT32 padding = 0;
+                if (FAILED(impl_->client->GetCurrentPadding(&padding))) {
+                    failed_ = true; // endpoint gone / format changed
+                    dead = true;
+                    break;
+                }
+                impl_->playedFrames = submitted - int64_t(padding);
+                const UINT32 available =
+                    padding < impl_->bufferFrames ? impl_->bufferFrames - padding : 0;
+                if (available == 0) {
+                    continue;
+                }
+                const int frames = static_cast<int>(available);
+                const int ch = impl_->channels;
+                scratch.assign(size_t(frames) * ch, 0.0f);
+                {
+                    // The pull callback runs HERE (audio thread). Any
+                    // failure is silence, never an exception off the
+                    // audio thread.
+                    const PullFn pull = [&]() {
+                        std::lock_guard<std::mutex> lock(impl_->mutex);
+                        return impl_->pull;
+                    }();
+                    if (pull) {
+                        try {
+                            pull(scratch.data(), frames);
+                        } catch (...) {
+                            std::fill(scratch.begin(), scratch.end(), 0.0f);
+                        }
                     }
                 }
-            }
-            BYTE *dst = nullptr;
-            if (FAILED(impl_->render->GetBuffer(frames, &dst))) {
-                failed_ = true; // the render pipeline is wedged: no submission, frozen clock
-                continue;
-            }
-            if (impl_->outFormat == DeviceFormat::Float32) {
-                std::memcpy(dst, scratch.data(), size_t(frames) * ch * sizeof(float));
-            } else if (impl_->outFormat == DeviceFormat::Int16) {
-                // int16 device (rare in shared mode): convert + clamp.
-                int16_t *out = reinterpret_cast<int16_t *>(dst);
-                for (size_t i = 0; i < scratch.size(); ++i) {
-                    const double v = std::clamp(double(scratch[i]), -1.0, 1.0);
-                    out[i] = int16_t(std::lrint(v * 32767.0));
+                BYTE *dst = nullptr;
+                if (FAILED(impl_->render->GetBuffer(frames, &dst))) {
+                    failed_ = true; // the render pipeline is wedged: no submission
+                    dead = true;
+                    break;
                 }
-            } else {
-                // int32 device: same clamp, wider target (the old code
-                // guessed "32 bits = float" and pasted raw float bits
-                // into the int32 buffer - full-scale white noise).
-                int32_t *out = reinterpret_cast<int32_t *>(dst);
-                for (size_t i = 0; i < scratch.size(); ++i) {
-                    const double v = std::clamp(double(scratch[i]), -1.0, 1.0);
-                    out[i] = int32_t(std::llrint(v * 2147483647.0));
+                if (impl_->outFormat == DeviceFormat::Float32) {
+                    std::memcpy(dst, scratch.data(), size_t(frames) * ch * sizeof(float));
+                } else if (impl_->outFormat == DeviceFormat::Int16) {
+                    // int16 device (rare in shared mode): convert + clamp.
+                    int16_t *out = reinterpret_cast<int16_t *>(dst);
+                    for (size_t i = 0; i < scratch.size(); ++i) {
+                        const double v = std::clamp(double(scratch[i]), -1.0, 1.0);
+                        out[i] = int16_t(std::lrint(v * 32767.0));
+                    }
+                } else {
+                    // int32 device: same clamp, wider target (the old code
+                    // guessed "32 bits = float" and pasted raw float bits
+                    // into the int32 buffer - full-scale white noise).
+                    int32_t *out = reinterpret_cast<int32_t *>(dst);
+                    for (size_t i = 0; i < scratch.size(); ++i) {
+                        const double v = std::clamp(double(scratch[i]), -1.0, 1.0);
+                        out[i] = int32_t(std::llrint(v * 2147483647.0));
+                    }
                 }
+                if (FAILED(impl_->render->ReleaseBuffer(frames, 0))) {
+                    failed_ = true; // the samples never reached the device
+                    dead = true;
+                    break;
+                }
+                submitted += frames;
+                impl_->playedFrames = submitted - int64_t(padding);
             }
-            if (FAILED(impl_->render->ReleaseBuffer(frames, 0))) {
-                failed_ = true; // the samples never reached the device
-                continue;
+            impl_->playing = false;
+            // Park the stream, flush what was buffered so the next
+            // begin() starts from silence (the submitted pre-roll
+            // would otherwise replay on resume), and hand the stop
+            // handshake back. The DEVICE OBJECTS stay open.
+            impl_->client->Stop();
+            impl_->client->Reset();
+            impl_->stopFlag = false;
+            {
+                std::lock_guard<std::mutex> lock(impl_->mutex);
+                impl_->idle = true;
+                impl_->ready.notify_all(); // stop()'s handshake returns here
             }
-            submitted += frames;
-            impl_->playedFrames = submitted - int64_t(padding);
+            if (dead) {
+                break; // teardown below; probe() will reopen on demand
+            }
         }
-        impl_->playing = false;
+
+        // ---- teardown (exit or dead device) ----
         impl_->closeAll();
+        impl_->open = false;
     });
 
     // Wait for the probe handshake (bounded: device open is fast, but
@@ -420,13 +481,7 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
         // The thread will notice and exit on its own; join it here so
         // the object is always either idle or alive.
         lock.unlock();
-        if (impl_->thread.joinable()) {
-            impl_->exitFlag = true;
-            if (impl_->controlEvent) {
-                SetEvent(impl_->controlEvent);
-            }
-            impl_->thread.join();
-        }
+        release();
         return false;
     }
     sampleRate = impl_->rate;
@@ -443,15 +498,63 @@ bool AudioPreview::begin(const PullFn &pull) {
         impl_->pull = pull;
         impl_->playedFrames = 0;
     }
+    impl_->stopFlag = false;
     impl_->beginFlag = true;
     SetEvent(impl_->controlEvent);
+    // Bounded handshake: return only once the stream is actually
+    // rendering (idle -> false) so the caller's first tick reads a
+    // live clock. A wedged Start() surfaces as a timeout + failed_.
+    std::unique_lock<std::mutex> lock(impl_->mutex);
+    const bool started = impl_->ready.wait_for(lock, kHandshakeTimeout,
+                                               [this]() { return !impl_->idle || failed_.load(); });
+    if (!started || failed_.load()) {
+        running_ = false;
+        return false;
+    }
     running_ = true;
     return true;
 }
 
-void AudioPreview::stop() {
+bool AudioPreview::stop() {
+    if (!impl_->thread.joinable()) {
+        return true; // never probed: nothing to park
+    }
+    impl_->beginFlag = false;
+    if (impl_->idle.load()) {
+        // Already parked (or parked between runs): the pull callback
+        // can no longer run.
+        impl_->stopFlag = false;
+        running_ = false;
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->pull = PullFn();
+        return true;
+    }
+    impl_->stopFlag = true;
+    SetEvent(impl_->controlEvent);
+    // Bounded handshake: wait for the parked ack. Once idle, the pull
+    // callback can no longer run and the caller may free the mixer.
+    std::unique_lock<std::mutex> lock(impl_->mutex);
+    const bool parked =
+        impl_->ready.wait_for(lock, kHandshakeTimeout, [this]() { return impl_->idle.load(); });
+    if (parked) {
+        running_ = false;
+        lock.unlock();
+        impl_->pull = PullFn(); // parked: nobody reads this anymore
+        return true;
+    }
+    // Wedged inside the driver. Keep running_ semantics (the transport
+    // falls back to its wall clock) but DO NOT clear pull: the render
+    // thread may still be inside the callback, and the objects it
+    // references must stay alive. The next probe()/begin() on a healthy
+    // driver recovers; a truly wedged one needs an app restart.
+    return false;
+}
+
+void AudioPreview::release() {
     if (impl_->thread.joinable()) {
         impl_->exitFlag = true;
+        impl_->beginFlag = false;
+        impl_->stopFlag = false;
         if (impl_->controlEvent) {
             SetEvent(impl_->controlEvent);
         }
@@ -460,8 +563,13 @@ void AudioPreview::stop() {
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->pull = PullFn();
+        impl_->probeDone = false;
+        impl_->probeOk = false;
+        impl_->idle = true;
     }
+    impl_->open = false;
     running_ = false;
+    failed_ = false;
 }
 
 double AudioPreview::playedSeconds() const {
@@ -473,7 +581,7 @@ double AudioPreview::playedSeconds() const {
 
 bool AudioPreview::healthy() const {
     // Alive AND not failed AND actually rendering: after a mid-run
-    // device death the thread has exited but running_ is only cleared
+    // device death the stream has exited but running_ is only cleared
     // by stop(), so the transport must not keep reading a frozen clock.
     return running_.load() && !failed_.load() && impl_->playing.load();
 }
@@ -485,7 +593,7 @@ struct AudioPreview::Impl {};
 AudioPreview::AudioPreview() : impl_(new Impl) {}
 
 AudioPreview::~AudioPreview() {
-    stop();
+    release();
 }
 
 bool AudioPreview::probe(int &sampleRate, int &channels) {
@@ -499,7 +607,11 @@ bool AudioPreview::begin(const PullFn &pull) {
     return false;
 }
 
-void AudioPreview::stop() {}
+bool AudioPreview::stop() {
+    return true;
+}
+
+void AudioPreview::release() {}
 
 bool AudioPreview::healthy() const {
     return false; // no audio output layer on this platform

@@ -1,5 +1,6 @@
 #include "video_decoder.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "media_probe.h"
@@ -114,8 +115,13 @@ bool VideoDecoder::readFrame(DecodedFrame &out, std::string &error) {
                 return false;
             }
 
-            out.width = codec_->width;
-            out.height = codec_->height;
+            // Preview output scale: the codec emits its native picture,
+            // the scaler lands it at the scaled size in ONE pass. Odd
+            // results are fine for preview (QImage + sws accept any
+            // extent); at scale 1.0 the arithmetic is exact and the
+            // old geometry is preserved bit for bit.
+            out.width = std::max(1, static_cast<int>(std::llround(codec_->width * outputScale_)));
+            out.height = std::max(1, static_cast<int>(std::llround(codec_->height * outputScale_)));
             out.rgba.assign(static_cast<size_t>(out.width) * out.height * 4, 0);
             out.pts = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : frame_->best_effort_timestamp;
 
@@ -185,12 +191,13 @@ bool VideoDecoder::readFrame(DecodedFrame &out, std::string &error) {
 bool VideoDecoder::ensureScaler(std::string &error) {
     const AVPixelFormat srcFmt = codec_->pix_fmt;
     if (scaler_ && scalerSrcFormat_ == srcFmt && scalerSrcW_ == codec_->width &&
-        scalerSrcH_ == codec_->height) {
+        scalerSrcH_ == codec_->height && scalerSrcScale_ == outputScale_) {
         return true;
     }
-    scaler_.reset(sws_getContext(codec_->width, codec_->height, srcFmt, codec_->width,
-                                 codec_->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr,
-                                 nullptr));
+    const int dstW = std::max(1, static_cast<int>(std::llround(codec_->width * outputScale_)));
+    const int dstH = std::max(1, static_cast<int>(std::llround(codec_->height * outputScale_)));
+    scaler_.reset(sws_getContext(codec_->width, codec_->height, srcFmt, dstW, dstH, AV_PIX_FMT_RGBA,
+                                 SWS_BILINEAR, nullptr, nullptr, nullptr));
     if (!scaler_) {
         error = "swscale context creation failed";
         return false;
@@ -198,7 +205,26 @@ bool VideoDecoder::ensureScaler(std::string &error) {
     scalerSrcFormat_ = srcFmt;
     scalerSrcW_ = codec_->width;
     scalerSrcH_ = codec_->height;
+    scalerSrcScale_ = outputScale_;
     return true;
+}
+
+void VideoDecoder::setOutputScale(double factor) {
+    // Off-list values snap to the documented scales; a non-finite input
+    // (a NaN riding in from a corrupted settings read) falls to Full.
+    if (!std::isfinite(factor) || factor >= 0.9) {
+        factor = 1.0;
+    } else if (factor >= 0.4) {
+        factor = 0.5;
+    } else {
+        factor = 0.25;
+    }
+    if (outputScale_ == factor) {
+        return;
+    }
+    outputScale_ = factor;
+    // ensureScaler() keys on the scale too, so the context rebuilds on
+    // the next frame; no buffered state to drop here.
 }
 
 } // namespace fc
