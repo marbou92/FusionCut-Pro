@@ -46,6 +46,20 @@ const wchar_t kClsidMMDeviceEnumerator[] = L"{BCDE0395-E52F-467C-8E3D-C457929169
 
 constexpr REFERENCE_TIME kReferenceUnitsPerSecond = 10000000; // 100 ns units
 
+// The negotiated device sample type. Shared-mode mix formats are
+// float32 in practice, but int16 and int32 devices exist (and a
+// wrong guess here either whispers garbage or hands the device raw
+// float bits as integers - the old "32 bits = float" shortcut did
+// exactly that on int32 mix formats).
+// File-local at namespace scope, NOT a nested type of the private
+// AudioPreview::Impl: the free parseMixFormat helper below must name
+// it, and a private nested enum can only be named by members and
+// friends - the portable Windows leg (the only one that compiles
+// this path) rejected every reference with C++ access errors. Members
+// keep the same unqualified spelling through ordinary namespace
+// lookup, exactly like kClsidMMDeviceEnumerator above.
+enum class DeviceFormat { Float32, Int16, Int32 };
+
 } // namespace
 
 struct AudioPreview::Impl {
@@ -62,12 +76,7 @@ struct AudioPreview::Impl {
 
     int rate = 0;
     int channels = 0;
-    // The negotiated device sample type. Shared-mode mix formats are
-    // float32 in practice, but int16 and int32 devices exist (and a
-    // wrong guess here either whispers garbage or hands the device raw
-    // float bits as integers - the old "32 bits = float" shortcut did
-    // exactly that on int32 mix formats).
-    enum class DeviceFormat { Float32, Int16, Int32 };
+    // The negotiated device sample type - see DeviceFormat above.
     DeviceFormat outFormat = DeviceFormat::Float32;
 
     // ---- shared state ----
@@ -126,23 +135,21 @@ namespace {
 
 // Parses the negotiated mix format into the geometry the mixer needs.
 // Returns false for sample types the render path cannot feed.
-bool parseMixFormat(const WAVEFORMATEX *fmt, int &rate, int &ch,
-                    AudioPreview::Impl::DeviceFormat &outFormat) {
+bool parseMixFormat(const WAVEFORMATEX *fmt, int &rate, int &ch, DeviceFormat &outFormat) {
     rate = fmt->nSamplesPerSec;
     ch = fmt->nChannels;
-    outFormat = AudioPreview::Impl::DeviceFormat::Float32;
+    outFormat = DeviceFormat::Float32;
     if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        outFormat = fmt->wBitsPerSample == 32 ? AudioPreview::Impl::DeviceFormat::Float32
-                                              : AudioPreview::Impl::DeviceFormat::Int16;
+        outFormat = fmt->wBitsPerSample == 32 ? DeviceFormat::Float32 : DeviceFormat::Int16;
         return fmt->wBitsPerSample == 32;
     }
     if (fmt->wFormatTag == WAVE_FORMAT_PCM) {
         if (fmt->wBitsPerSample == 16) {
-            outFormat = AudioPreview::Impl::DeviceFormat::Int16;
+            outFormat = DeviceFormat::Int16;
             return true;
         }
         if (fmt->wBitsPerSample == 32) {
-            outFormat = AudioPreview::Impl::DeviceFormat::Int32;
+            outFormat = DeviceFormat::Int32;
             return true;
         }
         return false;
@@ -160,15 +167,15 @@ bool parseMixFormat(const WAVEFORMATEX *fmt, int &rate, int &ch,
         const bool isPcmSub = ext->SubFormat.Data1 == 1 && ext->SubFormat.Data2 == 0 &&
                               ext->SubFormat.Data3 == 0x0010;
         if (isFloatSub && ext->Samples.wValidBitsPerSample == 32) {
-            outFormat = AudioPreview::Impl::DeviceFormat::Float32;
+            outFormat = DeviceFormat::Float32;
             return true;
         }
         if (isPcmSub && ext->Samples.wValidBitsPerSample == 16 && fmt->wBitsPerSample == 16) {
-            outFormat = AudioPreview::Impl::DeviceFormat::Int16;
+            outFormat = DeviceFormat::Int16;
             return true;
         }
         if (isPcmSub && ext->Samples.wValidBitsPerSample == 32 && fmt->wBitsPerSample == 32) {
-            outFormat = AudioPreview::Impl::DeviceFormat::Int32;
+            outFormat = DeviceFormat::Int32;
             return true;
         }
     }
@@ -253,7 +260,7 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
 
         {
             int rate = 0, ch = 0;
-            AudioPreview::Impl::DeviceFormat fmt = AudioPreview::Impl::DeviceFormat::Float32;
+            DeviceFormat fmt = DeviceFormat::Float32;
             const bool typeKnown = parseMixFormat(format, rate, ch, fmt);
             // Only 1/2-channel float or int16/int32 mix formats can be
             // fed (the mixer produces interleaved float; int formats
@@ -375,9 +382,9 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                 failed_ = true; // the render pipeline is wedged: no submission, frozen clock
                 continue;
             }
-            if (impl_->outFormat == AudioPreview::Impl::DeviceFormat::Float32) {
+            if (impl_->outFormat == DeviceFormat::Float32) {
                 std::memcpy(dst, scratch.data(), size_t(frames) * ch * sizeof(float));
-            } else if (impl_->outFormat == AudioPreview::Impl::DeviceFormat::Int16) {
+            } else if (impl_->outFormat == DeviceFormat::Int16) {
                 // int16 device (rare in shared mode): convert + clamp.
                 int16_t *out = reinterpret_cast<int16_t *>(dst);
                 for (size_t i = 0; i < scratch.size(); ++i) {
