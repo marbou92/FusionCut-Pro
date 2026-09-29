@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 namespace fc {
 
@@ -93,6 +94,11 @@ public:
 
     bool running() const { return running_.load(); }
 
+    // True after any render-thread failure exit (device refused to
+    // start, endpoint vanished, engine stopped consuming): the status
+    // surface pairs it with lastError() to explain a silent timeline.
+    bool failed() const { return failed_.load(); }
+
     // True while the render thread is alive AND healthy: a device that
     // died mid-run (endpoint removed, format change, driver failure)
     // tears its stream down but - unlike release() - never clears
@@ -105,6 +111,12 @@ public:
     // this while playing. 0.0 when not running.
     double playedSeconds() const;
 
+    // Why the last run failed (round 5): empty after a clean run, a
+    // human-readable cause otherwise (endpoint vanished, the audio
+    // engine stopped consuming, ...). The status surface shows it so a
+    // silent timeline can never be a dead end again.
+    std::string lastError() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -112,6 +124,10 @@ private:
     // Set by the render thread's FAILURE exits (never by the clean
     // stop path); reset by probe() so the next run starts optimistic.
     std::atomic<bool> failed_{false};
+    // Every failure exit routes through here (Windows render thread):
+    // sets failed_ AND records `why` for lastError(). Defined as a
+    // no-op on the non-Windows branch (never called there).
+    void fail(const char *why);
 };
 
 } // namespace fc

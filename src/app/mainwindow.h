@@ -3,7 +3,9 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QMainWindow>
+#include <QSet>
 #include <QSize>
+#include <QStringList>
 #include <QTimer>
 #include <QVector>
 
@@ -45,7 +47,8 @@ class QuickModeView;
 namespace fc {
 class ScopesPanel;
 class SegmentedControl;
-class BusySpinner; // status-bar busy ring, defined in mainwindow.cpp
+class BusySpinner;       // status-bar busy ring, defined in mainwindow.cpp
+class MediaVisualWorker; // round-5 timeline filmstrip / waveform pump
 } // namespace fc
 class TextPanel;
 class TimelinePanel;
@@ -241,6 +244,20 @@ private:
     void restoreLayout();
     void saveLayout() const;
 
+    // ---- round 5: timeline media visuals + audio state chip ----
+    // Queues every clip source path the timeline visuals do not cover
+    // yet (filmstrip + waveform, produced by visualWorker_ on its own
+    // thread). Called from the model-mutation funnel.
+    void enqueueTimelineVisuals();
+    // One queued path per tick: resolves the decode path (proxy when
+    // one exists) and hands both jobs to the worker.
+    void pumpTimelineVisuals();
+    // Refreshes the permanent status-bar audio chip from the preview
+    // player's live state (gray idle / green rendering / red failure
+    // with the reason as the tooltip) - the end of "silence with zero
+    // feedback".
+    void updateAudioChip();
+
     // ---- UI round-7 additions (FUSIONCUT_UI_SUGGESTIONS.md) ----
     // Pushes per-source clip counts to the Project panel's usage badges
     // (#29); called from the mutation funnels.
@@ -272,6 +289,14 @@ private:
     // so a private worker/thread is all they need.
     DecodeWorker *proxyWorker_ = nullptr;
     QThread *proxyThread_ = nullptr;
+    // Round-5 visual pump: ONE low-priority thread turns imported
+    // sources into the timeline's filmstrips + waveforms (sequential
+    // queued jobs; never touches the playback decoders).
+    QThread *visualThread_ = nullptr;
+    MediaVisualWorker *visualWorker_ = nullptr;
+    QTimer *visualPump_ = nullptr;
+    QStringList visualQueue_;
+    QSet<QString> visualQueued_;
     // = nullptr like every sibling: it is assigned near the END of the
     // ctor, so any ctor-path use before that must read null, not garbage.
     QTimer *playClock_ = nullptr;
@@ -407,6 +432,7 @@ private:
     std::unique_ptr<fc::AudioWindowMixer> previewMixer_;
     double audioStartSeconds_ = 0.0;
     int64_t audioStartSample_ = 0;
+    int audioDeviceRate_ = 0; // the negotiated preview rate (audio chip)
     std::atomic<int64_t> audioPulled_{0};
     uint64_t audioSpansRevision_ = 0;
     bool audioDeviceWarned_ = false;      // one "device lost" message per run
@@ -439,6 +465,7 @@ private:
     QLabel *statusDirty_ = nullptr;
     QLabel *statusVersion_ = nullptr;      // #123
     BusySpinner *statusSpinner_ = nullptr; // #198
+    QLabel *audioChip_ = nullptr;          // round 5: live audio state
     QSystemTrayIcon *tray_ = nullptr;      // #130
     bool loopPlayback_ = false;            // #193
     ScopesPanel *scopesPanel_ = nullptr;

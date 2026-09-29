@@ -41,7 +41,7 @@ using namespace fc;
 namespace {
 constexpr int kHeaderWidth = 96;
 constexpr int kRulerHeight = 24; // #90: 24 px ruler band
-constexpr int kTrackHeight = 44;
+constexpr int kTrackHeight = 56; // round 5: CapCut-proportion lanes
 constexpr int kZoomBarHeight = 30;
 constexpr int kToolRowHeight = 30;
 constexpr int kHScrollHeight = 14;
@@ -53,16 +53,29 @@ constexpr int kEdgeGrabPx = 8; // edge-trim / roll grab zone
 constexpr double kRulerLabelMinPx = 99.0;
 
 // Shared design tokens (ui_theme.h): the timeline backdrop and the
-// selection accent come from the app palette; the track identity
-// palette further down stays local to the timeline.
+// selection accent come from the app palette; the round-5 CapCut-style
+// palette below stays local to the timeline.
 const QColor kPanelBg = ui::color(ui::kTimelineBg);
-const QColor kVideoTrack(0x2B, 0x30, 0x3A);
-const QColor kAudioTrack(0x1F, 0x36, 0x2E);
-const QColor kTextTrack(0x32, 0x28, 0x3A);
-const QColor kClipFill(0x37, 0x4B, 0x5A);
-const QColor kTextClipFill(0x59, 0x3D, 0x70);
+// Lane bands (drawLaneBands): near-black striping with a whisper of
+// the lane kind - video slate, audio green, text violet - over the
+// panel backdrop, CapCut-style.
+const QColor kVideoTrack(0x17, 0x1A, 0x1F);
+const QColor kAudioTrack(0x14, 0x1E, 0x1A);
+const QColor kTextTrack(0x1A, 0x16, 0x20);
+// Clip bodies. Video clips carry the filmstrip when one arrived, and
+// fall back to this slate; audio clips are deep teal with the real
+// waveform over them; text clips stay violet.
+const QColor kClipFill(0x24, 0x2B, 0x36);
+const QColor kAudioClipFill(0x13, 0x3A, 0x33);
+const QColor kTextClipFill(0x4A, 0x33, 0x5E);
 const QColor kGhostFill(0x6E, 0x9B, 0xB8);
 const QColor kGhostBad(0xB0, 0x3A, 0x2E);
+// Round 5 accents: the selection reads WHITE (CapCut), hover is white
+// at low alpha, and the label band sits on a dark gradient over the
+// strip so the clip name stays readable on any footage.
+const QColor kSelectionWhite(0xF4, 0xF6, 0xF8);
+const QColor kWaveform(0x7F, 0xE0, 0xC8);
+const QColor kLabel(0xE8, 0xEA, 0xEC);
 
 // #88: painted glyphs for the header L/M/S toggles (they stay painted -
 // the press hit band in headerBoxAt() is untouched). ~10 px glyphs: dim
@@ -578,6 +591,30 @@ double TimelinePanel::trackDimFactor(int index) const {
     return 1.0;
 }
 
+void TimelinePanel::setMediaStrip(const QString &path, const QImage &strip,
+                                  double durationSeconds) {
+    StripVisual visual;
+    visual.image = strip;
+    visual.durationSec = durationSeconds > 0.0 ? durationSeconds : 0.0;
+    strips_[path.toStdString()] = visual;
+    update();
+}
+
+void TimelinePanel::setMediaWaveform(const QString &path, const QVector<float> &peaks,
+                                     double durationSeconds) {
+    WaveformVisual visual;
+    visual.peaks = peaks;
+    visual.durationSec = durationSeconds > 0.0 ? durationSeconds : 0.0;
+    waveforms_[path.toStdString()] = visual;
+    update();
+}
+
+void TimelinePanel::clearMediaVisuals() {
+    strips_.clear();
+    waveforms_.clear();
+    update();
+}
+
 void TimelinePanel::setModel(const fc::TimelineModel *model) {
     model_ = model;
     // The selection ids belonged to the previous model content: a
@@ -719,6 +756,7 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
     painter.save();
     painter.setClipRect(lanes);
     painter.translate(-scrollX_, 0);
+    drawLaneBands(painter); // round 5: per-kind lane striping under the clips
     drawClips(painter);
     drawTransitions(painter);
     drawDragGhost(painter);
@@ -774,20 +812,29 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
     }
 
     // The PLAYHEAD spans ruler + lanes (never the header column).
+    // Round 5 CapCut-style: a WHITE 1 px line under a white rounded
+    // badge with a pointed tip in the ruler band.
     painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setClipRect(QRect(kHeaderWidth, contentTop(),
                               std::max(0, width() - kHeaderWidth - kHScrollHeight),
                               std::max(0, areaHeight())));
     painter.translate(-scrollX_, 0);
     const int x = frameToX(static_cast<int64_t>(playhead_ * fps_));
     if (x >= kHeaderWidth) {
-        painter.setPen(QPen(ui::color(ui::kText), 1));
-        painter.drawLine(x, contentTop(), x, areaHeight() + contentTop());
-        painter.setBrush(ui::color(ui::kText));
+        painter.setPen(QPen(kSelectionWhite, 1));
+        painter.setBrush(kSelectionWhite);
+        const int lineTop = contentTop() + 13; // below the badge tip
+        painter.drawLine(x, lineTop, x, areaHeight() + contentTop());
+        // Badge: rounded 10x9 head + a 5 px pointed tip (the classic
+        // CapCut playhead), all white with a hairline dark edge so it
+        // reads on the light ruler labels too.
+        painter.setPen(QPen(QColor(0, 0, 0, 60), 1));
+        painter.drawRoundedRect(QRectF(x - 5.0, contentTop() + 1.0, 10.0, 8.0), 2.5, 2.5);
         painter.setPen(Qt::NoPen);
-        // #90: small near-white triangle head (8 px wide, 7 px deep).
-        painter.drawPolygon(QPolygon() << QPoint(x - 4, contentTop()) << QPoint(x + 4, contentTop())
-                                       << QPoint(x, contentTop() + 7));
+        painter.drawPolygon(QPolygonF() << QPointF(x - 4.0, contentTop() + 8.5)
+                                        << QPointF(x + 4.0, contentTop() + 8.5)
+                                        << QPointF(x, contentTop() + 13.5));
     }
     painter.restore();
 
@@ -798,7 +845,7 @@ void TimelinePanel::paintEvent(QPaintEvent *) {
 void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
     const QRect headerArea(0, contentTop() + kRulerHeight, kHeaderWidth,
                            std::max(0, areaHeight() - kRulerHeight));
-    painter.fillRect(headerArea, QColor(0x18, 0x18, 0x18));
+    painter.fillRect(headerArea, QColor(0x12, 0x12, 0x12));
     painter.setPen(ui::color(ui::kLine));
     painter.drawLine(headerArea.right(), headerArea.top(), headerArea.right(), headerArea.bottom());
 
@@ -816,60 +863,90 @@ void TimelinePanel::drawHeaderColumn(QPainter &painter) const {
             continue;
         }
         const QColor accent = trackColor(r);
+        // Cell background mirrors the lane band so the header row and
+        // the lane read as ONE dark stripe across the panel (round 5).
+        painter.fillRect(cell,
+                         track->isAudio ? kAudioTrack : (track->isText ? kTextTrack : kVideoTrack));
         painter.fillRect(0, cell.top(), 3, kTrackHeight, accent);
+        painter.setPen(ui::withAlpha(ui::kLine, 120));
+        painter.drawLine(cell.left(), cell.bottom(), cell.right(), cell.bottom());
 
-        // #88: smooth chip + glyph pass (save/restore keeps the flat
-        // chrome painting above untouched). The L/M/S box rects below
-        // are the EXACT rects headerBoxAt() hit-tests - do not move them.
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing, true);
 
-        // Track ID chip: a small rounded chip filled with the track's
-        // identity color at ~80% alpha, dark text, elided to the cell.
-        // The rename editor and the press hit band keep their geometry.
-        QFont bold = painter.font();
-        bold.setBold(true);
-        painter.setFont(bold);
-        const QFontMetrics boldMetrics(bold);
-        const QString name = boldMetrics.elidedText(QString::fromStdString(track->name),
-                                                    Qt::ElideRight, kHeaderWidth - 30);
-        QColor chipFill = accent;
-        chipFill.setAlpha(204);
-        const QRect chip(8, cell.top() + 3,
-                         qBound(20, boldMetrics.horizontalAdvance(name) + 12, kHeaderWidth - 16),
-                         16);
-        painter.setPen(ui::color(ui::kOnAccent));
-        painter.setBrush(chipFill);
-        painter.drawRoundedRect(chip, 4, 4);
-        painter.drawText(chip, Qt::AlignCenter, name);
+        // Row 1: the lane-kind glyph in the track's identity color +
+        // the plain name in primary text (round 5: no more filled name
+        // chip - CapCut headers are dark and quiet).
+        const qreal dpr = devicePixelRatioF();
+        const QString glyph = track->isText    ? QStringLiteral("text")
+                              : track->isAudio ? QStringLiteral("music")
+                                               : QStringLiteral("film");
+        const QPixmap typeIcon =
+            icons::makeIcon(glyph, accent, 14, dpr).pixmap(qRound(14 * dpr), qRound(14 * dpr));
+        painter.drawPixmap(QPoint(9, cell.top() + 5), typeIcon);
 
-        // L/M/S toggles as painted glyphs (lock / speaker / star):
-        // off = hairline box + dim glyph, on = accent-tinted pill +
+        QFont nameFont = painter.font();
+        nameFont.setPixelSize(11);
+        painter.setFont(nameFont);
+        const QFontMetrics nameMetrics(nameFont);
+        const QString name = nameMetrics.elidedText(QString::fromStdString(track->name),
+                                                    Qt::ElideRight, kHeaderWidth - 30);
+        painter.setPen(ui::color(ui::kText));
+        painter.drawText(QRect(27, cell.top() + 4, kHeaderWidth - 31, 16),
+                         Qt::AlignLeft | Qt::AlignVCenter, name);
+
+        // Row 2: L/M/S toggles as painted glyphs (lock / speaker /
+        // star) - the SAME hit geometry headerBoxAt() tests: three
+        // 22x16 boxes on a 26 px pitch starting at x 10, band
+        // top+32..top+48. Off = dim glyph, on = accent-tinted pill +
         // near-white glyph.
         const bool states[3] = {track->locked, track->muted, track->solo};
         for (int c = 0; c < 3; ++c) {
-            const QRect box(10 + c * 26, cell.top() + 22, 22, 16);
+            const QRect box(10 + c * 26, cell.top() + 32, 22, 16);
             if (states[c]) {
                 QColor onTint = accent;
                 onTint.setAlpha(60);
                 painter.setPen(QPen(accent, 1));
                 painter.setBrush(onTint);
             } else {
-                painter.setPen(QPen(ui::color(ui::kLine), 1));
+                painter.setPen(Qt::NoPen);
                 painter.setBrush(QBrush());
             }
             painter.drawRoundedRect(box, 4, 4);
             const QPointF center(box.center() + QPointF(0.5, 0.5));
-            const QColor glyph = states[c] ? ui::color(ui::kText) : ui::color(ui::kTextDim);
+            const QColor glyphColor =
+                states[c] ? ui::color(ui::kText) : ui::color(ui::kTextDisabled);
             if (c == 0) {
-                paintLockGlyph(painter, center, glyph, states[c]);
+                paintLockGlyph(painter, center, glyphColor, states[c]);
             } else if (c == 1) {
-                paintMuteGlyph(painter, center, glyph, states[c]);
+                paintMuteGlyph(painter, center, glyphColor, states[c]);
             } else {
-                paintSoloGlyph(painter, center, glyph, states[c]);
+                paintSoloGlyph(painter, center, glyphColor, states[c]);
             }
         }
         painter.restore();
+    }
+}
+
+// Round 5 lane striping: one band per row in the lane kind's near-black
+// tint + a bottom hairline. Runs inside the lanes clip and the content
+// translate, so plain content-space rects are enough (row bands use
+// laneRect's y geometry; the x extent covers the full scrollable width).
+void TimelinePanel::drawLaneBands(QPainter &painter) const {
+    if (!model_) {
+        return;
+    }
+    const int trackCount = model_->trackCount();
+    for (int r = 0; r < trackCount; ++r) {
+        const fc::Track *track = model_->trackAt(r);
+        if (!track) {
+            continue;
+        }
+        const QRect lane = laneRect(r);
+        painter.fillRect(lane,
+                         track->isAudio ? kAudioTrack : (track->isText ? kTextTrack : kVideoTrack));
+        painter.setPen(ui::withAlpha(ui::kLine, 120));
+        painter.drawLine(lane.left(), lane.bottom(), lane.right(), lane.bottom());
     }
 }
 
@@ -877,9 +954,11 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
     // Content coordinates: the ruler extends over the whole scrollable
     // extent (the viewport clip culls what is off-screen).
     const QRect rulerRect(kHeaderWidth, contentTop(), laneContentWidth(), kRulerHeight);
-    painter.fillRect(rulerRect, ui::color(ui::kSurface2)); // #90: panel-tone band
-    // Major ticks "as today" (0x9A9A9A ~ kTextDim) + 11 px labels (#90).
-    painter.setPen(ui::color(ui::kTextDim));
+    painter.fillRect(rulerRect, QColor(0x12, 0x12, 0x12)); // round 5: darker band
+    painter.setPen(ui::color(ui::kLine));
+    painter.drawLine(rulerRect.left(), rulerRect.bottom(), rulerRect.right(), rulerRect.bottom());
+    // Major ticks + 11 px labels (#90/#176).
+    painter.setPen(QColor(0x52, 0x52, 0x52));
     QFont labelFont = painter.font();
     labelFont.setPixelSize(ui::kFontSmall);
     painter.setFont(labelFont);
@@ -911,11 +990,13 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
         if (x < rulerRect.left() || x > rulerRect.right()) {
             continue;
         }
-        painter.drawLine(x, rulerRect.bottom() - 8, x, rulerRect.bottom());
+        painter.drawLine(x, rulerRect.bottom() - 8, x, rulerRect.bottom() - 1);
         const int64_t frames = static_cast<int64_t>(std::llround(t * fps_));
         // #176: tabular figures keep tick-adjacent timecodes in rhythm.
+        painter.setPen(ui::color(ui::kTextDim));
         paintTabularText(painter, QRect(x + 3, rulerRect.top(), 96, rulerRect.height()),
                          QString::fromStdString(fc::Timecode::fromFrames(frames, rate).toString()));
+        painter.setPen(QColor(0x52, 0x52, 0x52));
     }
 
     // Minor ticks (#19): sub-label rhythm with no labels. Fifth of the
@@ -928,13 +1009,13 @@ void TimelinePanel::drawRuler(QPainter &painter) const {
         minor = 1.0;
     }
     if (minor > 0.0) {
-        painter.setPen(ui::withAlpha(ui::kText, 51)); // #90: 20% minor ticks
+        painter.setPen(QColor(0x3A, 0x3A, 0x3A)); // round 5: quieter minor ticks
         for (double t = 0.0; t <= duration_; t += minor) {
             const int mx = frameToX(static_cast<int64_t>(std::llround(t * fps_)));
             if (mx < rulerRect.left() || mx > rulerRect.right()) {
                 continue;
             }
-            painter.drawLine(mx, rulerRect.bottom() - 4, mx, rulerRect.bottom());
+            painter.drawLine(mx, rulerRect.bottom() - 4, mx, rulerRect.bottom() - 1);
         }
     }
 }
@@ -1009,77 +1090,155 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         const bool selected = clip.id == selectedClipId_;
         const bool hovered = !selected && clip.id == hoveredClipId_; // #200
 
-        // #89 visual language: the base lane fills stay; selection
-        // brightens the fill 8% and adds a 2 px accent outline (no more
-        // full-accent body, no dotted focus rect). #200: a hovered
-        // clip brightens 4% instead (never stacked with selection).
-        QColor fill = clip.isText ? kTextClipFill : kClipFill;
+        // #89 selection language, round-5 palette: selection brightens
+        // the fill 8% and draws the WHITE outline + corner handles; a
+        // hovered clip brightens 4% (never stacked with selection).
+        QColor fill = clip.isText ? kTextClipFill : (track->isAudio ? kAudioClipFill : kClipFill);
         if (selected) {
             fill = ui::mix(fill, QColor(0xFF, 0xFF, 0xFF), 0.08);
         } else if (hovered) {
             fill = ui::mix(fill, QColor(0xFF, 0xFF, 0xFF), 0.04);
         }
-        QColor text(0xE8, 0xE8, 0xE8);
-        // Locked / muted / non-solo lanes render dimmed.
+        // Locked / muted / non-solo lanes render dimmed: one painter
+        // opacity covers body, content, outline and chips alike.
         const double dim = trackDimFactor(clip.trackIndex);
-        if (dim < 1.0) {
-            fill = QColor(fill.red(), fill.green(), fill.blue(), int(fill.alpha() * dim));
-            text = QColor(text.red(), text.green(), text.blue(), int(text.alpha() * dim));
-        }
-        // Edge affordance: thin lighter bars where a trim/roll drag can
-        // start, only on editable lanes (painted under the body, as
-        // before).
-        if (!track->locked) {
-            QColor edge(0x9F, 0xC7, 0xE0, int(200 * dim));
-            painter.fillRect(rect.left(), rect.top(), 3, rect.height(), edge);
-            painter.fillRect(rect.right() - 3, rect.top(), 3, rect.height(), edge);
-        }
-        // 6 px rounded body + 1 px inner hairline (kLine at 60% alpha).
+        painter.setOpacity(dim);
+
+        // 6 px rounded body - the shape every content layer clips to.
         QPainterPath body;
         body.addRoundedRect(rect, 6, 6);
         painter.setPen(Qt::NoPen);
         painter.setBrush(fill);
         painter.drawPath(body);
+
+        // ---- content layers, clipped to the body ----
+        painter.save();
+        painter.setClipPath(body);
+        if (clip.isText) {
+            // Violet body with a soft vertical sheen.
+            QLinearGradient sheen(rect.topLeft(), QPointF(rect.left(), rect.bottom()));
+            sheen.setColorAt(0.0, QColor(0xFF, 0xFF, 0xFF, 26));
+            sheen.setColorAt(1.0, QColor(0x00, 0x00, 0x00, 40));
+            painter.fillRect(rect, sheen);
+        } else if (track->isAudio) {
+            // REAL waveform (round 5): the worker's peak buckets mapped
+            // over the clip's SOURCE extent. At high zoom-out each pixel
+            // column maxes every bucket it covers; at high zoom-in
+            // buckets repeat - both reads stay honest to the data.
+            auto it = waveforms_.find(clip.sourcePath);
+            if (it != waveforms_.end() && !it->second.peaks.isEmpty() &&
+                it->second.durationSec > 0.0) {
+                const WaveformVisual &wf = it->second;
+                const int n = wf.peaks.size();
+                const double peaksPerSec = double(n) / std::max(0.001, wf.durationSec);
+                const double t0 = double(clip.sourceInFrames) / fps_;
+                const double t1 = t0 + double(clip.durationFrames()) * clip.rate / fps_;
+                const double span = std::max(1e-9, t1 - t0);
+                const int cy = (rect.top() + rect.bottom()) / 2;
+                const int halfH = std::max(2, rect.height() / 2 - 3);
+                painter.setPen(QPen(kWaveform, 1));
+                const int bodyW = std::max(1, rect.width());
+                for (int x = rect.left() + 1; x < rect.right(); x += 2) {
+                    const double f0 = double(x - rect.left()) / double(bodyW);
+                    const double f1 = double(x - rect.left() + 2) / double(bodyW);
+                    const int i0 = qBound(0, int((t0 + f0 * span) * peaksPerSec), n - 1);
+                    const int i1 = qBound(0, int((t0 + f1 * span) * peaksPerSec), n - 1);
+                    float peak = 0.0f;
+                    for (int i = i0; i <= i1; ++i) {
+                        peak = std::max(peak, wf.peaks[i]);
+                    }
+                    const int h = qMax(1, int(std::lround(peak * halfH)));
+                    painter.drawLine(x, cy - h, x, cy + h);
+                }
+            } else {
+                // Fallback while the worker decodes: the old three
+                // honest tone hairlines (a flat texture, NOT a fake
+                // waveform).
+                const QRectF band = QRectF(rect).adjusted(3, 8, -3, -8);
+                painter.setPen(QPen(ui::withAlpha(ui::kText, 30), 1));
+                for (int i = 0; i < 3; ++i) {
+                    const qreal y = band.top() + band.height() * (2 * i + 1) / 6.0;
+                    painter.drawLine(QPointF(band.left(), y), QPointF(band.right(), y));
+                }
+            }
+        } else {
+            // FILMSTRIP (round 5): the worker's strip tiles the WHOLE
+            // source; the clip draws the segment its [in, out] range
+            // actually shows, scrolled by the source in-point.
+            auto it = strips_.find(clip.sourcePath);
+            if (it != strips_.end() && !it->second.image.isNull()) {
+                const StripVisual &vis = it->second;
+                const qreal dpr =
+                    vis.image.devicePixelRatio() > 0.0 ? vis.image.devicePixelRatio() : 1.0;
+                const qreal logicalW = qreal(vis.image.width()) / dpr;
+                double srcStart = 0.0;
+                if (vis.durationSec > 0.0) {
+                    srcStart = double(clip.sourceInFrames) / fps_;
+                }
+                const double pxPerSec = logicalW / std::max(0.001, vis.durationSec);
+                int x = rect.left() - qRound(srcStart * pxPerSec);
+                const int stride = qMax(1, qRound(logicalW));
+                for (; x < rect.right(); x += stride) {
+                    painter.drawImage(QPoint(x, rect.top()), vis.image);
+                }
+            }
+            // Dark top gradient so the clip name reads on any footage.
+            QLinearGradient grad(QPointF(rect.left(), rect.top()),
+                                 QPointF(rect.left(), rect.top() + 18));
+            grad.setColorAt(0.0, QColor(0, 0, 0, 150));
+            grad.setColorAt(1.0, QColor(0, 0, 0, 0));
+            painter.fillRect(rect, grad);
+        }
+        painter.restore();
+
+        // 1 px inner hairline keeps the body edge on the lane band.
         QPainterPath innerHairline;
         innerHairline.addRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5);
         painter.setPen(QPen(ui::withAlpha(ui::kLine, 153), 1));
         painter.setBrush(QBrush());
         painter.drawPath(innerHairline);
-        // #171 audio texture: three honest tone hairlines (a flat
-        // texture, NOT a fake waveform) evenly distributed inside the
-        // body, inset 8 px top/bottom. Painted FIRST so the label and
-        // chips stay readable where they collide.
-        if (track->isAudio) {
-            const QRectF band = QRectF(rect).adjusted(3, 8, -3, -8);
-            painter.setPen(QPen(ui::withAlpha(ui::kText, int(30 * dim)), 1));
-            for (int i = 0; i < 3; ++i) {
-                const qreal y = band.top() + band.height() * (2 * i + 1) / 6.0;
-                painter.drawLine(QPointF(band.left(), y), QPointF(band.right(), y));
-            }
-        }
+
+        // Clip label: top-left, elided, over the content layers
+        // (CapCut-style in-clip title).
+        QFont labelFont = painter.font();
+        labelFont.setPixelSize(10);
+        painter.setFont(labelFont);
+        const QFontMetrics labelMetrics(labelFont);
+        const QString labelText = labelMetrics.elidedText(
+            QString::fromStdString(clip.label), Qt::ElideRight, std::max(12, rect.width() - 12));
+        painter.setPen(kLabel);
+        painter.drawText(rect.adjusted(6, 1, -6, 0), Qt::AlignLeft | Qt::AlignVCenter, labelText);
+        painter.setFont(QFont());
+
         if (selected) {
-            // 2 px accent outline; its alpha follows the lane dim so a
-            // selected clip on a locked lane dims with the rest.
-            painter.setPen(QPen(ui::withAlpha(ui::kAccent, int(255 * dim)), 2));
+            // CapCut selection: 2 px WHITE outline + four corner
+            // handles (the trim targets the cursor already finds).
+            painter.setPen(QPen(kSelectionWhite, 2));
+            painter.setBrush(QBrush());
             painter.drawPath(body);
+            painter.setPen(QPen(QColor(0, 0, 0, 90), 1));
+            painter.setBrush(kSelectionWhite);
+            const QPointF corners[4] = {
+                QPointF(rect.left(), rect.top()), QPointF(rect.right(), rect.top()),
+                QPointF(rect.left(), rect.bottom()), QPointF(rect.right(), rect.bottom())};
+            for (const QPointF &corner : corners) {
+                painter.drawEllipse(corner, 3.5, 3.5);
+            }
         } else if (hovered) {
-            // #200: 1 px accent outline at 120 alpha (dim-scaled like
-            // every other lane element).
-            painter.setPen(QPen(ui::withAlpha(ui::kAccent, int(120 * dim)), 1));
+            // #200: 1 px white outline at low alpha.
+            painter.setPen(QPen(QColor(255, 255, 255, 96), 1));
+            painter.setBrush(QBrush());
             painter.drawPath(body);
         }
-        painter.setPen(text);
-        painter.drawText(rect.adjusted(6, 0, -6, 0), Qt::AlignLeft | Qt::AlignVCenter,
-                         QString::fromStdString(clip.label));
         // Speed chip (#9): corner badge on rate-adjusted clips; double-
         // click opens the Speed / Duration dialog (mouseDoubleClickEvent).
         if (std::fabs(clip.rate - 1.0) > 1e-3) {
             const QRect chip = speedChipRect(clip, clip.trackIndex);
-            painter.setBrush(ui::tint(ui::kWarning));
-            painter.setPen(ui::color(ui::kWarning));
-            painter.drawRoundedRect(chip, 6, 6); // #89: 6 px mini-pill
-            painter.setPen(ui::color(ui::kText));
-            painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 7));
+            painter.setBrush(QColor(0, 0, 0, 150));
+            painter.setPen(Qt::NoPen);
+            painter.drawRoundedRect(chip, 7, 7);
+            painter.setPen(kLabel);
+            painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 7, QFont::Bold));
             QString rateText = QString::number(clip.rate, 'f', 2);
             while (rateText.endsWith(QLatin1Char('0'))) {
                 rateText.chop(1);
@@ -1095,9 +1254,9 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         // follows the selection (existing wiring).
         if (!clip.effectStack.empty()) {
             const QRect chip(rect.right() - 42, rect.bottom() - 15, 40, 13);
-            painter.setBrush(ui::color(ui::kSurface3));
-            painter.setPen(ui::color(ui::kLine));
-            painter.drawRoundedRect(chip, 6, 6); // #89: 6 px mini-pill
+            painter.setBrush(QColor(0, 0, 0, 150));
+            painter.setPen(Qt::NoPen);
+            painter.drawRoundedRect(chip, 6, 6);
             painter.setPen(ui::color(ui::kTextDim));
             painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 7, QFont::Bold));
             painter.drawText(chip, Qt::AlignCenter,
@@ -1107,13 +1266,14 @@ void TimelinePanel::drawClips(QPainter &painter) const {
         // teal "T" badge on text clips (right-aligned, clear of the
         // speed chip above and the fx chip below).
         if (clip.isText) {
-            QColor tColor(0x1A, 0xBC, 0x9C, int(255 * dim));
+            QColor tColor(0x1A, 0xBC, 0x9C);
             painter.setPen(tColor);
             painter.setFont(QFont(QString::fromLatin1("Segoe UI"), 8, QFont::Bold));
             painter.drawText(QRect(rect.right() - 56, rect.top(), 26, rect.height()),
                              Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("T"));
             painter.setFont(QFont()); // restore default for the next clip
         }
+        painter.setOpacity(1.0); // the dim factor is per-clip only
     }
 }
 
@@ -1889,11 +2049,12 @@ void TimelinePanel::syncToolButtons() {
 }
 
 // The header cell's L/M/S box under pos (-1 = none), scroll-aware:
-// the box rects mirror drawHeaderColumn's geometry exactly.
+// the box rects mirror drawHeaderColumn's geometry exactly (round 5:
+// the boxes live at cell top+32..top+48).
 int TimelinePanel::headerBoxAt(const QPoint &pos, int row) const {
     const int cellTop = contentTop() + kRulerHeight + row * kTrackHeight - scrollY_;
     const int relY = pos.y() - cellTop;
-    if (relY < 22 || relY > 38) {
+    if (relY < 32 || relY > 48) {
         return -1; // the L/M/S boxes live in the lower half of the cell
     }
     if (pos.x() < 10 || pos.x() > 10 + 3 * 26 - 4) {

@@ -60,6 +60,45 @@ version stays at 0.1.0 until the first public build.
   switch, loop playback, expanded keyboard map, About shows the REAL
   runtime Qt version, toasts for export/proxy/delete.
 
+### Round 5 (owner-reported: timeline UI, player mode, audio still silent)
+
+- **CapCut-style timeline.** The Pro-mode timeline got the reference
+  look: chunkier 56 px lanes with per-kind near-black striping (video
+  slate / audio green / text violet), quiet dark track headers with a
+  lane-kind glyph + plain name (the rainbow name chips are gone),
+  a darker ruler, and the classic white playhead with a rounded badge
+  + pointed tip. Clips now paint REAL content: video clips show a
+  FILMSTRIP of the source (the segment the clip's in/out range actually
+  covers, tiled at 2x DPR so it stays sharp), audio clips show a REAL
+  WAVEFORM (100 peak buckets per second, peak-normalized, mapped over
+  the clip's rate-scaled source extent), and selection is the CapCut
+  white outline with four corner handles. The in-clip label sits on a
+  dark gradient so it reads on any footage; speed/fx chips became
+  translucent dark pills.
+- **Media visual worker.** The filmstrips and waveforms are honest
+  data, produced by a dedicated low-priority worker thread (one
+  sequential job queue, 300 ms pump, its own AudioDecoder/VideoDecoder
+  instances - the playback decoders are never touched). Jobs queue
+  from the model-mutation funnel, resolve the proxy when one exists,
+  and key results by the SOURCE path so every clip of one media
+  shares the asset. Audio-only files skip the strip; video without
+  audio skips the waveform; until a visual arrives clips fall back to
+  their flat fills (never a fake waveform).
+- **Player mode hardening (the third "audio is silent" round).** The
+  WASAPI render loop now waits with a 10 ms ceiling instead of 200 ms:
+  a healthy event-driven endpoint still wakes on the buffer event
+  immediately, but a Windows 7 driver that NEVER signals it now renders
+  as a smooth 100 Hz polling loop instead of 5 Hz chunks or dead
+  silence. A full buffer that stays full for ~1 s while "playing" is
+  detected as a stalled engine - the device tears down and the next
+  play reopens it fresh (the failover that used to be an app restart).
+- **Audio state is on screen.** A permanent status-bar chip mirrors the
+  preview's live state: green "Audio 48 kHz" while rendering, amber
+  when the device stopped reporting, red with the failure reason as
+  the tooltip (device refused to start / endpoint vanished / engine
+  stopped consuming / the mixer's first source error). Silence can no
+  longer be a dead end: the screen says what happened.
+
 ### Brand
 
 - The Fc mark (After-Effects-style: charcoal rounded tile, accent letters)

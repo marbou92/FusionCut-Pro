@@ -2,6 +2,12 @@
 
 #include <QWidget>
 
+#include <QImage>
+#include <QVector>
+
+#include <map>
+#include <string>
+
 #include "timeline_model.h"
 
 class QResizeEvent;
@@ -56,6 +62,20 @@ public:
     // ripple edit toggle - when on, MainWindow routes delete /
     // end-trim through the model ripple variants (gaps close).
     bool isRippleEnabled() const { return rippleEnabled_; }
+
+    // Round 5 CapCut-style clip visuals, keyed by SOURCE path (clips of
+    // one media share the asset; the maps live until clearMediaVisuals
+    // or a replacement with the same key). MainWindow's visual worker
+    // produces them in the background; the panel just repaints.
+    // - strip: an aspect-filled filmstrip covering the WHOLE source
+    //   duration at 2x devicePixelRatio; a clip tiles the segment its
+    //   [in, out] range actually shows.
+    // - waveform: 100 peak buckets per second, peak-normalized 0..1.
+    void setMediaStrip(const QString &path, const QImage &strip, double durationSeconds);
+    void setMediaWaveform(const QString &path, const QVector<float> &peaks, double durationSeconds);
+    // Drop every visual asset (project close / model swap to a foreign
+    // project); clips fall back to their flat fills until assets arrive.
+    void clearMediaVisuals();
 
     // #180: nudge the selected clip by `frames` timeline frames when
     // the destination is free (MainWindow wires Alt+Left/Right). The
@@ -186,6 +206,9 @@ private:
     void fitToSequence();
     void drawHeaderColumn(QPainter &painter) const;
     void drawRuler(QPainter &painter) const;
+    // Per-row lane bands behind the clips (video / audio / text tints,
+    // CapCut-style dark striping) + the row hairlines.
+    void drawLaneBands(QPainter &painter) const;
     void drawClips(QPainter &painter) const;
     // cut transition markers (the window box on the boundary
     // between two adjacent clips, with an X cross).
@@ -244,6 +267,18 @@ private:
     // Position the manual children that live inside the painted band:
     // the vertical scrollbar hugs the right edge of the lanes area.
     void layoutChrome();
+
+    // ---- round 5 media visuals (keyed by source path) ----
+    struct StripVisual {
+        QImage image;             // device pixels carry a 2.0 DPR
+        double durationSec = 0.0; // source seconds the strip covers
+    };
+    struct WaveformVisual {
+        QVector<float> peaks; // 100 buckets / second, 0..1
+        double durationSec = 0.0;
+    };
+    std::map<std::string, StripVisual> strips_;
+    std::map<std::string, WaveformVisual> waveforms_;
 
     const fc::TimelineModel *model_ = nullptr;
     double duration_ = 10.0;

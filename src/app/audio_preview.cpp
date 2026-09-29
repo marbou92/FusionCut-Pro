@@ -90,6 +90,10 @@ struct AudioPreview::Impl {
     std::mutex mutex;
     std::condition_variable ready; // probe + begin/stop handshakes
     bool probeDone = false;
+    // Last failure reason (round 5), guarded by `mutex`: written by the
+    // render thread's fail() exits, copied by lastError() on the GUI
+    // thread - never touched lock-free.
+    std::string lastError;
     // Parked (idle) vs rendering: the begin/stop handshakes wait on the
     // transitions. Guarded by `mutex` for the CV waits, but ALSO read
     // lock-free (stop()'s fast path, begin()'s guard), so atomics.
@@ -207,6 +211,23 @@ AudioPreview::~AudioPreview() {
     release();
 }
 
+// Every render-thread failure exit routes through here: the atomic
+// flag tells the transport to stop trusting the audio clock, the
+// reason lands in the status surface (MainWindow's audio chip) so a
+// silent timeline is diagnosable from the screen.
+void AudioPreview::fail(const char *why) {
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->lastError = why ? why : "audio device failure";
+    }
+    failed_ = true;
+}
+
+std::string AudioPreview::lastError() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->lastError;
+}
+
 bool AudioPreview::probe(int &sampleRate, int &channels) {
     // Fast path: the device from a previous run is still open and
     // healthy - hand back the cached geometry without touching COM.
@@ -227,6 +248,10 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
     impl_->idle = true;
     impl_->playing = false;
     impl_->playedFrames = 0;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->lastError.clear();
+    }
     failed_ = false; // a fresh run starts optimistic (the device may be back)
     // The render thread owns every COM object (created, used, and
     // released there - a clean apartment story, nothing cross-thread).
@@ -361,7 +386,8 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
             impl_->beginFlag = false;
 
             if (FAILED(impl_->client->Start())) {
-                failed_ = true; // device death while parked: force a reopen next probe
+                fail("audio device refused to start"); // device death while parked: reopen next
+                                                       // probe
                 break;
             }
             impl_->playing = true;
@@ -372,23 +398,30 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
             }
 
             // ---- render loop ----
+            // Hybrid wait (round 5): the event wakes a healthy endpoint
+            // the instant a period frees up; the 10 ms ceiling turns a
+            // driver that NEVER signals the event (a real Windows 7
+            // class - the old 200 ms ceiling made it choppy at 5 Hz or
+            // dead-silent) into a smooth 100 Hz polling render loop.
+            // One GetCurrentPadding per 10 ms is negligible work.
             bool dead = false;
             int64_t submitted = 0;
+            int fullPolls = 0;
             std::vector<float> scratch;
             while (!impl_->exitFlag.load() && !impl_->stopFlag.load()) {
                 HANDLE waits[2] = {impl_->controlEvent, impl_->streamEvent};
-                const DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 200);
+                const DWORD rc = WaitForMultipleObjects(2, waits, FALSE, 10);
                 if (rc == WAIT_OBJECT_0) {
                     break; // control: stop
                 }
                 if (rc != WAIT_OBJECT_0 + 1 && rc != WAIT_TIMEOUT) {
-                    failed_ = true; // unexpected: bail out rather than spin
+                    fail("audio wait failed"); // unexpected: bail out rather than spin
                     dead = true;
                     break;
                 }
                 UINT32 padding = 0;
                 if (FAILED(impl_->client->GetCurrentPadding(&padding))) {
-                    failed_ = true; // endpoint gone / format changed
+                    fail("audio endpoint vanished"); // endpoint gone / format changed
                     dead = true;
                     break;
                 }
@@ -396,8 +429,21 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                 const UINT32 available =
                     padding < impl_->bufferFrames ? impl_->bufferFrames - padding : 0;
                 if (available == 0) {
+                    // Buffer FULL. A healthy shared-mode endpoint drains
+                    // a period within milliseconds, so staying full for
+                    // ~100 consecutive polls (about 1 s) means the audio
+                    // engine never consumes - the "accepted Initialize
+                    // and then went quiet" driver class that reads as
+                    // dead silence to the user. Fail over: tear down;
+                    // the next probe() reopens the endpoint fresh.
+                    if (++fullPolls > 100) {
+                        fail("audio engine stalled - the output device stopped consuming");
+                        dead = true;
+                        break;
+                    }
                     continue;
                 }
+                fullPolls = 0;
                 const int frames = static_cast<int>(available);
                 const int ch = impl_->channels;
                 scratch.assign(size_t(frames) * ch, 0.0f);
@@ -419,7 +465,8 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                 }
                 BYTE *dst = nullptr;
                 if (FAILED(impl_->render->GetBuffer(frames, &dst))) {
-                    failed_ = true; // the render pipeline is wedged: no submission
+                    fail("audio render buffer refused"); // the render pipeline is wedged: no
+                                                         // submission
                     dead = true;
                     break;
                 }
@@ -443,7 +490,8 @@ bool AudioPreview::probe(int &sampleRate, int &channels) {
                     }
                 }
                 if (FAILED(impl_->render->ReleaseBuffer(frames, 0))) {
-                    failed_ = true; // the samples never reached the device
+                    fail("audio samples rejected by the device"); // the samples never reached the
+                                                                  // device
                     dead = true;
                     break;
                 }
@@ -594,6 +642,12 @@ AudioPreview::AudioPreview() : impl_(new Impl) {}
 
 AudioPreview::~AudioPreview() {
     release();
+}
+
+void AudioPreview::fail(const char *) {} // never called without a render thread
+
+std::string AudioPreview::lastError() const {
+    return {}; // no audio output layer on this platform
 }
 
 bool AudioPreview::probe(int &sampleRate, int &channels) {

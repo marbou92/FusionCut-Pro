@@ -42,6 +42,8 @@ add_executable(FusionCutPro WIN32
     audio_timeline.h
     audio_preview.cpp
     audio_preview.h
+    media_visual_worker.cpp
+    media_visual_worker.h
     export_dialog.cpp
     export_dialog.h
     export_progress.cpp

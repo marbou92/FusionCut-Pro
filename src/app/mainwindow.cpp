@@ -52,6 +52,7 @@
 #include "exporter.h"
 #include "ffmpeg_wrappers.h"
 #include "media_probe.h"
+#include "media_visual_worker.h"
 #include "mixer_panel.h"
 #include "preview_canvas.h"
 #include "project_format.h"
@@ -341,6 +342,27 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildProWorkspace();
     buildQuickWorkspace();
     updateQuickDetails(); // Details panel starts at the untitled defaults
+
+    // Round-5 timeline visual pump: one low-priority thread turns
+    // imported sources into the timeline's filmstrips + waveforms.
+    // Jobs are queued from the model-mutation funnel and popped one
+    // per 300 ms tick, so a batch of imports never floods the thread.
+    visualThread_ = new QThread(this);
+    visualWorker_ = new fc::MediaVisualWorker; // no parent: moves threads
+    visualWorker_->moveToThread(visualThread_);
+    connect(visualThread_, &QThread::finished, visualWorker_, &QObject::deleteLater);
+    connect(visualWorker_, &fc::MediaVisualWorker::stripReady, this,
+            [this](const QString &path, const QImage &strip, double durationSeconds) {
+                timeline_->setMediaStrip(path, strip, durationSeconds);
+            });
+    connect(visualWorker_, &fc::MediaVisualWorker::waveformReady, this,
+            [this](const QString &path, const QVector<float> &peaks, double durationSeconds) {
+                timeline_->setMediaWaveform(path, peaks, durationSeconds);
+            });
+    visualThread_->start();
+    visualPump_ = new QTimer(this);
+    visualPump_->setInterval(300);
+    connect(visualPump_, &QTimer::timeout, this, [this] { pumpTimelineVisuals(); });
     buildMenus();
     buildStatusBar();
     buildTray(); // #130: branded Windows tray icon (skipped when none)
@@ -370,6 +392,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             }
             statusBar()->showMessage(
                 tr("Audio source error: %1").arg(QString::fromStdString(pullError)), 8000);
+            updateAudioChip(); // the chip goes red with the same reason
         }
         // While the preview audio device runs, ITS consumed position is
         // the playhead's clock (a QTimer drifts with load; the audio
@@ -403,6 +426,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                 audioDeviceWarned_ = true;
                 statusBar()->showMessage(
                     tr("Audio device lost - playback continues on the system clock."), 8000);
+                updateAudioChip(); // amber: running but not consuming
             }
         }
         // The transport, timecode and timeline playhead follow the CLOCK
@@ -493,6 +517,13 @@ MainWindow::~MainWindow() {
         // thread's unbounded join fixed: a slow openQuiet on worker B
         // outliving the wait destroyed the worker under its thread).
         decodeThreadB_->wait();
+    }
+    if (visualThread_) {
+        // Round-5 visual pump: the worker may be mid-decode on a strip
+        // or a waveform - quit + unbounded join, mirroring the decode
+        // threads (its jobs end within one source's worth of work).
+        visualThread_->quit();
+        visualThread_->wait();
     }
     if (decodeThread_) {
         decodeThread_->quit();
@@ -1371,10 +1402,16 @@ void MainWindow::buildStatusBar() {
     statusDirty_ = new QLabel(this);
     statusDirty_->setToolTip(tr("Project has unsaved changes"));
     statusDirty_->setText(tr("\u25CB"));
+    // Round-5 audio state chip: gray idle / green rendering / red
+    // failure, the reason as the tooltip. updateAudioChip() drives it.
+    audioChip_ = new QLabel(this);
+    audioChip_->setToolTip(tr("Preview audio state"));
+    updateAudioChip();
     statusBar()->addPermanentWidget(statusVersion_);
     statusBar()->addPermanentWidget(statusSpinner_);
     statusBar()->addPermanentWidget(statusResolution_);
     statusBar()->addPermanentWidget(statusDirty_);
+    statusBar()->addPermanentWidget(audioChip_);
 }
 
 // Windows 7 tray (#130): the branded icon replaces the default
@@ -1946,12 +1983,115 @@ void MainWindow::updateSequenceDuration() {
     // back so a trim/delete does not make the timecode jump to 00:00.
     transport_->setPosition(playhead_);
     quickView_->setPosition(playhead_);
+    // Round 5: every model mutation funnels here - queue filmstrip /
+    // waveform jobs for any clip source the visuals do not cover yet.
+    enqueueTimelineVisuals();
     // every MainWindow model mutation funnels through here;
     // keep the transition editor in sync with pruned/clamped transitions.
     syncTransitionEditor();
     updateQuickDetails(); // trims/extends show up in the Details duration
     // same funnel marks the project dirty.
     markDirty();
+}
+
+// ---- round 5: timeline media visuals + audio state chip ----
+
+void MainWindow::enqueueTimelineVisuals() {
+    if (!visualWorker_ || !visualPump_) {
+        return;
+    }
+    for (const fc::Clip &clip : model_.clips()) {
+        if (clip.isText || clip.sourcePath.empty()) {
+            continue; // text clips carry no media asset
+        }
+        const QString path = QString::fromStdString(clip.sourcePath);
+        if (visualQueued_.contains(path)) {
+            continue; // already queued or already delivered
+        }
+        visualQueued_.insert(path);
+        visualQueue_.append(path);
+    }
+    if (!visualQueue_.isEmpty() && !visualPump_->isActive()) {
+        visualPump_->start();
+    }
+}
+
+void MainWindow::pumpTimelineVisuals() {
+    if (visualQueue_.isEmpty()) {
+        visualPump_->stop();
+        return;
+    }
+    const QString path = visualQueue_.takeFirst();
+    // Decode path: the SAME proxy resolver the video/audio pipelines
+    // use (the strip matches what the monitor shows); the visual is
+    // keyed by the SOURCE path the timeline's clips carry.
+    QString decodePath = path;
+    double duration = 0.0;
+    if (projectPanel_) {
+        const int index = projectPanel_->library().indexOfPath(path);
+        if (index >= 0) {
+            const fc::MediaItem *item = projectPanel_->library().at(index);
+            if (item->hasProxy()) {
+                decodePath = item->proxyPath;
+            }
+            duration = item->durationSeconds;
+        }
+    }
+    QMetaObject::invokeMethod(visualWorker_, "makeStrip", Q_ARG(QString, path),
+                              Q_ARG(QString, decodePath), Q_ARG(double, duration));
+    QMetaObject::invokeMethod(visualWorker_, "makeWaveform", Q_ARG(QString, path),
+                              Q_ARG(QString, decodePath));
+}
+
+void MainWindow::updateAudioChip() {
+    if (!audioChip_) {
+        return;
+    }
+    // Colors: green rendering / amber suspicious / red failure / gray
+    // idle - the same palette the rest of the app signals with.
+    static const char *const kGreen = "#2ECC71";
+    static const char *const kAmber = "#FFB020";
+    static const char *const kRed = "#E74C3C";
+    static const char *const kGray = "#777777";
+    const char *dot = kGray;
+    QString text = tr("Audio");
+    QString tip = tr("Preview audio idle");
+    QString reason;
+    if (audioPreview_) {
+        if (audioPreview_->failed()) {
+            reason = QString::fromStdString(audioPreview_->lastError());
+        }
+        if (audioPreview_->healthy()) {
+            dot = kGreen;
+            text = tr("Audio %1 Hz").arg(audioDeviceRate_ > 0 ? audioDeviceRate_ : 48000);
+            tip = tr("Preview audio is rendering to the output device");
+        } else if (audioPreview_->running()) {
+            dot = kAmber;
+            tip = tr("The audio device stopped reporting - playback follows the system clock");
+        } else if (audioPreview_->failed()) {
+            dot = kRed;
+            tip = reason.isEmpty() ? tr("Preview audio failed") : reason;
+        } else if (!reason.isEmpty()) {
+            // Parked between runs (the round-4 persistent device), but
+            // the last run left a failure reason - keep it visible.
+            dot = kRed;
+            tip = reason;
+        }
+    }
+    // A mixer pull / source error outranks every state: the timeline
+    // HAS audio but it will not decode - the exact report this chip
+    // exists to surface.
+    {
+        std::lock_guard<std::mutex> lock(audioErrorMutex_);
+        if (!audioPullError_.empty()) {
+            dot = kRed;
+            reason = QString::fromStdString(audioPullError_);
+            tip = reason;
+        }
+    }
+    audioChip_->setText(QStringLiteral("<span style=\"color:%1\">\u25CF</span> %2")
+                            .arg(QLatin1String(dot), text.toHtmlEscaped()));
+    audioChip_->setToolTip(tip);
 }
 
 void MainWindow::updateQuickDetails() {
@@ -2564,8 +2704,10 @@ void MainWindow::startAudioPreview() {
             statusBar()->showMessage(tr("Audio preview unavailable - no usable output device."),
                                      8000);
         }
-        return; // no usable audio output on this machine
+        updateAudioChip(); // the chip shows the failure state
+        return;            // no usable audio output on this machine
     }
+    audioDeviceRate_ = rate;
     previewMixer_ = std::make_unique<fc::AudioWindowMixer>(rate, channels);
     previewMixer_->setMasterGain(fc::audioDbToLinear(model_.masterGainDb()));
     audioStartSeconds_ = playhead_;
@@ -2605,6 +2747,7 @@ void MainWindow::startAudioPreview() {
                                     "without sound."),
                                  8000);
     }
+    updateAudioChip(); // green when rendering, red + reason otherwise
 }
 
 void MainWindow::stopAudioPreview() {
@@ -2620,6 +2763,7 @@ void MainWindow::stopAudioPreview() {
     } else {
         previewMixer_.reset();
     }
+    updateAudioChip();
 }
 
 void MainWindow::importCaptions() {
